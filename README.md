@@ -7,7 +7,7 @@ Email: ban-m@g.ecc.u-tokyo.ac.jp
 ## Install
 
 1. Install [Rust](https://www.rust-lang.org/).
-2. `git clone https://github.com/ban-m/kiley.git`
+2. `git clone --recursive https://github.com/ban-m/kiley.git`
 3. `cd kiley && cargo build --release` would create `kiley` binary under `./target/release`
 4. `cargo test --release -- --nocapture` if you want.
 
