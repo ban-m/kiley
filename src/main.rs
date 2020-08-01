@@ -32,7 +32,7 @@ fn main() {
             Arg::with_name("subchunk_size")
                 .long("subchunk_size")
                 .takes_value(true)
-                .default_value(&"10")
+                .default_value(&"5")
                 .help("Size of a subchunk"),
         )
         .arg(
