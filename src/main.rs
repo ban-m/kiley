@@ -17,7 +17,7 @@ fn main() {
             Arg::with_name("read_type")
                 .long("read_type")
                 .takes_value(true)
-                .default_value(&"CCS")
+                .default_value(&"CLR")
                 .possible_values(&["CCS", "CLR", "ONT"])
                 .help("Read type. CCS, CLR, or ONT."),
         )
