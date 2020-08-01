@@ -1,6 +1,6 @@
 use bio::io::fasta;
 use clap::{App, Arg};
-
+use kiley::consensus;
 fn main() {
     let matches = App::new("kiley")
         .version("0.1")
@@ -62,27 +62,7 @@ fn main() {
         .filter_map(|e| e.ok())
         .collect();
     let input: Vec<_> = input.iter().map(|e| e.seq()).collect();
-    let consensus = consensus(&input, seed, subchunk_size, repeat_num);
+    let read_type = matches.value_of("read_type").unwrap();
+    let consensus = consensus(&input, seed, subchunk_size, repeat_num, read_type);
     println!("{}", String::from_utf8_lossy(&consensus));
-}
-
-use poa_hmm::POA;
-use rand::seq::*;
-use rand::SeedableRng;
-use rand_xoshiro::Xoshiro256StarStar;
-
-fn consensus(seqs: &[&[u8]], seed: u64, subchunk: usize, repnum: usize) -> Vec<u8> {
-    if seqs.len() <= 10 {
-        POA::from_slice_default(&seqs).consensus()
-    } else {
-        let subchunks = repnum * seqs.len() / subchunk;
-        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
-        let subseq: Vec<_> = (0..subchunks)
-            .map(|_| {
-                let subchunk: Vec<_> = seqs.choose_multiple(&mut rng, subchunk).copied().collect();
-                POA::from_slice_default(&subchunk).consensus()
-            })
-            .collect();
-        POA::from_vec_default(&subseq).consensus()
-    }
 }

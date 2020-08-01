@@ -16,3 +16,5 @@ bio = "*"
 rand = "*"
 rand_xoshiro = "*"
 
+[dev-dependencies]
+rayon = "*"
