@@ -15,9 +15,9 @@ pub fn consensus(
         None => return vec![],
     };
     let rad = match read_type {
-        "CCS" => max_len / 10,
-        "CLR" => max_len / 3,
-        "ONT" => max_len / 3,
+        "CCS" => max_len / 20,
+        "CLR" => max_len / 10,
+        "ONT" => max_len / 10,
         _ => unreachable!(),
     };
     if seqs.len() <= 10 {
