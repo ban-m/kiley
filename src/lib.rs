@@ -23,9 +23,8 @@ pub fn consensus(
     if seqs.len() <= 10 {
         POA::from_slice_default(&seqs).consensus()
     } else {
-        let subchunks = repnum * seqs.len() / subchunk;
         let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
-        let subseq: Vec<_> = (0..subchunks)
+        let subseq: Vec<_> = (0..repnum)
             .map(|_| {
                 let subchunk: Vec<_> = seqs.choose_multiple(&mut rng, subchunk).copied().collect();
                 POA::from_slice_banded(&subchunk, (-1, -1, &score), rad).consensus()
@@ -69,7 +68,7 @@ mod test {
                     })
                     .collect();
                 let seqs: Vec<_> = seqs.iter().map(|e| e.as_slice()).collect();
-                let consensus = consensus(&seqs, cov as u64, 5, 3, "CLR");
+                let consensus = consensus(&seqs, cov as u64, 5, 10, "CLR");
                 let dist = edit_dist(&consensus, &template1);
                 eprintln!("LONG:{}", dist);
                 dist <= 2
@@ -101,7 +100,7 @@ mod test {
                     })
                     .collect();
                 let seqs: Vec<_> = seqs.iter().map(|e| e.as_slice()).collect();
-                let consensus = consensus(&seqs, cov as u64, 10, 3, "CLR");
+                let consensus = consensus(&seqs, cov as u64, 10, 10, "CLR");
                 let dist = edit_dist(&consensus, &template1);
                 eprintln!(
                     "{}\n{}\n{}",

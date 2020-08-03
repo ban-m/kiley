@@ -39,7 +39,7 @@ fn main() {
             Arg::with_name("repeat_num")
                 .long("repeat_num")
                 .takes_value(true)
-                .default_value(&"3")
+                .default_value(&"10")
                 .help("Repetition number."),
         )
         .get_matches();
