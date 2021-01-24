@@ -510,15 +510,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a86ed3f5f244b372d6b1a00b72ef7f8876d0bc6a78a4c9985c53614041512063"
 
 [[package]]
-name = "packed_simd"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a85ea9fc0d4ac0deb6fe7911d38786b32fc11119afd9e9d38b84ff691ce64220"
-dependencies = [
- "cfg-if",
-]
-
-[[package]]
 name = "petgraph"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -531,12 +522,11 @@ dependencies = [
 [[package]]
 name = "poa_hmm"
 version = "0.2.0"
+source = "git+https://github.com/ban-m/partial_order_alignment.git#bbd80769edcc1929783238036e2b937cae083772"
 dependencies = [
  "log",
- "packed_simd",
  "rand",
  "rand_xoshiro",
- "rayon",
 ]
 
 [[package]]
