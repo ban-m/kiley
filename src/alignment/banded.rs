@@ -5,8 +5,9 @@ struct DPTableu32<'a> {
     // The location of the minimum value on each diagonal slice.
     // In other words, if the centor[s]= (t,u), then,
     // the minimum "usual" DP value of DP[i][j][k] satisfying i + j + k = s is DP[s+t+u][t+u][u].
-    centor: Vec<(usize, usize)>,
+    centors: Vec<(usize, usize)>,
     dp: Vec<Vec<Vec<u32>>>,
+    rad: usize,
     xlen: usize,
     ylen: usize,
     zlen: usize,
@@ -16,31 +17,56 @@ struct DPTableu32<'a> {
 }
 
 impl<'a> DPTableu32<'a> {
-    fn new(xs: &'a [u8], ys: &'a [u8], zs: &'a [u8]) -> Self {
+    fn new(xs: &'a [u8], ys: &'a [u8], zs: &'a [u8], rad: usize) -> Self {
+        let tot = (xs.len() + ys.len() + zs.len()) as u32;
         let (xlen, ylen, zlen) = (xs.len(), ys.len(), zs.len());
-        let dp: Vec<Vec<_>> = (0..(xlen + ylen + zlen + 1))
-            .map(|s| {
-                (0..(s + 1).min(ylen + zlen + 1))
-                    .map(|t| vec![0; (t + 1).min(zlen + 1)])
-                    .collect()
-            })
+        let dp: Vec<Vec<Vec<_>>> = (0..(xlen + ylen + zlen + 1))
+            .map(|_| vec![vec![tot; 2 * rad + 1]; 2 * rad + 1])
             .collect();
         Self {
             xlen,
             ylen,
             zlen,
             dp,
+            rad,
             xs,
             ys,
             zs,
-            centor: Vec::with_capacity(xlen + ylen + zlen + 1),
+            centors: Vec::with_capacity(xlen + ylen + zlen + 1),
         }
     }
     fn get(&self, s: usize, t: usize, u: usize) -> u32 {
-        self.dp[s][t][u]
+        // Convert (s,t,u) -> (s,t-tcentor+rad,t-ucentor+rad).
+        // If t or u is outside of the vector, return some large value.
+        let (t, u) = (t + self.rad, u + self.rad);
+        let (tcentor, ucentor) = self.centors[s];
+        if tcentor <= t
+            && t < tcentor + 2 * self.rad + 1
+            && ucentor <= u
+            && u < ucentor + 2 * self.rad + 1
+        {
+            self.dp[s][t - tcentor][u - ucentor]
+        } else {
+            1_000_000
+        }
     }
     fn get_mut(&mut self, s: usize, t: usize, u: usize) -> Option<&mut u32> {
-        self.dp.get_mut(s)?.get_mut(t)?.get_mut(u)
+        // Convert (s,t,u) -> (s,t-tcentor+rad,t-ucentor+rad).
+        // If t or u is outside of the vector, return some large value.
+        let (t, u) = (t + self.rad, u + self.rad);
+        let (tcentor, ucentor) = self.centors[s];
+        if tcentor <= t
+            && t < tcentor + 2 * self.rad + 1
+            && ucentor <= u
+            && u < ucentor + 2 * self.rad + 1
+        {
+            self.dp
+                .get_mut(s)?
+                .get_mut(t - tcentor)?
+                .get_mut(u - ucentor)
+        } else {
+            None
+        }
     }
     fn get_x_ins(&self, s: usize, t: usize, u: usize) -> u32 {
         self.get(s - 1, t, u) + 1
@@ -87,8 +113,9 @@ impl<'a> DPTableu32<'a> {
             self.zlen,
         )
     }
-    fn update(&mut self, s: usize, t: usize, u: usize) {
+    fn update(&mut self, s: usize, t: usize, u: usize) -> u32 {
         self.update_diag(s, t, u);
+        self.get(s, t, u)
     }
     fn update_diag(&mut self, s: usize, t: usize, u: usize) {
         let next_score = if s == t && t == u {
@@ -120,18 +147,37 @@ impl<'a> DPTableu32<'a> {
         };
         *self.get_mut(s, t, u).unwrap() = next_score;
     }
-    fn alignment(xs: &'a [u8], ys: &'a [u8], zs: &'a [u8], _r: usize) -> (u32, Vec<Op>) {
-        let mut tab = Self::new(xs, ys, zs);
+    fn alignment(xs: &'a [u8], ys: &'a [u8], zs: &'a [u8], rad: usize) -> (u32, Vec<Op>) {
+        let mut tab = Self::new(xs, ys, zs, rad);
         let (xlen, ylen, zlen) = (xs.len(), ys.len(), zs.len());
+        let (mut tcentor, mut ucentor): (usize, usize) = (0, 0);
+        tab.centors.push((tcentor, ucentor));
         for s in 0..(xlen + ylen + zlen + 1) {
-            let t_range = s.saturating_sub(xlen)..(s + 1).min(ylen + zlen + 1);
-            for t in t_range {
-                let u_range = t.saturating_sub(ylen)..(t + 1).min(zlen + 1);
-                for u in u_range {
-                    tab.update(s, t, u);
+            eprintln!("Centor:({},{},{})", s, tcentor, ucentor);
+            let t_start = tcentor.saturating_sub(rad).max(s.saturating_sub(xlen));
+            let t_end = (tcentor + rad + 1).min(ylen + zlen + 1).min(s + 1);
+            let mut min_distance = std::u32::MAX;
+            let (mut min_t, mut min_u) = (0, 0);
+            for t in t_start..t_end {
+                let t_diff = abs_diff(t, tcentor);
+                let residual = rad - t_diff;
+                let u_start = ucentor.saturating_sub(residual).max(t.saturating_sub(ylen));
+                let u_end = (ucentor + rad + 1).min(zlen + 1).min(t + 1);
+                for u in u_start..u_end {
+                    let ed_dist = tab.update(s, t, u);
+                    eprintln!("{},{},{}=>{}", s, t, u, ed_dist);
+                    if ed_dist < min_distance {
+                        min_t = t;
+                        min_u = u;
+                        min_distance = ed_dist;
+                    }
                 }
             }
+            tcentor = min_t;
+            ucentor = min_u;
+            tab.centors.push((tcentor, ucentor));
         }
+        eprintln!("OK");
         let min_score = tab.get_min_score();
         // Traceback.
         let traceprobe = TraceProbe::new(&tab);
@@ -146,6 +192,14 @@ struct TraceProbe<'a, 'b> {
     tpos: usize,
     upos: usize,
     dp: &'a DPTableu32<'b>,
+}
+
+fn abs_diff(x: usize, y: usize) -> usize {
+    if x < y {
+        y - x
+    } else {
+        x - y
+    }
 }
 
 impl<'a, 'b> TraceProbe<'a, 'b> {
@@ -235,17 +289,9 @@ impl<'a, 'b> std::iter::Iterator for TraceProbe<'a, 'b> {
 
 /// Compute the banded edit distance among `xs`, `ys`, and `zs`, and return the distance and edit operations.
 pub fn alignment(xs: &[u8], ys: &[u8], zs: &[u8], r: usize) -> (u32, Vec<Op>) {
-    if (xs.len() as u16) < std::u16::MAX
-        && (ys.len() as u16) < std::u16::MAX
-        && (zs.len() as u16) < std::u16::MAX
-    {
+    if xs.len() + ys.len() + zs.len() < std::u16::MAX as usize {
         DPTableu32::alignment(xs, ys, zs, r)
     } else {
-        assert!(
-            (xs.len() as u32) < std::u32::MAX
-                && (ys.len() as u32) < std::u32::MAX
-                && (zs.len() as u32) < std::u32::MAX
-        );
         DPTableu32::alignment(xs, ys, zs, r)
     }
 }
@@ -301,7 +347,7 @@ mod test {
         let xs = b"AAATGGGG";
         let ys = b"AAAGGGG";
         let zs = b"AAAGGGG";
-        let (score, ops) = alignment(xs, ys, zs, 2);
+        let (score, ops) = alignment(xs, ys, zs, 4);
         assert_eq!(score, 1);
         let op_ans = vec![
             Op::Match,
@@ -317,7 +363,7 @@ mod test {
         let xs = b"AAATGGGG";
         let ys = b"AAATGGG";
         let zs = b"AATGGGG";
-        let (score, ops) = alignment(xs, ys, zs, 2);
+        let (score, ops) = alignment(xs, ys, zs, 4);
         assert_eq!(score, 2);
         let op_ans = vec![
             Op::Match,

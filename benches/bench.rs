@@ -9,10 +9,12 @@ const SHORT_LEN: usize = 100;
 #[bench]
 fn naive_aln(b: &mut test::Bencher) {
     let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+    let template = kiley::gen_seq::generate_seq(&mut rng, SHORT_LEN);
+    let prof = &kiley::gen_seq::PROFILE;
     b.iter(|| {
-        let xs = kiley::gen_seq::generate_seq(&mut rng, SHORT_LEN);
-        let ys = kiley::gen_seq::generate_seq(&mut rng, SHORT_LEN);
-        let zs = kiley::gen_seq::generate_seq(&mut rng, SHORT_LEN);
+        let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        let zs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
         kiley::alignment::naive::alignment(&xs, &ys, &zs)
     });
 }
@@ -20,11 +22,13 @@ fn naive_aln(b: &mut test::Bencher) {
 #[bench]
 fn banded_aln(b: &mut test::Bencher) {
     let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+    let template = kiley::gen_seq::generate_seq(&mut rng, SHORT_LEN);
+    let prof = &kiley::gen_seq::PROFILE;
     b.iter(|| {
-        let xs = kiley::gen_seq::generate_seq(&mut rng, SHORT_LEN);
-        let ys = kiley::gen_seq::generate_seq(&mut rng, SHORT_LEN);
-        let zs = kiley::gen_seq::generate_seq(&mut rng, SHORT_LEN);
-        kiley::alignment::banded::alignment(&xs, &ys, &zs, 20)
+        let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        let zs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        kiley::alignment::banded::alignment(&xs, &ys, &zs, 10)
     });
 }
 
