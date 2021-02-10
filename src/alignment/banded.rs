@@ -2,6 +2,10 @@ use super::Op;
 // First we implement a rotate DP, then move to banded DP.
 // Maybe we can convert u32 to u16....
 struct DPTableu32<'a> {
+    // The location of the minimum value on each diagonal slice.
+    // In other words, if the centor[s]= (t,u), then,
+    // the minimum "usual" DP value of DP[i][j][k] satisfying i + j + k = s is DP[s+t+u][t+u][u].
+    centor: Vec<(usize, usize)>,
     dp: Vec<Vec<Vec<u32>>>,
     xlen: usize,
     ylen: usize,
@@ -29,6 +33,7 @@ impl<'a> DPTableu32<'a> {
             xs,
             ys,
             zs,
+            centor: Vec::with_capacity(xlen + ylen + zlen + 1),
         }
     }
     fn get(&self, s: usize, t: usize, u: usize) -> u32 {
