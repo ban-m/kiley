@@ -367,6 +367,7 @@ version = "0.1.0"
 dependencies = [
  "bio",
  "clap",
+ "log",
  "poa_hmm",
  "rand",
  "rand_xoshiro",

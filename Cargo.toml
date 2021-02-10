@@ -12,6 +12,7 @@ clap = "*"
 bio = "*"
 rand = "*"
 rand_xoshiro = "*"
+log = "*"
 
 [dev-dependencies]
 rayon = "*"
