@@ -49,7 +49,7 @@ impl std::convert::From<Op> for u8 {
             Op::XDeletion => 0b110,
             Op::YDeletion => 0b101,
             Op::ZDeletion => 0b011,
-            Op::Match => 0b001,
+            Op::Match => 0b111,
         }
     }
 }

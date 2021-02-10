@@ -13,95 +13,107 @@ struct DPTableu32<'a> {
 
 impl<'a> DPTableu32<'a> {
     fn new(xs: &'a [u8], ys: &'a [u8], zs: &'a [u8]) -> Self {
-        let xlen = xs.len();
-        let ylen = ys.len();
-        let zlen = zs.len();
+        let (xlen, ylen, zlen) = (xs.len(), ys.len(), zs.len());
+        let dp: Vec<Vec<_>> = (0..(xlen + ylen + zlen + 1))
+            .map(|s| {
+                (0..(s + 1).min(ylen + zlen + 1))
+                    .map(|t| vec![0; (t + 1).min(zlen + 1)])
+                    .collect()
+            })
+            .collect();
         Self {
             xlen,
             ylen,
             zlen,
-            dp: vec![vec![vec![0; zlen + 1]; ylen + 1]; xlen + 1],
+            dp,
             xs,
             ys,
             zs,
         }
     }
-    fn get(&self, i: usize, j: usize, k: usize) -> u32 {
-        self.dp[i][j][k]
+    fn get(&self, s: usize, t: usize, u: usize) -> u32 {
+        self.dp[s][t][u]
     }
-    fn get_mut(&mut self, i: usize, j: usize, k: usize) -> Option<&mut u32> {
-        self.dp.get_mut(i)?.get_mut(j)?.get_mut(k)
+    fn get_mut(&mut self, s: usize, t: usize, u: usize) -> Option<&mut u32> {
+        self.dp.get_mut(s)?.get_mut(t)?.get_mut(u)
     }
-    fn get_x_ins(&self, i: usize, j: usize, k: usize) -> u32 {
-        self.get(i - 1, j, k) + 1
+    fn get_x_ins(&self, s: usize, t: usize, u: usize) -> u32 {
+        self.get(s - 1, t, u) + 1
     }
-    fn get_y_ins(&self, i: usize, j: usize, k: usize) -> u32 {
-        self.get(i, j - 1, k) + 1
+    fn get_y_ins(&self, s: usize, t: usize, u: usize) -> u32 {
+        self.get(s - 1, t - 1, u) + 1
     }
-    fn get_z_ins(&self, i: usize, j: usize, k: usize) -> u32 {
-        self.get(i, j, k - 1) + 1
+    fn get_z_ins(&self, s: usize, t: usize, u: usize) -> u32 {
+        self.get(s - 1, t - 1, u - 1) + 1
     }
-    fn get_x_del(&self, i: usize, j: usize, k: usize) -> u32 {
-        self.get(i, j - 1, k - 1) + 1 + (self.ys[j - 1] != self.zs[k - 1]) as u32
+    fn get_x_del(&self, s: usize, t: usize, u: usize) -> u32 {
+        self.get(s - 2, t - 2, u - 1) + 1 + (self.ys[t - u - 1] != self.zs[u - 1]) as u32
     }
-    fn get_y_del(&self, i: usize, j: usize, k: usize) -> u32 {
-        self.get(i - 1, j, k - 1) + 1 + (self.xs[i - 1] != self.zs[k - 1]) as u32
+    fn get_y_del(&self, s: usize, t: usize, u: usize) -> u32 {
+        self.get(s - 2, t - 1, u - 1) + 1 + (self.xs[s - t - 1] != self.zs[u - 1]) as u32
     }
-    fn get_z_del(&self, i: usize, j: usize, k: usize) -> u32 {
-        self.get(i - 1, j - 1, k) + 1 + (self.xs[i - 1] != self.ys[j - 1]) as u32
+    fn get_z_del(&self, s: usize, t: usize, u: usize) -> u32 {
+        self.get(s - 2, t - 1, u) + 1 + (self.xs[s - t - 1] != self.ys[t - u - 1]) as u32
     }
-    fn get_mat(&self, i: usize, j: usize, k: usize) -> u32 {
+    fn get_mat(&self, s: usize, t: usize, u: usize) -> u32 {
         let mat_score = match (
-            self.xs[i - 1] == self.ys[j - 1],
-            self.ys[j - 1] == self.zs[k - 1],
-            self.zs[k - 1] == self.xs[i - 1],
+            self.xs[s - t - 1] == self.ys[t - u - 1],
+            self.ys[t - u - 1] == self.zs[u - 1],
+            self.zs[u - 1] == self.xs[s - t - 1],
         ) {
             (true, true, true) => 0,
             (true, false, false) => 1,
             (false, true, false) => 1,
             (false, false, true) => 1,
             (false, false, false) => 2,
-            _ => panic!("{}\t{}\t{}", self.xs[i - 1], self.ys[j - 1], self.zs[k - 1]),
+            _ => panic!(
+                "{}\t{}\t{}",
+                self.xs[s - t - 1],
+                self.ys[t - u - 1],
+                self.zs[u - 1]
+            ),
         };
-        self.get(i - 1, j - 1, k - 1) + mat_score
+        self.get(s - 3, t - 2, u - 1) + mat_score
     }
     fn get_min_score(&self) -> u32 {
-        self.get(self.xlen, self.ylen, self.zlen)
+        self.get(
+            self.xlen + self.ylen + self.zlen,
+            self.ylen + self.zlen,
+            self.zlen,
+        )
     }
     fn update(&mut self, s: usize, t: usize, u: usize) {
-        let (i, j, k) = (s - t, t - u, u);
-        self.naive_update(i, j, k);
+        self.update_diag(s, t, u);
     }
-    fn naive_update(&mut self, i: usize, j: usize, k: usize) {
-        let next_score = if i == 0 && j == 0 {
-            k as u32
-        } else if i == 0 && k == 0 {
-            j as u32
-        } else if j == 0 && k == 0 {
-            i as u32
-        } else if i == 0 {
-            // convert y to -, incuring 1
-            self.get_y_ins(i, j, k)
-                .min(self.get_z_ins(i, j, k))
-                .min(self.get_x_del(i, j, k))
-        } else if j == 0 {
-            self.get_x_ins(i, j, k)
-                .min(self.get_z_ins(i, j, k))
-                .min(self.get_y_del(i, j, k))
-        } else if k == 0 {
-            self.get_y_ins(i, j, k)
-                .min(self.get_x_ins(i, j, k))
-                .min(self.get_z_del(i, j, k))
+    fn update_diag(&mut self, s: usize, t: usize, u: usize) {
+        let next_score = if s == t && t == u {
+            u as u32
+        } else if s == t && u == 0 {
+            (t - u) as u32
+        } else if t == u && u == 0 {
+            (s - t) as u32
+        } else if s == t {
+            self.get_y_ins(s, t, u)
+                .min(self.get_z_ins(s, t, u))
+                .min(self.get_x_del(s, t, u))
+        } else if t == u {
+            self.get_x_ins(s, t, u)
+                .min(self.get_z_ins(s, t, u))
+                .min(self.get_y_del(s, t, u))
+        } else if u == 0 {
+            self.get_y_ins(s, t, u)
+                .min(self.get_x_ins(s, t, u))
+                .min(self.get_z_del(s, t, u))
         } else {
-            self.get_x_ins(i, j, k)
-                .min(self.get_y_ins(i, j, k))
-                .min(self.get_z_ins(i, j, k))
-                .min(self.get_x_del(i, j, k))
-                .min(self.get_y_del(i, j, k))
-                .min(self.get_z_del(i, j, k))
-                .min(self.get_mat(i, j, k))
+            self.get_x_ins(s, t, u)
+                .min(self.get_y_ins(s, t, u))
+                .min(self.get_z_ins(s, t, u))
+                .min(self.get_x_del(s, t, u))
+                .min(self.get_y_del(s, t, u))
+                .min(self.get_z_del(s, t, u))
+                .min(self.get_mat(s, t, u))
         };
-        *self.get_mut(i, j, k).unwrap() = next_score;
+        *self.get_mut(s, t, u).unwrap() = next_score;
     }
     fn alignment(xs: &'a [u8], ys: &'a [u8], zs: &'a [u8], _r: usize) -> (u32, Vec<Op>) {
         let mut tab = Self::new(xs, ys, zs);
@@ -111,7 +123,6 @@ impl<'a> DPTableu32<'a> {
             for t in t_range {
                 let u_range = t.saturating_sub(ylen)..(t + 1).min(zlen + 1);
                 for u in u_range {
-                    assert!(s - t <= xlen && t - u <= ylen && u <= zlen);
                     tab.update(s, t, u);
                 }
             }
@@ -126,18 +137,18 @@ impl<'a> DPTableu32<'a> {
 }
 
 struct TraceProbe<'a, 'b> {
-    xpos: usize,
-    ypos: usize,
-    zpos: usize,
+    spos: usize,
+    tpos: usize,
+    upos: usize,
     dp: &'a DPTableu32<'b>,
 }
 
 impl<'a, 'b> TraceProbe<'a, 'b> {
     fn new(dp: &'a DPTableu32<'b>) -> Self {
         Self {
-            xpos: dp.xlen,
-            ypos: dp.ylen,
-            zpos: dp.zlen,
+            spos: dp.xlen + dp.ylen + dp.zlen,
+            tpos: dp.ylen + dp.zlen,
+            upos: dp.zlen,
             dp,
         }
     }
@@ -146,95 +157,73 @@ impl<'a, 'b> TraceProbe<'a, 'b> {
 impl<'a, 'b> std::iter::Iterator for TraceProbe<'a, 'b> {
     type Item = Op;
     fn next(&mut self) -> Option<Self::Item> {
-        let current_score = self.dp.get(self.xpos, self.ypos, self.zpos);
-        if self.xpos == 0 && self.ypos == 0 && self.zpos == 0 {
+        let current_score = self.dp.get(self.spos, self.tpos, self.upos);
+        if self.spos == 0 && self.tpos == 0 && self.upos == 0 {
             return None;
         }
-        let op = if self.xpos == 0 && self.ypos == 0 {
+        let op = if (self.spos - self.tpos) == 0 && (self.tpos - self.upos) == 0 {
             Op::ZInsertion
-        } else if self.zpos == 0 && self.ypos == 0 {
+        } else if (self.tpos - self.upos) == 0 && self.upos == 0 {
             Op::XInsertion
-        } else if self.zpos == 0 && self.xpos == 0 {
+        } else if self.upos == 0 && (self.spos - self.tpos) == 0 {
             Op::YInsertion
-        } else if self.xpos == 0 {
-            let z_ins = self.dp.get_z_ins(self.xpos, self.ypos, self.zpos);
-            let y_ins = self.dp.get_y_ins(self.xpos, self.ypos, self.zpos);
-            let x_del = self.dp.get_x_del(self.xpos, self.ypos, self.zpos);
-            match current_score {
-                s if s == z_ins => Op::ZInsertion,
-                s if s == y_ins => Op::YInsertion,
-                _ => {
-                    assert_eq!(current_score, x_del);
-                    Op::XDeletion
-                }
+        } else if (self.spos - self.tpos) == 0 {
+            if current_score == self.dp.get_z_ins(self.spos, self.tpos, self.upos) {
+                Op::ZInsertion
+            } else if current_score == self.dp.get_y_ins(self.spos, self.tpos, self.upos) {
+                Op::YInsertion
+            } else {
+                let xdel = self.dp.get_x_del(self.spos, self.tpos, self.upos);
+                assert_eq!(current_score, xdel);
+                Op::XDeletion
             }
-        } else if self.ypos == 0 {
-            let z_ins = self.dp.get_z_ins(self.xpos, self.ypos, self.zpos);
-            let x_ins = self.dp.get_x_ins(self.xpos, self.ypos, self.zpos);
-            let y_del = self.dp.get_y_del(self.xpos, self.ypos, self.zpos);
-            match current_score {
-                s if s == z_ins => Op::ZInsertion,
-                s if s == x_ins => Op::XInsertion,
-                _ => {
-                    assert_eq!(current_score, y_del);
-                    Op::YDeletion
-                }
+        } else if (self.tpos - self.upos) == 0 {
+            if current_score == self.dp.get_z_ins(self.spos, self.tpos, self.upos) {
+                Op::ZInsertion
+            } else if current_score == self.dp.get_x_ins(self.spos, self.tpos, self.upos) {
+                Op::XInsertion
+            } else {
+                let y_del = self.dp.get_y_del(self.spos, self.tpos, self.upos);
+                assert_eq!(current_score, y_del);
+                Op::YDeletion
             }
-        } else if self.zpos == 0 {
-            let x_ins = self.dp.get_x_ins(self.xpos, self.ypos, self.zpos);
-            let y_ins = self.dp.get_y_ins(self.xpos, self.ypos, self.zpos);
-            let z_del = self.dp.get_z_del(self.xpos, self.ypos, self.zpos);
-            match current_score {
-                x if x == x_ins => Op::XInsertion,
-                x if x == y_ins => Op::YInsertion,
-                _ => {
-                    assert_eq!(current_score, z_del);
-                    Op::ZDeletion
-                }
+        } else if self.upos == 0 {
+            if current_score == self.dp.get_x_ins(self.spos, self.tpos, self.upos) {
+                Op::XInsertion
+            } else if current_score == self.dp.get_y_ins(self.spos, self.tpos, self.upos) {
+                Op::YInsertion
+            } else {
+                let z_del = self.dp.get_z_del(self.spos, self.tpos, self.upos);
+                assert_eq!(current_score, z_del);
+                Op::ZDeletion
             }
         } else {
-            let x_ins = self.dp.get_x_ins(self.xpos, self.ypos, self.zpos);
-            let y_ins = self.dp.get_y_ins(self.xpos, self.ypos, self.zpos);
-            let z_ins = self.dp.get_z_ins(self.xpos, self.ypos, self.zpos);
-            let x_del = self.dp.get_x_del(self.xpos, self.ypos, self.zpos);
-            let y_del = self.dp.get_y_del(self.xpos, self.ypos, self.zpos);
-            let z_del = self.dp.get_z_del(self.xpos, self.ypos, self.zpos);
-            let mat = self.dp.get_mat(self.xpos, self.ypos, self.zpos);
-            match current_score {
-                s if s == x_ins => Op::XInsertion,
-                s if s == y_ins => Op::YInsertion,
-                s if s == z_ins => Op::ZInsertion,
-                s if s == x_del => Op::XDeletion,
-                s if s == y_del => Op::YDeletion,
-                s if s == z_del => Op::ZDeletion,
-                _ => {
-                    assert_eq!(current_score, mat);
-                    Op::Match
-                }
+            if current_score == self.dp.get_x_ins(self.spos, self.tpos, self.upos) {
+                Op::XInsertion
+            } else if current_score == self.dp.get_y_ins(self.spos, self.tpos, self.upos) {
+                Op::YInsertion
+            } else if current_score == self.dp.get_z_ins(self.spos, self.tpos, self.upos) {
+                Op::ZInsertion
+            } else if current_score == self.dp.get_x_del(self.spos, self.tpos, self.upos) {
+                Op::XDeletion
+            } else if current_score == self.dp.get_y_del(self.spos, self.tpos, self.upos) {
+                Op::YDeletion
+            } else if current_score == self.dp.get_z_del(self.spos, self.tpos, self.upos) {
+                Op::ZDeletion
+            } else {
+                let mat = self.dp.get_mat(self.spos, self.tpos, self.upos);
+                assert_eq!(current_score, mat);
+                Op::Match
             }
         };
-        match op {
-            Op::XInsertion => self.xpos = self.xpos.max(1) - 1,
-            Op::YInsertion => self.ypos = self.ypos.max(1) - 1,
-            Op::ZInsertion => self.zpos = self.zpos.max(1) - 1,
-            Op::XDeletion => {
-                self.ypos = self.ypos.max(1) - 1;
-                self.zpos = self.zpos.max(1) - 1;
-            }
-            Op::YDeletion => {
-                self.xpos = self.xpos.max(1) - 1;
-                self.zpos = self.zpos.max(1) - 1;
-            }
-            Op::ZDeletion => {
-                self.xpos = self.xpos.max(1) - 1;
-                self.ypos = self.ypos.max(1) - 1;
-            }
-            Op::Match => {
-                self.xpos -= 1;
-                self.ypos -= 1;
-                self.zpos -= 1;
-            }
-        }
+        let op_bits: u8 = op.into();
+        self.spos = self.spos.saturating_sub(op_bits.count_ones() as usize);
+        self.tpos = self
+            .tpos
+            .saturating_sub((op_bits >> 1).count_ones() as usize);
+        self.upos = self
+            .upos
+            .saturating_sub((op_bits >> 2).count_ones() as usize);
         Some(op)
     }
 }
@@ -340,16 +329,14 @@ mod test {
     #[test]
     fn random_seq() {
         let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(423430);
-        for _ in 0..10 {
-            let xs: Vec<u8> = (0..rng.gen::<usize>() % 100)
-                .map(|_| rng.gen::<u8>())
-                .collect();
-            let ys: Vec<u8> = (0..rng.gen::<usize>() % 100)
-                .map(|_| rng.gen::<u8>())
-                .collect();
-            let zs: Vec<u8> = (0..rng.gen::<usize>() % 100)
-                .map(|_| rng.gen::<u8>())
-                .collect();
+        for i in 0..10 {
+            eprintln!("Start {}", i);
+            let len = 50 + rng.gen::<usize>() % 40;
+            let xs: Vec<u8> = crate::gen_seq::generate_seq(&mut rng, len);
+            let len = 50 + rng.gen::<usize>() % 40;
+            let ys: Vec<u8> = crate::gen_seq::generate_seq(&mut rng, len);
+            let len = 50 + rng.gen::<usize>() % 40;
+            let zs: Vec<u8> = crate::gen_seq::generate_seq(&mut rng, len);
             alignment(&xs, &ys, &zs, 20);
         }
     }
