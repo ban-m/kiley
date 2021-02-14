@@ -47,7 +47,7 @@ fn main() {
         .value_of("seed")
         .and_then(|e| e.parse().ok())
         .unwrap();
-    let subchunk_size: usize = matches
+    let _subchunk_size: usize = matches
         .value_of("subchunk_size")
         .and_then(|e| e.parse().ok())
         .unwrap();
@@ -62,7 +62,8 @@ fn main() {
         .filter_map(|e| e.ok())
         .collect();
     let input: Vec<_> = input.iter().map(|e| e.seq()).collect();
-    let read_type = matches.value_of("read_type").unwrap();
-    let consensus = consensus(&input, seed, subchunk_size, repeat_num, read_type);
+    let _read_type = matches.value_of("read_type").unwrap();
+    //let consensus = consensus(&input, seed, subchunk_size, repeat_num, read_type);
+    let consensus = consensus(&input, seed, repeat_num);
     println!("{}", String::from_utf8_lossy(&consensus));
 }

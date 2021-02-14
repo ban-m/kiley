@@ -4,6 +4,11 @@ use poa_hmm::POA;
 use rand::seq::*;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256StarStar;
+
+pub fn consensus<T: std::borrow::Borrow<[u8]>>(seqs: &[T], seed: u64, repnum: usize) -> Vec<u8> {
+    consensus_kiley(seqs, seed, repnum)
+}
+
 pub fn consensus_kiley<T: std::borrow::Borrow<[u8]>>(
     seqs: &[T],
     seed: u64,
@@ -13,21 +18,23 @@ pub fn consensus_kiley<T: std::borrow::Borrow<[u8]>>(
     let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
     let mut consensus: Vec<Vec<u8>> = vec![];
     let len = seqs.len();
-    for t in 0..repnum {
+    for t in 1..repnum + 1 {
         consensus = (0..len)
             .map(|_| {
-                if t == 0 {
+                if t == 1 {
                     let mut picked = seqs.choose_multiple(&mut rng, 3);
                     let xs: &[u8] = picked.next().unwrap().borrow();
                     let ys = picked.next().unwrap().borrow();
                     let zs = picked.next().unwrap().borrow();
-                    get_consensus_kiley(xs, ys, zs)
+                    let rad = ((xs.len() + ys.len() + zs.len()) / 30 / t).max(5);
+                    get_consensus_kiley(xs, ys, zs, rad)
                 } else {
                     let mut picked = consensus.choose_multiple(&mut rng, 3);
                     let xs = picked.next().unwrap();
                     let ys = picked.next().unwrap();
                     let zs = picked.next().unwrap();
-                    get_consensus_kiley(xs, ys, zs)
+                    let rad = ((xs.len() + ys.len() + zs.len()) / 30 / t).max(5);
+                    get_consensus_kiley(xs, ys, zs, rad)
                 }
             })
             .collect();
@@ -35,8 +42,12 @@ pub fn consensus_kiley<T: std::borrow::Borrow<[u8]>>(
     consensus.pop().unwrap()
 }
 
-pub fn get_consensus_kiley(xs: &[u8], ys: &[u8], zs: &[u8]) -> Vec<u8> {
-    let (_dist, aln) = alignment::naive::alignment(xs, ys, zs);
+pub fn get_consensus_kiley(xs: &[u8], ys: &[u8], zs: &[u8], rad: usize) -> Vec<u8> {
+    let (_dist, aln) = alignment::banded::alignment(xs, ys, zs, rad);
+    // eprintln!("{}", String::from_utf8_lossy(xs));
+    // eprintln!("{}", String::from_utf8_lossy(ys));
+    // eprintln!("{}", String::from_utf8_lossy(zs));
+    // eprintln!("Score:{},{}", dist, rad);
     let (mut x, mut y, mut z) = (0, 0, 0);
     let mut buffer = vec![];
     for op in aln {
@@ -117,13 +128,22 @@ pub fn get_consensus_kiley(xs: &[u8], ys: &[u8], zs: &[u8]) -> Vec<u8> {
     buffer
 }
 
-pub fn consensus(
-    seqs: &[&[u8]],
+pub fn consensus_poa<T: std::borrow::Borrow<[u8]>>(
+    seqs: &[T],
     seed: u64,
     subchunk: usize,
     repnum: usize,
     read_type: &str,
 ) -> Vec<u8> {
+    let seqs: Vec<_> = seqs.iter().map(|x| x.borrow()).collect();
+    #[inline]
+    fn score(x: u8, y: u8) -> i32 {
+        if x == y {
+            1
+        } else {
+            -1
+        }
+    }
     let max_len = match seqs.iter().map(|x| x.len()).max() {
         Some(res) => res,
         None => return vec![],
@@ -149,18 +169,10 @@ pub fn consensus(
     }
 }
 
-fn score(x: u8, y: u8) -> i32 {
-    if x == y {
-        1
-    } else {
-        -1
-    }
-}
-
 #[cfg(test)]
 mod test {
+    use super::gen_seq;
     use super::*;
-    use poa_hmm::*;
     use rayon::prelude::*;
     #[test]
     fn super_long_multi_consensus_rand() {
@@ -177,12 +189,10 @@ mod test {
                     .copied()
                     .collect();
                 let seqs: Vec<_> = (0..cov)
-                    .map(|_| {
-                        gen_sample::introduce_randomness(&template1, &mut rng, &gen_sample::PROFILE)
-                    })
+                    .map(|_| gen_seq::introduce_randomness(&template1, &mut rng, &gen_seq::PROFILE))
                     .collect();
                 let seqs: Vec<_> = seqs.iter().map(|e| e.as_slice()).collect();
-                let consensus = consensus(&seqs, cov as u64, 5, 10, "CLR");
+                let consensus = consensus(&seqs, cov as u64, 10);
                 let dist = edit_dist(&consensus, &template1);
                 eprintln!("LONG:{}", dist);
                 dist <= 2
@@ -209,12 +219,10 @@ mod test {
                     .copied()
                     .collect();
                 let seqs: Vec<_> = (0..cov)
-                    .map(|_| {
-                        gen_sample::introduce_randomness(&template1, &mut rng, &gen_sample::PROFILE)
-                    })
+                    .map(|_| gen_seq::introduce_randomness(&template1, &mut rng, &gen_seq::PROFILE))
                     .collect();
                 let seqs: Vec<_> = seqs.iter().map(|e| e.as_slice()).collect();
-                let consensus = consensus(&seqs, cov as u64, 10, 10, "CLR");
+                let consensus = consensus(&seqs, cov as u64, 10);
                 let dist = edit_dist(&consensus, &template1);
                 eprintln!(
                     "{}\n{}\n{}",
@@ -252,7 +260,7 @@ mod test {
             let xs = gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE);
             let ys = gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE);
             let zs = gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE);
-            let consensus = get_consensus_kiley(&xs, &ys, &zs);
+            let consensus = get_consensus_kiley(&xs, &ys, &zs, 10);
             let xdist = edit_dist(&xs, &template);
             let ydist = edit_dist(&ys, &template);
             let zdist = edit_dist(&zs, &template);
@@ -276,8 +284,8 @@ mod test {
                 .collect();
             let consensus = consensus_kiley(&seqs, i, 10);
             let dist = edit_dist(&consensus, &template);
-            eprintln!("{}", String::from_utf8_lossy(&template));
-            eprintln!("{}", String::from_utf8_lossy(&consensus));
+            eprintln!("T:{}", String::from_utf8_lossy(&template));
+            eprintln!("C:{}", String::from_utf8_lossy(&consensus));
             eprintln!("SHORT:{}", dist);
             assert!(dist <= 2);
         }
@@ -293,9 +301,7 @@ mod test {
                 let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(cov as u64);
                 let template1: Vec<_> = gen_seq::generate_seq(&mut rng, len);
                 let seqs: Vec<_> = (0..cov)
-                    .map(|_| {
-                        gen_sample::introduce_randomness(&template1, &mut rng, &gen_sample::PROFILE)
-                    })
+                    .map(|_| gen_seq::introduce_randomness(&template1, &mut rng, &gen_seq::PROFILE))
                     .collect();
                 let consensus = consensus_kiley(&seqs, cov as u64, 10);
                 let dist = edit_dist(&consensus, &template1);
@@ -324,9 +330,7 @@ mod test {
                     .copied()
                     .collect();
                 let seqs: Vec<_> = (0..cov)
-                    .map(|_| {
-                        gen_sample::introduce_randomness(&template1, &mut rng, &gen_sample::PROFILE)
-                    })
+                    .map(|_| gen_seq::introduce_randomness(&template1, &mut rng, &gen_seq::PROFILE))
                     .collect();
                 let consensus = consensus_kiley(&seqs, cov as u64, 10);
                 let dist = edit_dist(&consensus, &template1);

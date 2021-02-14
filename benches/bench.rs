@@ -28,15 +28,58 @@ fn banded_aln(b: &mut test::Bencher) {
         let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
         let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
         let zs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
-        kiley::alignment::banded::alignment(&xs, &ys, &zs, 10)
+        kiley::alignment::banded::alignment_u32(&xs, &ys, &zs, 10)
     });
 }
 
 // #[bench]
-// fn access_in_row(b: &mut test::Bencher) {
+// fn bi_aln_naive(b: &mut test::Bencher) {
+//     let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+//     let template = kiley::gen_seq::generate_seq(&mut rng, 2_000);
+//     let prof = &kiley::gen_seq::PROFILE;
+//     b.iter(|| {
+//         let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+//         let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+//         kiley::alignment::bialignment::naive_align(&xs, &ys)
+//     });
+// }
+
+// #[bench]
+// fn bi_aln_fast(b: &mut test::Bencher) {
+//     let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+//     let template = kiley::gen_seq::generate_seq(&mut rng, 2_000);
+//     let prof = &kiley::gen_seq::PROFILE;
+//     b.iter(|| {
+//         let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+//         let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+//         kiley::alignment::bialignment::fast_align(&xs, &ys)
+//     });
+// }
+
+// const VECTOR_LEN: u64 = 1_000_000;
+
+// #[bench]
+// fn sum_by_u64(b: &mut test::Bencher) {
 //     let vectors: Vec<u64> = (0..VECTOR_LEN).collect();
-//     let access_order: Vec<_> = vectors.iter().enumerate().map(|x| x.0).collect();
-//     b.iter(|| test::black_box(access_order.iter().map(|&i| vectors[i]).sum::<u64>()));
+//     b.iter(|| {
+//         let mut sum = 0;
+//         for &x in vectors.iter() {
+//             sum += x;
+//         }
+//         test::black_box(sum);
+//     });
+// }
+
+// #[bench]
+// fn sum_by_i64(b: &mut test::Bencher) {
+//     let vectors: Vec<u64> = (0..VECTOR_LEN).collect();
+//     b.iter(|| {
+//         let mut sum = 0;
+//         for &x in vectors.iter() {
+//             sum += x as i64;
+//         }
+//         test::black_box(sum);
+//     });
 // }
 
 // #[bench]

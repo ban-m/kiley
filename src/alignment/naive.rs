@@ -1,6 +1,11 @@
+use super::convert_to_twobit;
 use super::Op;
+use super::MA32;
 /// Compute the exact edit distance among `xs`, `ys`, and `zs`, and return the distance and edit operations.
 pub fn alignment(xs: &[u8], ys: &[u8], zs: &[u8]) -> (u32, Vec<Op>) {
+    let xs: Vec<_> = xs.iter().map(convert_to_twobit).collect();
+    let ys: Vec<_> = ys.iter().map(convert_to_twobit).collect();
+    let zs: Vec<_> = zs.iter().map(convert_to_twobit).collect();
     // Filled x == y == z == 0 case.
     let mut dp = vec![vec![vec![std::u32::MIN; zs.len() + 1]; ys.len() + 1]; xs.len() + 1];
     // Fill y == 0, x == 0 case.
@@ -23,8 +28,9 @@ pub fn alignment(xs: &[u8], ys: &[u8], zs: &[u8]) -> (u32, Vec<Op>) {
             // (-,ys[y-1],-), causing 1 penalty.
             let ins = dp[0][y - 1][z] + 1;
             // (-, ys[y-1], zs[z-1]), causing 1 or 2 penalty.
-            let mat = dp[0][y - 1][z - 1] + 1 + (ys[y - 1] != zs[z - 1]) as u32;
-            dp[0][y][z] = del.min(ins).min(mat);
+            //let mat = dp[0][y - 1][z - 1] + 1 + (ys[y - 1] != zs[z - 1]) as u32;
+            let mat_score = MA32[(0b100 << 6) | ((ys[y - 1] << 3) | zs[z - 1]) as usize];
+            dp[0][y][z] = (dp[0][y - 1][z - 1] + mat_score).min(del).min(ins);
         }
     }
     // Fill y == 0 , x > 0, z > 0 case.
@@ -32,8 +38,8 @@ pub fn alignment(xs: &[u8], ys: &[u8], zs: &[u8]) -> (u32, Vec<Op>) {
         for z in 1..=zs.len() {
             let del = dp[x][0][z - 1] + 1;
             let ins = dp[x - 1][0][z] + 1;
-            let mat = dp[x - 1][0][z - 1] + 1 + (xs[x - 1] != zs[z - 1]) as u32;
-            dp[x][0][z] = del.min(ins).min(mat);
+            let mat_score = MA32[0b100_000_000 | ((zs[z - 1] << 3) | xs[x - 1]) as usize];
+            dp[x][0][z] = del.min(ins).min(dp[x - 1][0][z - 1] + mat_score);
         }
     }
     // Fill z == 0, x > 0, y > 0 case
@@ -41,8 +47,8 @@ pub fn alignment(xs: &[u8], ys: &[u8], zs: &[u8]) -> (u32, Vec<Op>) {
         for y in 1..=ys.len() {
             let del = dp[x][y - 1][0] + 1;
             let ins = dp[x - 1][y][0] + 1;
-            let mat = dp[x - 1][y - 1][0] + 1 + (xs[x - 1] != ys[y - 1]) as u32;
-            dp[x][y][0] = del.min(ins).min(mat);
+            let mat_score = MA32[0b100_000_000 | ((xs[x - 1] << 3) | ys[y - 1]) as usize];
+            dp[x][y][0] = del.min(ins).min(dp[x - 1][y - 1][0] + mat_score);
         }
     }
     // Fill x > 0, y > 0, z > 0 case.
@@ -53,23 +59,14 @@ pub fn alignment(xs: &[u8], ys: &[u8], zs: &[u8]) -> (u32, Vec<Op>) {
                 let x_ins = dp[x - 1][y][z] + 1;
                 let y_ins = dp[x][y - 1][z] + 1;
                 let z_ins = dp[x][y][z - 1] + 1;
+                let gap = 0b100_000_000;
                 // (-, ys[y-1], zs[z-1]), causing 1 or 2 penalty.
-                let x_del = dp[x][y - 1][z - 1] + 1 + (ys[y - 1] != zs[z - 1]) as u32;
-                let y_del = dp[x - 1][y][z - 1] + 1 + (xs[x - 1] != zs[z - 1]) as u32;
-                let z_del = dp[x - 1][y - 1][z] + 1 + (ys[y - 1] != xs[x - 1]) as u32;
+                let x_del = dp[x][y - 1][z - 1] + MA32[gap | (ys[y - 1] << 3 | zs[z - 1]) as usize];
+                let y_del = dp[x - 1][y][z - 1] + MA32[gap | (xs[x - 1] << 3 | zs[z - 1]) as usize];
+                let z_del = dp[x - 1][y - 1][z] + MA32[gap | (ys[y - 1] << 3 | xs[x - 1]) as usize];
                 // (xs[x-1], ys[y-1], zs[z-1]), causing 0 or 1 or 2 penalty.
-                let mat_score = match (
-                    xs[x - 1] == ys[y - 1],
-                    ys[y - 1] == zs[z - 1],
-                    zs[z - 1] == xs[x - 1],
-                ) {
-                    (true, true, true) => 0,
-                    (true, false, false) => 1,
-                    (false, true, false) => 1,
-                    (false, false, true) => 1,
-                    (false, false, false) => 2,
-                    _ => panic!("{}\t{}\t{}", xs[x - 1], ys[y - 1], zs[z - 1]),
-                };
+                let mat_score =
+                    MA32[(xs[x - 1] as usize) << 6 | (ys[y - 1] << 3 | zs[z - 1]) as usize];
                 let mat = dp[x - 1][y - 1][z - 1] + mat_score;
                 dp[x][y][z] = x_ins
                     .min(y_ins)
@@ -136,19 +133,6 @@ pub fn alignment(xs: &[u8], ys: &[u8], zs: &[u8]) -> (u32, Vec<Op>) {
             let x_del = dp[x][y - 1][z - 1] + 1 + (ys[y - 1] != zs[z - 1]) as u32;
             let y_del = dp[x - 1][y][z - 1] + 1 + (xs[x - 1] != zs[z - 1]) as u32;
             let z_del = dp[x - 1][y - 1][z] + 1 + (ys[y - 1] != xs[x - 1]) as u32;
-            let mat_score = match (
-                xs[x - 1] == ys[y - 1],
-                ys[y - 1] == zs[z - 1],
-                zs[z - 1] == xs[x - 1],
-            ) {
-                (true, true, true) => 0,
-                (true, false, false) => 1,
-                (false, true, false) => 1,
-                (false, false, true) => 1,
-                (false, false, false) => 2,
-                _ => panic!("{}\t{}\t{}", xs[x - 1], ys[y - 1], zs[z - 1]),
-            };
-            let mat = dp[x - 1][y - 1][z - 1] + mat_score;
             match current_score {
                 s if s == x_ins => Op::XInsertion,
                 s if s == y_ins => Op::YInsertion,
@@ -156,10 +140,7 @@ pub fn alignment(xs: &[u8], ys: &[u8], zs: &[u8]) -> (u32, Vec<Op>) {
                 s if s == x_del => Op::XDeletion,
                 s if s == y_del => Op::YDeletion,
                 s if s == z_del => Op::ZDeletion,
-                _ => {
-                    assert_eq!(current_score, mat);
-                    Op::Match
-                }
+                _ => Op::Match,
             }
         };
         match op {

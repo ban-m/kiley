@@ -1,3 +1,9 @@
+//! Alignment packages. In contrast to other packages, it contains alignment modules for three sequence, not two.
+pub mod banded;
+pub mod bialignment;
+pub mod naive;
+pub mod wavefront;
+
 /// Edit operation on a ternary alignment.
 /// Compared to the three operation (insertion to the reference, deletion from the reference, match between the query and the reference) in
 /// binary sequence alignment, there are seven operations in a ternary alignment.
@@ -68,9 +74,138 @@ impl std::convert::From<Op> for (bool, bool, bool) {
     }
 }
 
-pub mod banded;
-pub mod naive;
-pub mod wavefront;
+// Three bit encoding for each base, gap, and "sentinel" base.
+const ADENINE: u8 = 0b00;
+const CYTOSINE: u8 = 0b01;
+const GUANINE: u8 = 0b10;
+const THYMINE: u8 = 0b11;
+const GAP: u8 = 0b100;
+const NULL: u8 = 0b101;
+// Convert a char to two bit encoding.
+pub const fn convert_to_twobit(base: &u8) -> u8 {
+    match *base {
+        b'A' | b'a' => ADENINE,
+        b'C' | b'c' => CYTOSINE,
+        b'G' | b'g' => GUANINE,
+        b'T' | b't' => THYMINE,
+        b'-' => GAP,
+        _ => NULL,
+    }
+}
+
+// Return matching array, MA.
+// For three combination of THREE bit bases x, y, and, z,
+// we have MA[x << 6 | y <<  3 | z ] = the penalty to align x,y, and z.
+// For example, if x == y and y == z,
+// MA[x << 6 | y << 3 | z ] = 0, as there is no mimatch.
+// Another example is x = '-'(=0b100), y = 'G'(=0b00), and z = 'G',
+// MA[100_010_010] = 1.
+// Note that the match score among NULL base and others would be very large value,
+// inhibiting the alignment between NULL base to others.
+const LARGE: u32 = 10_000;
+pub const MA32: [u32; 512] = get_match_table_u32();
+const fn get_match_table_u32() -> [u32; 512] {
+    let mut scores = [0u32; 512];
+    let mut x = 0;
+    while x < 6 {
+        let mut y = 0;
+        while y < 6 {
+            let mut z = 0;
+            while z < 6 {
+                // match score of x, y, and z.
+                let match_score = if x == 5 || y == 5 || z == 5 {
+                    // We do not allow any alignment among NULL base and others.
+                    LARGE
+                } else if (x == 4 && y == 4) || (y == 4 && z == 4) || (z == 4 && x == 4) {
+                    // If there's two gaps, the penalty is 1,
+                    // as we could have three gaps by mutating the rest.
+                    1
+                } else if x == 4 {
+                    // If there's only one gap,
+                    // the panalty is 1 or 2,depending on
+                    // whether the other two bases are qual or not.
+                    1 + (y != z) as u32
+                } else if y == 4 {
+                    1 + (x != z) as u32
+                } else if z == 4 {
+                    1 + (x != y) as u32
+                } else {
+                    // If there is no gap character, the match score
+                    // is the usual one.
+                    // Note that we do not care abound efficiency,
+                    // as this function is a constant function.
+                    match (x == y, y == z, z == x) {
+                        (true, true, true) => 0,
+                        (true, false, false) => 1,
+                        (false, true, false) => 1,
+                        (false, false, true) => 1,
+                        (false, false, false) => 2,
+                        _ => 2,
+                    }
+                };
+                let position = (x << 6) | (y << 3) | z;
+                scores[position] = match_score;
+                z += 1;
+            }
+            y += 1;
+        }
+        x += 1;
+    }
+    // NULL-NULL-NULL should be no penalty alignment.
+    // This allows to move (0,0,0) -> (1,1,1) without any penalty,
+    // making correct intialization.
+    scores[5 << 6 | 5 << 3 | 5] = 0;
+    scores
+}
+
+// Same as the previous function, only different in types.
+// const MA16: [u16; 512] = get_match_table_u16();
+// const fn get_match_table_u16() -> [u16; 512] {
+//     let mut scores = [0u16; 512];
+//     let mut x = 0;
+//     while x < 5 {
+//         let mut y = 0;
+//         while y < 5 {
+//             let mut z = 0;
+//             while z < 5 {
+//                 // match score of x, y, and z.
+//                 let position = (x << 6) | (y << 3) | z;
+//                 if (x == 4 && y == 4) || (y == 4 && z == 4) || (z == 4 && x == 4) {
+//                     // If there's two gaps, the penalty is 1,
+//                     // as we could have three gaps by mutating the rest.
+//                     scores[position] = 1;
+//                 } else if x == 4 {
+//                     // If there's only one gap,
+//                     // the panalty is 1 or 2,depending on
+//                     // whether the other two bases are qual or not.
+//                     scores[position] = 1 + (y != z) as u16;
+//                 } else if y == 4 {
+//                     scores[position] = 1 + (x != z) as u16;
+//                 } else if z == 4 {
+//                     scores[position] = 1 + (x != y) as u16;
+//                 } else {
+//                     // If there is no gap character, the match score
+//                     // is the usual one.
+//                     // Note that we do not care abound efficiency,
+//                     // as this function is a constant function.
+//                     scores[position] = match (x == y, y == z, z == x) {
+//                         (true, true, true) => 0,
+//                         (true, false, false) => 1,
+//                         (false, true, false) => 1,
+//                         (false, false, true) => 1,
+//                         (false, false, false) => 2,
+//                         _ => 2,
+//                     };
+//                 }
+//                 z += 1;
+//             }
+//             y += 1;
+//         }
+//         x += 1;
+//     }
+//     scores
+// }
+
 pub fn recover(xs: &[u8], ys: &[u8], zs: &[u8], ops: &[Op]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let (mut x, mut y, mut z) = (0, 0, 0);
     let (mut x_res, mut y_res, mut z_res) = (vec![], vec![], vec![]);
@@ -96,4 +231,27 @@ pub fn recover(xs: &[u8], ys: &[u8], zs: &[u8], ops: &[Op]) -> (Vec<u8>, Vec<u8>
         }
     }
     (x_res, y_res, z_res)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use rand::SeedableRng;
+    #[test]
+    fn compare_naive_banded() {
+        let length = 100;
+        let p = crate::gen_seq::PROFILE;
+        for i in 0..20u64 {
+            let mut rng: rand_xoshiro::Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(i);
+            let template = crate::gen_seq::generate_seq(&mut rng, length);
+            let x = crate::gen_seq::introduce_randomness(&template, &mut rng, &p);
+            let y = crate::gen_seq::introduce_randomness(&template, &mut rng, &p);
+            let z = crate::gen_seq::introduce_randomness(&template, &mut rng, &p);
+            let (naive_score, _) = naive::alignment(&x, &y, &z);
+            let (banded_score, _) = banded::alignment_u32(&x, &y, &z, 20);
+            assert_eq!(naive_score, banded_score);
+            let (banded_score, _) = banded::alignment_u16(&x, &y, &z, 20);
+            assert_eq!(naive_score, banded_score);
+        }
+    }
 }
