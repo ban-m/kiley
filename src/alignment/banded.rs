@@ -15,6 +15,15 @@ macro_rules! get {
     };
 }
 
+// min_swap(x,y) is equivalent to x = x.min(y), but is more efficient.
+macro_rules! min_swap {
+    ($x:expr,$y:expr) => {
+        if $y < $x {
+            $x = $y;
+        }
+    };
+}
+
 /// Compute the banded edit distance among `xs`, `ys`, and `zs`, and return the distance and edit operations.
 /// We only fill the dynamic programming cells in a banded region, and`r` specifies the radius of the band.
 /// Note that `r` is the radius, so that the number of allocated/filled DP cells is around `r*r*(xs.len+ys.len+zs.len)
@@ -69,6 +78,10 @@ pub fn alignment_u32(xs: &[u8], ys: &[u8], zs: &[u8], rad: usize) -> (u32, Vec<O
                 _ => panic!(),
             }
         };
+        let (filled_dp, filling_dp): (&[u32], &mut [u32]) = {
+            let (x, y): (&mut [u32], &mut [u32]) = dp.split_at_mut(get!(s, 0, 0, len));
+            (x as &[u32], y)
+        };
         for t in t_start..t_end {
             let t_orig = t + t_center - rad;
             let x_axis = s - t_orig;
@@ -86,8 +99,9 @@ pub fn alignment_u32(xs: &[u8], ys: &[u8], zs: &[u8], rad: usize) -> (u32, Vec<O
                 let y_base = ys[(y_axis - 1) as usize];
                 let z_base = zs[(z_axis - 1) as usize];
                 // This is the hottest loop.
-                let score = get_next_score(&dp, len, (s, t, u), &diffs, (x_base, y_base, z_base));
-                dp[get!(s, t, u, len)] = score;
+                let score =
+                    get_next_score(&filled_dp, len, (s, t, u), &diffs, (x_base, y_base, z_base));
+                filling_dp[(t * len + u) as usize] = score;
             }
         }
         let start = ((len * len * s) + len * 3 + 3) as usize;
@@ -116,10 +130,9 @@ pub fn alignment_u32(xs: &[u8], ys: &[u8], zs: &[u8], rad: usize) -> (u32, Vec<O
         .unwrap();
         centers.push(next_center);
     }
-    // Usually, this is s = (xlen + ylen + zlen).
-    // Minus 2, as we can get the s-th centers by accessing s,
-    // and also the last element is just the next center after the last iteration.
-    let (mut s, mut t, mut u, min) = {
+    // Traceback.
+    // TODO: we should split the code below to another function for readability.
+    let (mut s, mut t, mut u, min, mut ops) = {
         let (idx, &min) = dp
             .iter()
             .enumerate()
@@ -130,9 +143,20 @@ pub fn alignment_u32(xs: &[u8], ys: &[u8], zs: &[u8], rad: usize) -> (u32, Vec<O
         let s = idx / (len * len);
         let t = (idx - (s * len * len)) / len - 3;
         let u = (idx - (s * len * len)) % len - 3;
-        (s, t, u, min)
+        let mut ops = vec![];
+        let (t_center, u_center) = centers[s as usize];
+        let t_orig = t + t_center - rad;
+        let u_orig = u + u_center - rad;
+        let x_axis = (s - t_orig) as usize;
+        let y_axis = (t_orig - u_orig) as usize;
+        let z_axis = u_orig as usize;
+        // If x_axis, y_axis, z_axis do not reache the end of each sequence,
+        // the alignment, or the filled pattern, is skewed toward the other sides of the DP cells.
+        ops.extend(std::iter::repeat(Op::XDeletion).take(xs.len().saturating_sub(x_axis)));
+        ops.extend(std::iter::repeat(Op::YDeletion).take(ys.len().saturating_sub(y_axis)));
+        ops.extend(std::iter::repeat(Op::ZDeletion).take(zs.len().saturating_sub(z_axis)));
+        (s, t, u, min, ops)
     };
-    let mut ops = vec![];
     while 3 < s || 2 + rad < t || 1 + rad < u {
         let (t_center, u_center) = centers[s as usize];
         let diffs = {
@@ -218,30 +242,53 @@ fn get_next_score(
 ) -> u32 {
     let (t_d1, t_d2, t_d3) = (t + diffs[0], t + diffs[1], t + diffs[2]);
     let (u_d1, u_d2, u_d3) = (u + diffs[3], u + diffs[4], u + diffs[5]);
-    // The memory access below dominates the computational time, roughtly 7/8 of the exec time
-    // would be the memory access time.
-    // Maybe we can reduce it by shuffling the rayout.
-    // However, I don't know how to do it now....
-    let mut dp_scores = unsafe {
-        [
-            *dp.get_unchecked(get!(s - 1, t_d1, u_d1, len)),
-            *dp.get_unchecked(get!(s - 1, t_d1 - 1, u_d1, len)),
-            *dp.get_unchecked(get!(s - 1, t_d1 - 1, u_d1 - 1, len)),
-            *dp.get_unchecked(get!(s - 2, t_d2 - 2, u_d2 - 1, len)),
-            *dp.get_unchecked(get!(s - 2, t_d2 - 1, u_d2 - 1, len)),
-            *dp.get_unchecked(get!(s - 2, t_d2 - 1, u_d2, len)),
-            *dp.get_unchecked(get!(s - 3, t_d3 - 2, u_d3 - 1, len)),
-        ]
-    };
-    for i in 0..6 {
-        dp_scores[i] += 1;
+    unsafe {
+        // Insertion scores.
+        let mut min_ins = *dp.get_unchecked(get!(s - 1, t_d1, u_d1, len));
+        let score_ins = *dp.get_unchecked(get!(s - 1, t_d1 - 1, u_d1, len));
+        min_swap!(min_ins, score_ins);
+        let score_ins = *dp.get_unchecked(get!(s - 1, t_d1 - 1, u_d1 - 1, len));
+        min_swap!(min_ins, score_ins);
+        // Deletion scores.
+        let mut min_del =
+            *dp.get_unchecked(get!(s - 2, t_d2 - 2, u_d2 - 1, len)) + (y_base != z_base) as u32;
+        let score_del =
+            *dp.get_unchecked(get!(s - 2, t_d2 - 1, u_d2 - 1, len)) + (x_base != z_base) as u32;
+        min_swap!(min_del, score_del);
+        let score_del =
+            *dp.get_unchecked(get!(s - 2, t_d2 - 1, u_d2, len)) + (x_base != y_base) as u32;
+        min_swap!(min_del, score_del);
+        let score = *dp.get_unchecked(get!(s - 3, t_d3 - 2, u_d3 - 1, len))
+            + MA32[(x_base as usize) << 6 | (y_base << 3 | z_base) as usize];
+        min_swap!(min_del, min_ins);
+        min_del += 1;
+        min_swap!(min_del, score);
+        min_del
     }
-    dp_scores[3] += (y_base != z_base) as u32;
-    dp_scores[4] += (x_base != z_base) as u32;
-    dp_scores[5] += (x_base != y_base) as u32;
-    dp_scores[6] += MA32[(x_base as usize) << 6 | (y_base << 3 | z_base) as usize];
-    *dp_scores.iter().min().unwrap()
 }
+
+// #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+#[allow(dead_code)]
+fn min_of_array(xs: &[u32; 7]) -> u32 {
+    *xs.iter().min().unwrap()
+}
+
+// #[allow(dead_code)]
+// #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+// #[target_feature(enable = "avx2")]
+// unsafe fn min_of_array(xs: &[u32; 8]) -> u32 {
+//     use std::arch::x86_64;
+//     use x86_64::{
+//         __m256i, _mm256_alignr_epi8, _mm256_extract_epi32, _mm256_loadu_si256, _mm256_min_epi32,
+//         _mm256_permute2x128_si256,
+//     };
+//     // panic!("SIMD");
+//     let mut xs_min = _mm256_loadu_si256(xs.as_ptr() as *const __m256i);
+//     xs_min = _mm256_min_epi32(xs_min, _mm256_alignr_epi8(xs_min, xs_min, 4));
+//     xs_min = _mm256_min_epi32(xs_min, _mm256_alignr_epi8(xs_min, xs_min, 8));
+//     xs_min = _mm256_min_epi32(xs_min, _mm256_permute2x128_si256(xs_min, xs_min, 1));
+//     _mm256_extract_epi32(xs_min, 0) as u32
+// }
 
 pub fn alignment_u16(xs: &[u8], ys: &[u8], zs: &[u8], rad: usize) -> (u32, Vec<Op>) {
     alignment_u32(xs, ys, zs, rad)
@@ -341,7 +388,6 @@ mod test {
         ];
         assert_eq!(ops, op_ans);
         eprintln!("OK");
-
         let xs = b"ATG";
         let ys = b"TG";
         let zs = b"ATG";
@@ -439,4 +485,14 @@ mod test {
         alignment_u32(&x, &y, &z, rad);
         // }
     }
+    // #[test]
+    // #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    // fn min_score_test() {
+    //     let xs = [0, 0, 1, 2, 1, 1, 1];
+    //     assert_eq!(unsafe { min_of_array(&xs) }, 0);
+    //     let xs = [2, 2, 3, 1_0000, 1_000_000, 231, 23120];
+    //     assert_eq!(unsafe { min_of_array(&xs) }, 2);
+    //     let xs = [1_0000, 1_000_000, 231, 2323412, 23498, 23, 23180293];
+    //     assert_eq!(unsafe { min_of_array(&xs) }, 23);
+    // }
 }

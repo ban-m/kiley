@@ -2,15 +2,21 @@ use rand::SeedableRng;
 const SEED: u64 = 1293890;
 
 fn main() {
-    let len = 500;
-    let mut rng: rand_xoshiro::Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(SEED);
     use kiley::gen_seq;
+    let len = 500;
     let cov = 30;
-    let template1: Vec<_> = gen_seq::generate_seq(&mut rng, len);
-    let seqs: Vec<_> = (0..cov)
-        .map(|_| kiley::gen_seq::introduce_randomness(&template1, &mut rng, &gen_seq::PROFILE))
-        .collect();
-    let _consensus = kiley::consensus_kiley(&seqs, cov as u64, 10);
+    for seed in 0..10 {
+        let mut rng: rand_xoshiro::Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(SEED + seed);
+        let template = gen_seq::generate_seq(&mut rng, len);
+        let seqs: Vec<_> = (0..cov)
+            .map(|_| kiley::gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE))
+            .collect();
+        let consensus = kiley::consensus_kiley(&seqs, SEED + seed, 10, 20);
+        eprintln!("{}", edit_dist(&consensus, &template));
+        let consensus = kiley::consensus_poa(&seqs, SEED + seed, 10, 10, "CLR");
+        eprintln!("{}", edit_dist(&consensus, &template));
+        eprintln!();
+    }
 }
 
 #[allow(dead_code)]

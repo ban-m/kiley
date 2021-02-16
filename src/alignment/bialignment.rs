@@ -28,13 +28,18 @@ pub fn fast_align(xs: &[u8], ys: &[u8]) -> u16 {
     let colnum = ys.len() + 1;
     for i in 1..xs.len() + 1 {
         for j in 1..ys.len() + 1 {
-            let mat = MATMAT[(xs[i - 1] << 3 | ys[j - 1]) as usize];
-            dp[i * colnum + j] = (dp[(i - 1) * colnum + j - 1] + mat)
-                .min(dp[(i - 1) * colnum + j] + 1)
-                .min(dp[i * colnum + j - 1] + 1);
+            let score = get_match(&dp, xs[i - 1], ys[j - 1], i, j, colnum);
+            dp[i * colnum + j] = score;
         }
     }
     *dp.last().unwrap()
+}
+
+fn get_match(dp: &[u16], x: u8, y: u8, i: usize, j: usize, colnum: usize) -> u16 {
+    let mat = MATMAT[(x << 3 | y) as usize];
+    (dp[(i - 1) * colnum + j - 1] + mat)
+        .min(dp[(i - 1) * colnum + j] + 1)
+        .min(dp[i * colnum + j - 1] + 1)
 }
 
 pub fn naive_align(xs: &[u8], ys: &[u8]) -> u16 {

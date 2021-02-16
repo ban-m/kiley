@@ -13,7 +13,7 @@ fn main() {
         .map(|_| gen_seq::introduce_randomness(&template, &mut rng, &prof))
         .collect();
     let start = std::time::Instant::now();
-    let consensus = kiley::consensus_kiley(&seqs, seed, 3);
+    let consensus = kiley::consensus_kiley(&seqs, seed, 3, 10);
     let end = std::time::Instant::now();
     let kiley_time = (end - start).as_millis();
     let kiley_dist = edit_dist(&template, &consensus);
