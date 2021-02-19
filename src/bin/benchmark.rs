@@ -13,18 +13,23 @@ fn main() {
         .map(|_| gen_seq::introduce_randomness(&template, &mut rng, &prof))
         .collect();
     let start = std::time::Instant::now();
-    let consensus = kiley::consensus_kiley(&seqs, seed, 3, 10);
+    let consensus = kiley::consensus_kiley(&seqs, seed, 5, 10);
     let end = std::time::Instant::now();
     let kiley_time = (end - start).as_millis();
     let kiley_dist = edit_dist(&template, &consensus);
     let start = std::time::Instant::now();
-    let consensus = kiley::consensus_poa(&seqs, seed, 10, 10, "CLR");
+    // Please uncomment it and uncomment the corresponding dependencies in Cargo.toml
+    // let consensus = kiley::consensus_poa(&seqs, seed, 10, 10, "CLR");
     let end = std::time::Instant::now();
     let poa_time = (end - start).as_millis();
     let poa_dist = edit_dist(&template, &consensus);
     println!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-        len, seed, coverage, error_rate, kiley_time, kiley_dist, poa_time, poa_dist
+        "{}\t{}\t{}\t{}\t{}\t{}\tTernary",
+        len, seed, coverage, error_rate, kiley_time, kiley_dist
+    );
+    println!(
+        "{}\t{}\t{}\t{}\t{}\t{}\tPOA",
+        len, seed, coverage, error_rate, poa_time, poa_dist
     );
 }
 

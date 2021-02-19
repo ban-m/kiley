@@ -368,7 +368,6 @@ dependencies = [
  "bio",
  "clap",
  "log",
- "poa_hmm",
  "rand",
  "rand_xoshiro",
  "rayon",
@@ -518,16 +517,6 @@ checksum = "9c3659d1ee90221741f65dd128d9998311b0e40c5d3c23a62445938214abce4f"
 dependencies = [
  "fixedbitset",
  "ordermap",
-]
-
-[[package]]
-name = "poa_hmm"
-version = "0.2.0"
-source = "git+https://github.com/ban-m/partial_order_alignment.git#bbd80769edcc1929783238036e2b937cae083772"
-dependencies = [
- "log",
- "rand",
- "rand_xoshiro",
 ]
 
 [[package]]

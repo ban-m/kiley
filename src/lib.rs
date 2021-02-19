@@ -1,6 +1,6 @@
 pub mod alignment;
 pub mod gen_seq;
-use poa_hmm::POA;
+// use poa_hmm::POA;
 use rand::seq::*;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256StarStar;
@@ -128,46 +128,46 @@ pub fn correct_by_alignment(xs: &[u8], ys: &[u8], zs: &[u8], aln: &[alignment::O
     buffer
 }
 
-pub fn consensus_poa<T: std::borrow::Borrow<[u8]>>(
-    seqs: &[T],
-    seed: u64,
-    subchunk: usize,
-    repnum: usize,
-    read_type: &str,
-) -> Vec<u8> {
-    let seqs: Vec<_> = seqs.iter().map(|x| x.borrow()).collect();
-    #[inline]
-    fn score(x: u8, y: u8) -> i32 {
-        if x == y {
-            1
-        } else {
-            -1
-        }
-    }
-    let max_len = match seqs.iter().map(|x| x.len()).max() {
-        Some(res) => res,
-        None => return vec![],
-    };
-    let rad = match read_type {
-        "CCS" => max_len / 20,
-        "CLR" => max_len / 10,
-        "ONT" => max_len / 10,
-        _ => unreachable!(),
-    };
-    if seqs.len() <= 10 {
-        POA::from_slice_default(&seqs).consensus()
-    } else {
-        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
-        let subseq: Vec<_> = (0..repnum)
-            .map(|_| {
-                let subchunk: Vec<_> = seqs.choose_multiple(&mut rng, subchunk).copied().collect();
-                POA::from_slice_banded(&subchunk, (-1, -1, &score), rad).consensus()
-            })
-            .collect();
-        let subseq: Vec<_> = subseq.iter().map(|e| e.as_slice()).collect();
-        POA::from_slice_banded(&subseq, (-1, -1, &score), max_len / 10).consensus()
-    }
-}
+// pub fn consensus_poa<T: std::borrow::Borrow<[u8]>>(
+//     seqs: &[T],
+//     seed: u64,
+//     subchunk: usize,
+//     repnum: usize,
+//     read_type: &str,
+// ) -> Vec<u8> {
+//     let seqs: Vec<_> = seqs.iter().map(|x| x.borrow()).collect();
+//     #[inline]
+//     fn score(x: u8, y: u8) -> i32 {
+//         if x == y {
+//             1
+//         } else {
+//             -1
+//         }
+//     }
+//     let max_len = match seqs.iter().map(|x| x.len()).max() {
+//         Some(res) => res,
+//         None => return vec![],
+//     };
+//     let rad = match read_type {
+//         "CCS" => max_len / 20,
+//         "CLR" => max_len / 10,
+//         "ONT" => max_len / 10,
+//         _ => unreachable!(),
+//     };
+//     if seqs.len() <= 10 {
+//         POA::from_slice_default(&seqs).consensus()
+//     } else {
+//         let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
+//         let subseq: Vec<_> = (0..repnum)
+//             .map(|_| {
+//                 let subchunk: Vec<_> = seqs.choose_multiple(&mut rng, subchunk).copied().collect();
+//                 POA::from_slice_banded(&subchunk, (-1, -1, &score), rad).consensus()
+//             })
+//             .collect();
+//         let subseq: Vec<_> = subseq.iter().map(|e| e.as_slice()).collect();
+//         POA::from_slice_banded(&subseq, (-1, -1, &score), max_len / 10).consensus()
+//     }
+// }
 
 #[cfg(test)]
 mod test {
