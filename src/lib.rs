@@ -10,6 +10,47 @@ pub fn consensus<T: std::borrow::Borrow<[u8]>>(seqs: &[T], seed: u64, repnum: us
     consensus_kiley(seqs, seed, repnum, radius)
 }
 
+pub fn consensus_canonical<T: std::borrow::Borrow<[u8]>>(
+    seqs: &[T],
+    seed: u64,
+    radius: usize,
+) -> Vec<u8> {
+    fn consensus_inner(seqs: &[&[u8]], radius: usize) -> Vec<u8> {
+        let mut consensus: Vec<_> = seqs.iter().map(|x| x.to_vec()).collect();
+        for t in 1.. {
+            let rad = (radius / t).max(10);
+            consensus = consensus
+                .chunks_exact(3)
+                .map(|xs| get_consensus_kiley(&xs[0], &xs[1], &xs[2], rad).1)
+                .collect();
+            // let consensus_dist: Vec<_> = consensus
+            //     .chunks_exact(3)
+            //     .map(|xs| get_consensus_kiley(&xs[0], &xs[1], &xs[2], rad))
+            //     .collect();
+            // let mean = consensus_dist.iter().map(|x| x.0 as f64).sum::<f64>() / seqs.len() as f64;
+            // let diffsq = |&(x, _): &(u32, _)| (x as f64 - mean).powi(2);
+            // let sd = (consensus_dist.iter().map(diffsq).sum::<f64>() / seqs.len() as f64).sqrt();
+            // let thr = (mean + 2f64 * sd).floor() as u32 + 2;
+            // consensus = consensus_dist
+            //     .into_iter()
+            //     .filter_map(|(dist, seq)| if dist < thr { Some(seq) } else { None })
+            //     .collect();
+            if consensus.len() < 3 {
+                break;
+            }
+        }
+        consensus.pop().unwrap()
+    }
+    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
+    let mut seqs: Vec<_> = seqs.iter().map(|x| x.borrow()).collect();
+    let xs = consensus_inner(&seqs, radius);
+    seqs.shuffle(&mut rng);
+    let ys = consensus_inner(&seqs, radius);
+    seqs.shuffle(&mut rng);
+    let zs = consensus_inner(&seqs, radius);
+    get_consensus_kiley(&xs, &ys, &zs, 10).1
+}
+
 pub fn consensus_kiley<T: std::borrow::Borrow<[u8]>>(
     seqs: &[T],
     seed: u64,
@@ -105,9 +146,7 @@ pub fn correct_by_alignment(xs: &[u8], ys: &[u8], zs: &[u8], aln: &[alignment::O
                 y += 1;
             }
             alignment::Op::Match => {
-                if xs[x] == ys[y] {
-                    buffer.push(xs[x]);
-                } else if xs[x] == zs[z] {
+                if xs[x] == ys[y] || xs[x] == zs[z] {
                     buffer.push(xs[x]);
                 } else if ys[y] == zs[z] {
                     buffer.push(zs[z])
@@ -128,46 +167,47 @@ pub fn correct_by_alignment(xs: &[u8], ys: &[u8], zs: &[u8], aln: &[alignment::O
     buffer
 }
 
-// pub fn consensus_poa<T: std::borrow::Borrow<[u8]>>(
-//     seqs: &[T],
-//     seed: u64,
-//     subchunk: usize,
-//     repnum: usize,
-//     read_type: &str,
-// ) -> Vec<u8> {
-//     let seqs: Vec<_> = seqs.iter().map(|x| x.borrow()).collect();
-//     #[inline]
-//     fn score(x: u8, y: u8) -> i32 {
-//         if x == y {
-//             1
-//         } else {
-//             -1
-//         }
-//     }
-//     let max_len = match seqs.iter().map(|x| x.len()).max() {
-//         Some(res) => res,
-//         None => return vec![],
-//     };
-//     let rad = match read_type {
-//         "CCS" => max_len / 20,
-//         "CLR" => max_len / 10,
-//         "ONT" => max_len / 10,
-//         _ => unreachable!(),
-//     };
-//     if seqs.len() <= 10 {
-//         POA::from_slice_default(&seqs).consensus()
-//     } else {
-//         let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
-//         let subseq: Vec<_> = (0..repnum)
-//             .map(|_| {
-//                 let subchunk: Vec<_> = seqs.choose_multiple(&mut rng, subchunk).copied().collect();
-//                 POA::from_slice_banded(&subchunk, (-1, -1, &score), rad).consensus()
-//             })
-//             .collect();
-//         let subseq: Vec<_> = subseq.iter().map(|e| e.as_slice()).collect();
-//         POA::from_slice_banded(&subseq, (-1, -1, &score), max_len / 10).consensus()
-//     }
-// }
+pub fn consensus_poa<T: std::borrow::Borrow<[u8]>>(
+    seqs: &[T],
+    seed: u64,
+    subchunk: usize,
+    repnum: usize,
+    read_type: &str,
+) -> Vec<u8> {
+    use poa_hmm::POA;
+    let seqs: Vec<_> = seqs.iter().map(|x| x.borrow()).collect();
+    #[inline]
+    fn score(x: u8, y: u8) -> i32 {
+        if x == y {
+            1
+        } else {
+            -1
+        }
+    }
+    let max_len = match seqs.iter().map(|x| x.len()).max() {
+        Some(res) => res,
+        None => return vec![],
+    };
+    let rad = match read_type {
+        "CCS" => max_len / 20,
+        "CLR" => max_len / 10,
+        "ONT" => max_len / 10,
+        _ => unreachable!(),
+    };
+    if seqs.len() <= 10 {
+        POA::from_slice_default(&seqs).consensus()
+    } else {
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
+        let subseq: Vec<_> = (0..repnum)
+            .map(|_| {
+                let subchunk: Vec<_> = seqs.choose_multiple(&mut rng, subchunk).copied().collect();
+                POA::from_slice_banded(&subchunk, (-1, -1, &score), rad).consensus()
+            })
+            .collect();
+        let subseq: Vec<_> = subseq.iter().map(|e| e.as_slice()).collect();
+        POA::from_slice_banded(&subseq, (-1, -1, &score), max_len / 10).consensus()
+    }
+}
 
 #[cfg(test)]
 mod test {
@@ -192,7 +232,7 @@ mod test {
                     .map(|_| gen_seq::introduce_randomness(&template1, &mut rng, &gen_seq::PROFILE))
                     .collect();
                 let seqs: Vec<_> = seqs.iter().map(|e| e.as_slice()).collect();
-                let consensus = consensus(&seqs, cov as u64, 10);
+                let consensus = consensus(&seqs, cov as u64, 7);
                 let dist = edit_dist(&consensus, &template1);
                 eprintln!("LONG:{}", dist);
                 dist <= 2
@@ -222,7 +262,7 @@ mod test {
                     .map(|_| gen_seq::introduce_randomness(&template1, &mut rng, &gen_seq::PROFILE))
                     .collect();
                 let seqs: Vec<_> = seqs.iter().map(|e| e.as_slice()).collect();
-                let consensus = consensus(&seqs, cov as u64, 10);
+                let consensus = consensus(&seqs, cov as u64, 7);
                 let dist = edit_dist(&consensus, &template1);
                 eprintln!(
                     "{}\n{}\n{}",
@@ -282,7 +322,7 @@ mod test {
             let seqs: Vec<_> = (0..coverage)
                 .map(|_| gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE))
                 .collect();
-            let consensus = consensus_kiley(&seqs, i, 10, 20);
+            let consensus = consensus_kiley(&seqs, i, 7, 20);
             let dist = edit_dist(&consensus, &template);
             eprintln!("T:{}", String::from_utf8_lossy(&template));
             eprintln!("C:{}", String::from_utf8_lossy(&consensus));
@@ -303,7 +343,7 @@ mod test {
                 let seqs: Vec<_> = (0..cov)
                     .map(|_| gen_seq::introduce_randomness(&template1, &mut rng, &gen_seq::PROFILE))
                     .collect();
-                let consensus = consensus_kiley(&seqs, cov as u64, 10, 10);
+                let consensus = consensus_kiley(&seqs, cov as u64, 7, 10);
                 let dist = edit_dist(&consensus, &template1);
                 eprintln!("LONG:{}", dist);
                 dist <= 2
@@ -332,7 +372,7 @@ mod test {
                 let seqs: Vec<_> = (0..cov)
                     .map(|_| gen_seq::introduce_randomness(&template1, &mut rng, &gen_seq::PROFILE))
                     .collect();
-                let consensus = consensus_kiley(&seqs, cov as u64, 10, 10);
+                let consensus = consensus_kiley(&seqs, cov as u64, 6, 10);
                 let dist = edit_dist(&consensus, &template1);
                 eprintln!(
                     "{}\n{}\n{}",

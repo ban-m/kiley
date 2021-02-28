@@ -7,12 +7,12 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# poa_hmm = {version = "0.2.0", git = "https://github.com/ban-m/partial_order_alignment.git"}
+poa_hmm = {version = "0.2.0", git = "https://github.com/ban-m/partial_order_alignment.git", features = ["poa_simd"]}
 clap = "2.33"
 bio = "0.31"
 rand = "0.7.3"
 rand_xoshiro = "0.4.0"
-log = "0.4.11"
+log = "0.4.14"
 
 [dev-dependencies]
 rayon = "1.3.1"

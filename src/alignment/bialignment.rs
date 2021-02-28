@@ -16,6 +16,77 @@ const fn match_mat() -> [u16; 64] {
 
 const MATMAT: [u16; 64] = match_mat();
 
+/// Edit distance by diff. Runs O(kn).
+/// The input should be shorter than 2^30
+pub fn edit_dist(xs: &[u8], ys: &[u8]) -> u32 {
+    // dp[d][k] = "the far-reaching position in the diagonal k with edit distance is d"
+    // here, we mean diagonal k by offset with x.len()
+    // In other words, to specify j = i + k diagonal, we index this diagonal as k + x.len()
+    // Search far reaching point from diagonal k and reaching point t.
+    fn search_far_reaching(xs: &[u8], ys: &[u8], diag: usize, reach: usize) -> usize {
+        let i = reach;
+        let j = reach + diag - xs.len();
+        xs.iter()
+            .skip(i)
+            .zip(ys.iter().skip(j))
+            .take_while(|(x, y)| x == y)
+            .count()
+    }
+    // This is the filled flag.
+    let filled_flag = 0b1 << 31;
+    let mut dp: Vec<Vec<u32>> = vec![vec![0; xs.len() + 3]];
+    let reach = search_far_reaching(xs, ys, xs.len(), 0);
+    if reach == xs.len() && reach == ys.len() {
+        return 0;
+    }
+    dp[0][xs.len()] = reach as u32 ^ filled_flag;
+    for d in 1.. {
+        let prev = dp.last().unwrap();
+        let start = xs.len() - d.min(xs.len());
+        let end = xs.len() + d.min(ys.len());
+        let mut row = vec![0; xs.len() + d + 3];
+        if start == 0 {
+            let diagonal = start;
+            row[diagonal] = (dp[d - 1][diagonal] + 1).max(dp[d - 1][diagonal + 1] + 1);
+        }
+        for (diagonal, reach) in row.iter_mut().enumerate().take(end + 1).skip(start.max(1)) {
+            *reach = (prev[diagonal - 1])
+                .max(prev[diagonal] + 1)
+                .max(prev[diagonal + 1] + 1);
+        }
+        for (diagonal, reach) in row.iter_mut().enumerate().take(end + 1).skip(start) {
+            let mut reach_wo_flag =
+                ((*reach ^ filled_flag) as usize).min(ys.len() + xs.len() - diagonal);
+            reach_wo_flag += search_far_reaching(xs, ys, diagonal, reach_wo_flag);
+            let (i, j) = (reach_wo_flag, reach_wo_flag + diagonal - xs.len());
+            if i == xs.len() && j == ys.len() {
+                return d as u32;
+            }
+            *reach = reach_wo_flag as u32 ^ filled_flag;
+        }
+        dp.push(row);
+    }
+    unreachable!()
+}
+
+pub fn edit_dist_slow(xs: &[u8], ys: &[u8]) -> u32 {
+    let mut dp = vec![vec![0; ys.len() + 1]; xs.len() + 1];
+    for (i, row) in dp.iter_mut().enumerate() {
+        row[0] = i as u32;
+    }
+    for (j, x) in dp[0].iter_mut().enumerate() {
+        *x = j as u32;
+    }
+    for (i, x) in xs.iter().enumerate().map(|(i, &x)| (i + 1, x)) {
+        for (j, y) in ys.iter().enumerate().map(|(j, &y)| (j + 1, y)) {
+            dp[i][j] = (dp[i - 1][j] + 1)
+                .min(dp[i][j - 1] + 1)
+                .min(dp[i - 1][j - 1] + (x != y) as u32);
+        }
+    }
+    dp[xs.len()][ys.len()]
+}
+
 pub fn fast_align(xs: &[u8], ys: &[u8]) -> u16 {
     let xs: Vec<_> = std::iter::once(0b111)
         .chain(xs.iter().map(crate::alignment::convert_to_twobit))
@@ -84,6 +155,66 @@ mod test {
             let score = naive_align(&xs, &ys);
             let fastscore = fast_align(&xs, &ys);
             eprintln!("S:{}, F:{}", score, fastscore);
+            assert_eq!(score, fastscore);
+        }
+    }
+    #[test]
+    fn edist_dist_check() {
+        let xs = b"AAGTT";
+        let ys = b"AAGT";
+        assert_eq!(edit_dist_slow(xs, xs), 0);
+        assert_eq!(edit_dist_slow(xs, ys), 1);
+        assert_eq!(edit_dist_slow(xs, b""), 5);
+        assert_eq!(edit_dist_slow(b"AAAA", b"A"), 3);
+        assert_eq!(edit_dist_slow(b"AGCT", b"CAT"), 3);
+    }
+    #[test]
+    fn edit_dist_fast_check_short() {
+        let xs = b"TC";
+        let ys = b"CAT";
+        assert_eq!(edit_dist_slow(xs, ys), edit_dist(xs, ys));
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+        for _ in 0..1000 {
+            let xslen = rng.gen::<usize>() % 10;
+            let xs = crate::gen_seq::generate_seq(&mut rng, xslen);
+            let yslen = rng.gen::<usize>() % 10;
+            let ys = crate::gen_seq::generate_seq(&mut rng, yslen);
+            let score = edit_dist_slow(&xs, &ys);
+            let fastscore = edit_dist(&xs, &ys);
+            let xs = String::from_utf8_lossy(&xs);
+            let ys = String::from_utf8_lossy(&ys);
+            assert_eq!(score, fastscore, "{},{}", xs, ys);
+        }
+    }
+    #[test]
+    fn edit_dist_fast_check() {
+        let xs = b"AAGTT";
+        let ys = b"AAGT";
+        assert_eq!(edit_dist(xs, xs), 0);
+        assert_eq!(edit_dist(xs, ys), 1);
+        assert_eq!(edit_dist(xs, b""), 5);
+        assert_eq!(edit_dist(b"AAAA", b"A"), 3);
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+        for _ in 0..1000 {
+            let xslen = rng.gen::<usize>() % 1000;
+            let xs = crate::gen_seq::generate_seq(&mut rng, xslen);
+            let yslen = rng.gen::<usize>() % 1000;
+            let ys = crate::gen_seq::generate_seq(&mut rng, yslen);
+            let score = edit_dist_slow(&xs, &ys);
+            let fastscore = edit_dist(&xs, &ys);
+            assert_eq!(score, fastscore);
+        }
+    }
+    #[test]
+    fn edit_dist_fast_check_sim() {
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+        let prof = crate::gen_seq::PROFILE;
+        for _ in 0..1000 {
+            let xslen = rng.gen::<usize>() % 1000;
+            let xs = crate::gen_seq::generate_seq(&mut rng, xslen);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+            let score = edit_dist_slow(&xs, &ys);
+            let fastscore = edit_dist(&xs, &ys);
             assert_eq!(score, fastscore);
         }
     }

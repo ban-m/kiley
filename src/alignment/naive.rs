@@ -17,8 +17,10 @@ pub fn alignment(xs: &[u8], ys: &[u8], zs: &[u8]) -> (u32, Vec<Op>) {
         dp[0][y][0] = y as u32;
     }
     // Fill y == z == 0 case
-    for x in 0..=xs.len() {
-        dp[x][0][0] = x as u32;
+    for (x, yz) in dp.iter_mut().enumerate().take(xs.len() + 1) {
+        // for x in 0..=xs.len() {
+        // dp[x][0][0] = x as u32;
+        yz[0][0] = x as u32;
     }
     // Fill X == 0, y > 0, z > 0 case.
     for y in 1..=ys.len() {
@@ -38,7 +40,7 @@ pub fn alignment(xs: &[u8], ys: &[u8], zs: &[u8]) -> (u32, Vec<Op>) {
         for z in 1..=zs.len() {
             let del = dp[x][0][z - 1] + 1;
             let ins = dp[x - 1][0][z] + 1;
-            let mat_score = MA32[0b100_000_000 | ((zs[z - 1] << 3) | xs[x - 1]) as usize];
+            let mat_score = MA32[0b1_0000_0000 | ((zs[z - 1] << 3) | xs[x - 1]) as usize];
             dp[x][0][z] = del.min(ins).min(dp[x - 1][0][z - 1] + mat_score);
         }
     }
@@ -47,7 +49,7 @@ pub fn alignment(xs: &[u8], ys: &[u8], zs: &[u8]) -> (u32, Vec<Op>) {
         for y in 1..=ys.len() {
             let del = dp[x][y - 1][0] + 1;
             let ins = dp[x - 1][y][0] + 1;
-            let mat_score = MA32[0b100_000_000 | ((xs[x - 1] << 3) | ys[y - 1]) as usize];
+            let mat_score = MA32[0b1_0000_0000 | ((xs[x - 1] << 3) | ys[y - 1]) as usize];
             dp[x][y][0] = del.min(ins).min(dp[x - 1][y - 1][0] + mat_score);
         }
     }
@@ -59,7 +61,7 @@ pub fn alignment(xs: &[u8], ys: &[u8], zs: &[u8]) -> (u32, Vec<Op>) {
                 let x_ins = dp[x - 1][y][z] + 1;
                 let y_ins = dp[x][y - 1][z] + 1;
                 let z_ins = dp[x][y][z - 1] + 1;
-                let gap = 0b100_000_000;
+                let gap = 0b1_0000_0000;
                 // (-, ys[y-1], zs[z-1]), causing 1 or 2 penalty.
                 let x_del = dp[x][y - 1][z - 1] + MA32[gap | (ys[y - 1] << 3 | zs[z - 1]) as usize];
                 let y_del = dp[x - 1][y][z - 1] + MA32[gap | (xs[x - 1] << 3 | zs[z - 1]) as usize];

@@ -72,7 +72,7 @@ pub fn alignment_u32(xs: &[u8], ys: &[u8], zs: &[u8], rad: usize) -> (u32, Vec<O
         let diffs = {
             let (t_c, u_c) = (t_center, u_center);
             match &centers[s as usize - 3..s as usize] {
-                &[(x3, y3), (x2, y2), (x1, y1)] => {
+                [(x3, y3), (x2, y2), (x1, y1)] => {
                     [t_c - x1, t_c - x2, t_c - x3, u_c - y1, u_c - y2, u_c - y3]
                 }
                 _ => panic!(),
@@ -162,7 +162,7 @@ pub fn alignment_u32(xs: &[u8], ys: &[u8], zs: &[u8], rad: usize) -> (u32, Vec<O
         let diffs = {
             let (t_c, u_c) = (t_center, u_center);
             match &centers[s as usize - 3..s as usize] {
-                &[(x3, y3), (x2, y2), (x1, y1)] => {
+                [(x3, y3), (x2, y2), (x1, y1)] => {
                     [t_c - x1, t_c - x2, t_c - x3, u_c - y1, u_c - y2, u_c - y3]
                 }
                 _ => panic!(),
@@ -207,9 +207,10 @@ fn get_next_position(
             *dp.get_unchecked(get!(s - 3, t_d3 - 2, u_d3 - 1, len)),
         ]
     };
-    for i in 0..6 {
-        dp_scores[i] += 1;
-    }
+    dp_scores.iter_mut().take(6).for_each(|x| *x += 1);
+    // for i in 0..6 {
+    //     dp_scores[i] += 1;
+    // }
     dp_scores[3] += (y_base != z_base) as u32;
     dp_scores[4] += (x_base != z_base) as u32;
     dp_scores[5] += (x_base != y_base) as u32;

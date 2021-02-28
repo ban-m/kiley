@@ -19,10 +19,15 @@ fn main() {
     let kiley_dist = edit_dist(&template, &consensus);
     let start = std::time::Instant::now();
     // Please uncomment it and uncomment the corresponding dependencies in Cargo.toml
-    // let consensus = kiley::consensus_poa(&seqs, seed, 10, 10, "CLR");
+    let consensus = kiley::consensus_poa(&seqs, seed, 10, 10, "CLR");
     let end = std::time::Instant::now();
     let poa_time = (end - start).as_millis();
     let poa_dist = edit_dist(&template, &consensus);
+    let start = std::time::Instant::now();
+    let consensus = kiley::consensus_canonical(&seqs, seed, 10);
+    let end = std::time::Instant::now();
+    let can_time = (end - start).as_millis();
+    let can_dist = edit_dist(&template, &consensus);
     println!(
         "{}\t{}\t{}\t{}\t{}\t{}\tTernary",
         len, seed, coverage, error_rate, kiley_time, kiley_dist
@@ -30,6 +35,10 @@ fn main() {
     println!(
         "{}\t{}\t{}\t{}\t{}\t{}\tPOA",
         len, seed, coverage, error_rate, poa_time, poa_dist
+    );
+    println!(
+        "{}\t{}\t{}\t{}\t{}\t{}\tCanon",
+        len, seed, coverage, error_rate, can_time, can_dist
     );
 }
 
