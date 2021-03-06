@@ -8,17 +8,17 @@ fn main() {
     let mut rng: rand_xoshiro::Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(seed);
     use kiley::gen_seq;
     let template: Vec<_> = gen_seq::generate_seq(&mut rng, len);
-    let prof = gen_seq::PROFILE.norm().mul(error_rate / 3f64);
+    let prof = gen_seq::PROFILE.norm().mul(error_rate);
     let seqs: Vec<_> = (0..coverage)
         .map(|_| gen_seq::introduce_randomness(&template, &mut rng, &prof))
         .collect();
     let start = std::time::Instant::now();
-    let consensus = kiley::consensus_kiley(&seqs, seed, 5, 10);
+    let consensus = kiley::consensus(&seqs, seed, 5);
     let end = std::time::Instant::now();
     let kiley_time = (end - start).as_millis();
     let kiley_dist = edit_dist(&template, &consensus);
-    let start = std::time::Instant::now();
     // Please uncomment it and uncomment the corresponding dependencies in Cargo.toml
+    let start = std::time::Instant::now();
     let consensus = kiley::consensus_poa(&seqs, seed, 10, 10, "CLR");
     let end = std::time::Instant::now();
     let poa_time = (end - start).as_millis();

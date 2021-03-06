@@ -98,7 +98,6 @@ pub fn alignment_u32(xs: &[u8], ys: &[u8], zs: &[u8], rad: usize) -> (u32, Vec<O
                 let x_base = xs[(x_axis - 1) as usize];
                 let y_base = ys[(y_axis - 1) as usize];
                 let z_base = zs[(z_axis - 1) as usize];
-                // This is the hottest loop.
                 let score =
                     get_next_score(&filled_dp, len, (s, t, u), &diffs, (x_base, y_base, z_base));
                 filling_dp[(t * len + u) as usize] = score;

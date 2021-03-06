@@ -56,6 +56,104 @@ fn edit_dist(b: &mut test::Bencher) {
     });
 }
 
+const HMMLEN: usize = 1000;
+
+#[bench]
+fn hmm_naive(b: &mut test::Bencher) {
+    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+    let profile = kiley::gen_seq::Profile {
+        sub: 0.01,
+        del: 0.01,
+        ins: 0.01,
+    };
+    let phmm = kiley::hmm::PHMM::default();
+    b.iter(|| {
+        let template = kiley::gen_seq::generate_seq(&mut rng, HMMLEN);
+        let seq = kiley::gen_seq::introduce_randomness(&template, &mut rng, &profile);
+        test::black_box(phmm.likelihood(&template, &seq))
+    });
+}
+
+#[bench]
+fn hmm_banded(b: &mut test::Bencher) {
+    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+    let profile = kiley::gen_seq::Profile {
+        sub: 0.01,
+        del: 0.01,
+        ins: 0.01,
+    };
+    let phmm = kiley::hmm::PHMM::default();
+    b.iter(|| {
+        let template = kiley::gen_seq::generate_seq(&mut rng, HMMLEN);
+        let seq = kiley::gen_seq::introduce_randomness(&template, &mut rng, &profile);
+        test::black_box(phmm.likelihood_banded(&template, &seq, 20))
+    });
+}
+
+#[bench]
+fn hmm_forward(b: &mut test::Bencher) {
+    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+    let profile = kiley::gen_seq::Profile {
+        sub: 0.01,
+        del: 0.01,
+        ins: 0.01,
+    };
+    let phmm = kiley::hmm::PHMM::default();
+    b.iter(|| {
+        let template = kiley::gen_seq::generate_seq(&mut rng, HMMLEN);
+        let seq = kiley::gen_seq::introduce_randomness(&template, &mut rng, &profile);
+        test::black_box(phmm.forward(&template, &seq))
+    });
+}
+
+#[bench]
+fn hmm_forward_banded(b: &mut test::Bencher) {
+    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+    let profile = kiley::gen_seq::Profile {
+        sub: 0.01,
+        del: 0.01,
+        ins: 0.01,
+    };
+    let phmm = kiley::hmm::PHMM::default();
+    b.iter(|| {
+        let template = kiley::gen_seq::generate_seq(&mut rng, HMMLEN);
+        let seq = kiley::gen_seq::introduce_randomness(&template, &mut rng, &profile);
+        test::black_box(phmm.forward_banded(&template, &seq, 20))
+    });
+}
+
+#[bench]
+fn hmm_forward_backward(b: &mut test::Bencher) {
+    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+    let profile = kiley::gen_seq::Profile {
+        sub: 0.01,
+        del: 0.01,
+        ins: 0.01,
+    };
+    let phmm = kiley::hmm::PHMM::default();
+    b.iter(|| {
+        let template = kiley::gen_seq::generate_seq(&mut rng, HMMLEN);
+        let seq = kiley::gen_seq::introduce_randomness(&template, &mut rng, &profile);
+        test::black_box(phmm.get_profile(&template, &seq))
+    });
+}
+
+#[bench]
+fn hmm_forward_backward_banded(b: &mut test::Bencher) {
+    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+    let profile = kiley::gen_seq::Profile {
+        sub: 0.01,
+        del: 0.01,
+        ins: 0.01,
+    };
+    let phmm = kiley::hmm::PHMM::default();
+    b.iter(|| {
+        let template = kiley::gen_seq::generate_seq(&mut rng, HMMLEN);
+        let seq = kiley::gen_seq::introduce_randomness(&template, &mut rng, &profile);
+        test::black_box(phmm.get_profile_banded(&template, &seq, 20))
+    });
+}
+
 // #[bench]
 // fn bi_aln_naive(b: &mut test::Bencher) {
 //     let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
