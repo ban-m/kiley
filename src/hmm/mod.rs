@@ -469,6 +469,20 @@ impl DiagonalDP {
             .iter_mut()
             .for_each(|xs| xs.iter_mut().for_each(|x| *x -= a));
     }
+    // pub fn sum_anti_diagonal(&self, k: usize) -> f64 {
+    //     self.mat[k]
+    //         .iter()
+    //         .chain(self.del[k].iter())
+    //         .chain(self.ins[k].iter())
+    //         .sum::<f64>()
+    // }
+    // pub fn div_anti_diagonal(&mut self, k: usize, div: f64) {
+    //     self.mat[k]
+    //         .iter_mut()
+    //         .chain(self.del[k].iter_mut())
+    //         .chain(self.ins[k].iter_mut())
+    //         .for_each(|x| *x /= div);
+    // }
 }
 
 impl PHMM {
@@ -606,31 +620,27 @@ impl PHMM {
     }
     /// Forward algortihm in banded manner. Return the DP tables for each state,
     /// and the ceters of each anti-diagonal.
+    /// Currently, we use re-scaling method instead of log-sum-exp mode because of stability and efficiency.
     pub fn forward_banded(&self, xs: &[u8], ys: &[u8], radius: usize) -> (DiagonalDP, Vec<usize>) {
         let xs: Vec<_> = xs.iter().map(crate::alignment::convert_to_twobit).collect();
         let ys: Vec<_> = ys.iter().map(crate::alignment::convert_to_twobit).collect();
         // `radius` radius, plus 2 for padding.
         let mut centers: Vec<usize> = vec![0, 0, 1];
+        // Sum of mat[k] + del[k] + ins[k]
+        // let mut scaling_factor: Vec<f64> = Vec::with_capacity(xs.len() + ys.len() + 2);
         let mut dp = DiagonalDP::new(xs.len() + ys.len() + 1, 2 * radius + 1 + 2, EP);
+        // let mut dp = DiagonalDP::new(xs.len() + ys.len() + 1, 2 * radius + 1 + 2, 0f64);
         // The first diagonal.
         *dp.get_mut(0, radius, State::Mat) = 0f64;
-        let (del_prob, _): (Vec<f64>, f64) =
-            xs.iter().fold((vec![0f64], 0f64), |(mut xs, acc), &x| {
-                let acc = self.log_gap_emit[x as usize] + acc;
-                xs.push(acc);
-                (xs, acc)
-            });
-        let (ins_prob, _): (Vec<f64>, f64) =
-            ys.iter().fold((vec![0f64], 0f64), |(mut ys, acc), &y| {
-                let acc = acc + self.log_gap_emit[y as usize];
-                ys.push(acc);
-                (ys, acc)
-            });
+        // *dp.get_mut(0, radius, State::Mat) = 1f64;
+        // scaling_factor.push(1f64);
         // The second diagonal.
-        *dp.get_mut(1, radius, State::Ins) =
-            self.log_gap_open + self.log_gap_emit[ys[0] as usize] + ins_prob[0];
+        *dp.get_mut(1, radius, State::Ins) = self.log_gap_open + self.log_gap_emit[ys[0] as usize];
         *dp.get_mut(1, radius + 1, State::Del) =
-            self.log_gap_open + self.log_gap_emit[xs[0] as usize] + del_prob[0];
+            self.log_gap_open + self.log_gap_emit[xs[0] as usize];
+        // let sum = dp.sum_anti_diagonal(1);
+        // dp.div_anti_diagonal(1, sum);
+        // scaling_factor.push(sum);
         for k in 2..xs.len() + ys.len() + 1 {
             let center = *centers.last().unwrap();
             let matdiff = center as isize - centers[k - 2] as isize;
@@ -645,46 +655,40 @@ impl PHMM {
                     continue;
                 }
                 let u = u as usize;
-                if u == 0 {
-                    *dp.get_mut(k, pos, State::Ins) =
-                        self.log_gap_open + self.log_gap_ext * (k - u - 1) as f64 + ins_prob[k - u];
-                } else if k == u {
-                    // This is gap only. Skip mat, ins, Only del.
-                    *dp.get_mut(k, pos, State::Del) =
-                        self.log_gap_open + self.log_gap_ext * (u - 1) as f64 + del_prob[u];
-                } else {
+                let prev_mat = pos as isize + matdiff;
+                let prev_gap = pos as isize + gapdiff;
+                let mat = if 0 < prev_mat && 0 < u && u < k {
                     let (x, y) = (xs[u - 1], ys[k - u - 1]);
-                    let prev_mat = (pos as isize + matdiff) as usize;
-                    let prev_gap = (pos as isize + gapdiff) as usize;
-                    let mat = if 0 < prev_mat {
-                        Self::logsumexp(
-                            dp.get(k - 2, prev_mat - 1, State::Mat),
-                            dp.get(k - 2, prev_mat - 1, State::Del),
-                            dp.get(k - 2, prev_mat - 1, State::Ins),
-                        ) + self.log_mat
-                            + self.log_mat_emit[(x << 2 | y) as usize]
-                    } else {
-                        EP + self.log_mat + self.log_mat_emit[(x << 2 | y) as usize]
-                    };
-                    *dp.get_mut(k, pos, State::Mat) = mat;
-                    let del = if 0 < prev_gap {
-                        Self::logsumexp(
-                            dp.get(k - 1, prev_gap - 1, State::Mat) + self.log_gap_open,
-                            dp.get(k - 1, prev_gap - 1, State::Del) + self.log_gap_ext,
-                            dp.get(k - 1, prev_gap - 1, State::Ins) + self.log_gap_switch,
-                        )
-                    } else {
-                        EP
-                    };
-                    *dp.get_mut(k, pos, State::Del) = del + self.log_gap_emit[x as usize];
-                    // Always safe.
-                    let ins = Self::logsumexp(
-                        dp.get(k - 1, prev_gap, State::Mat) + self.log_gap_open,
-                        dp.get(k - 1, prev_gap, State::Del) + self.log_gap_switch,
-                        dp.get(k - 1, prev_gap, State::Ins) + self.log_gap_ext,
-                    ) + self.log_gap_emit[x as usize];
-                    *dp.get_mut(k, pos, State::Ins) = ins;
-                }
+                    Self::logsumexp(
+                        dp.get(k - 2, prev_mat as usize - 1, State::Mat),
+                        dp.get(k - 2, prev_mat as usize - 1, State::Del),
+                        dp.get(k - 2, prev_mat as usize - 1, State::Ins),
+                    ) + self.log_mat
+                        + self.log_mat_emit[(x << 2 | y) as usize]
+                } else {
+                    EP
+                };
+                *dp.get_mut(k, pos, State::Mat) = mat;
+                let del = if 0 < prev_gap && 0 < u {
+                    Self::logsumexp(
+                        dp.get(k - 1, prev_gap as usize - 1, State::Mat) + self.log_gap_open,
+                        dp.get(k - 1, prev_gap as usize - 1, State::Del) + self.log_gap_ext,
+                        dp.get(k - 1, prev_gap as usize - 1, State::Ins) + self.log_gap_switch,
+                    ) + self.log_gap_emit[xs[u - 1] as usize]
+                } else {
+                    EP
+                };
+                *dp.get_mut(k, pos, State::Del) = del;
+                let ins = if 0 <= prev_gap && u < k {
+                    Self::logsumexp(
+                        dp.get(k - 1, prev_gap as usize, State::Mat) + self.log_gap_open,
+                        dp.get(k - 1, prev_gap as usize, State::Del) + self.log_gap_switch,
+                        dp.get(k - 1, prev_gap as usize, State::Ins) + self.log_gap_ext,
+                    ) + self.log_gap_emit[ys[k - u - 1] as usize]
+                } else {
+                    EP
+                };
+                *dp.get_mut(k, pos, State::Ins) = ins;
             }
             let (max_u, _max_lk) = dp
                 .get_row(k, State::Mat)
@@ -844,58 +848,38 @@ impl PHMM {
                     continue;
                 }
                 let (i, j) = (i as usize, j as usize);
-                if i == xs.len() {
-                    *dp.get_mut(k, pos, State::Mat) = gap_emit_ys[j]
-                        + self.log_gap_open
-                        + self.log_gap_ext * (ys.len() - j - 1) as f64;
-                    *dp.get_mut(k, pos, State::Del) = gap_emit_ys[j]
-                        + self.log_gap_switch
-                        + self.log_gap_ext * (ys.len() - j - 1) as f64;
-                    *dp.get_mut(k, pos, State::Ins) =
-                        gap_emit_ys[j] + self.log_gap_ext * (ys.len() - j) as f64;
-                } else if j == ys.len() {
-                    *dp.get_mut(k, pos, State::Mat) = gap_emit_xs[i]
-                        + self.log_gap_open
-                        + self.log_gap_ext * (xs.len() - i - 1) as f64;
-                    *dp.get_mut(k, pos, State::Del) =
-                        gap_emit_xs[i] + self.log_gap_ext * (xs.len() - i) as f64;
-                    *dp.get_mut(k, pos, State::Ins) = gap_emit_xs[i]
-                        + self.log_gap_switch
-                        + self.log_gap_ext * (xs.len() - i - 1) as f64;
-                } else {
+                // Previous, prev-previous position.
+                let u_mat = pos as isize + matdiff + 1;
+                let u_gap = pos as isize + gapdiff;
+                let mat = if 0 <= u_mat && i < xs.len() && j < ys.len() {
                     let (x, y) = (xs[i], ys[j]);
-                    // Previous, prev-previous position.
-                    let u_mat = pos as isize + matdiff + 1;
-                    let u_gap = pos as isize + gapdiff;
-                    let mat = if 0 <= u_mat {
-                        self.log_mat
-                            + self.log_mat_emit[(x << 2 | y) as usize]
-                            + dp.get(k + 2, u_mat as usize, State::Mat)
-                    } else {
-                        EP
-                    };
-                    let del = if -1 <= u_gap {
-                        self.log_gap_open
-                            + self.log_gap_emit[x as usize]
-                            + dp.get(k + 1, (u_gap + 1) as usize, State::Del)
-                    } else {
-                        EP
-                    };
-                    let ins = if 0 <= u_gap {
-                        self.log_gap_open
-                            + self.log_gap_emit[y as usize]
-                            + dp.get(k + 1, u_gap as usize, State::Ins)
-                    } else {
-                        EP
-                    };
-                    *dp.get_mut(k, pos, State::Mat) = Self::logsumexp(mat, del, ins);
-                    let del = del - self.log_gap_open + self.log_gap_ext;
-                    let ins = ins - self.log_gap_open + self.log_gap_switch;
-                    *dp.get_mut(k, pos, State::Del) = Self::logsumexp(mat, del, ins);
-                    let del = del - self.log_gap_ext + self.log_gap_switch;
-                    let ins = ins - self.log_gap_switch + self.log_gap_ext;
-                    *dp.get_mut(k, pos, State::Ins) = Self::logsumexp(mat, del, ins);
-                }
+                    self.log_mat
+                        + self.log_mat_emit[(x << 2 | y) as usize]
+                        + dp.get(k + 2, u_mat as usize, State::Mat)
+                } else {
+                    EP
+                };
+                let del = if -1 <= u_gap && i < xs.len() {
+                    self.log_gap_open
+                        + self.log_gap_emit[xs[i] as usize]
+                        + dp.get(k + 1, (u_gap + 1) as usize, State::Del)
+                } else {
+                    EP
+                };
+                let ins = if 0 <= u_gap && j < ys.len() {
+                    self.log_gap_open
+                        + self.log_gap_emit[ys[j] as usize]
+                        + dp.get(k + 1, u_gap as usize, State::Ins)
+                } else {
+                    EP
+                };
+                *dp.get_mut(k, pos, State::Mat) = Self::logsumexp(mat, del, ins);
+                let del = del - self.log_gap_open + self.log_gap_ext;
+                let ins = ins - self.log_gap_open + self.log_gap_switch;
+                *dp.get_mut(k, pos, State::Del) = Self::logsumexp(mat, del, ins);
+                let del = del - self.log_gap_ext + self.log_gap_switch;
+                let ins = ins - self.log_gap_switch + self.log_gap_ext;
+                *dp.get_mut(k, pos, State::Ins) = Self::logsumexp(mat, del, ins);
             }
         }
         dp
