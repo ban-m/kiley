@@ -397,7 +397,80 @@ impl std::default::Default for PHMM {
 
 const EP: f64 = -10000000000000000000000000000000f64;
 
-type DiagonalDP = Vec<Vec<f64>>;
+#[derive(Debug, Clone)]
+pub struct DiagonalDP {
+    mat: Vec<Vec<f64>>,
+    del: Vec<Vec<f64>>,
+    ins: Vec<Vec<f64>>,
+    column: usize,
+    row: usize,
+}
+
+impl DiagonalDP {
+    pub fn new(row: usize, column: usize, x: f64) -> Self {
+        Self {
+            mat: vec![vec![x; column]; row],
+            del: vec![vec![x; column]; row],
+            ins: vec![vec![x; column]; row],
+            row,
+            column,
+        }
+    }
+    pub fn get(&self, k: usize, u: usize, state: State) -> f64 {
+        match state {
+            State::Mat => self.mat[k][u],
+            State::Del => self.del[k][u],
+            State::Ins => self.ins[k][u],
+        }
+    }
+    pub fn get_check(&self, k: usize, u: usize, state: State) -> Option<f64> {
+        match state {
+            State::Mat => self.mat.get(k).and_then(|x| x.get(u)).copied(),
+            State::Del => self.del.get(k).and_then(|x| x.get(u)).copied(),
+            State::Ins => self.ins.get(k).and_then(|x| x.get(u)).copied(),
+        }
+    }
+    pub fn get_mut(&mut self, k: usize, u: usize, state: State) -> &mut f64 {
+        match state {
+            State::Mat => self.mat.get_mut(k).unwrap().get_mut(u).unwrap(),
+            State::Del => self.del.get_mut(k).unwrap().get_mut(u).unwrap(),
+            State::Ins => self.ins.get_mut(k).unwrap().get_mut(u).unwrap(),
+        }
+    }
+    pub fn get_row(&self, k: usize, state: State) -> &[f64] {
+        match state {
+            State::Mat => self.mat[k].as_slice(),
+            State::Del => self.del[k].as_slice(),
+            State::Ins => self.ins[k].as_slice(),
+        }
+    }
+    pub fn add(&mut self, other: &Self) {
+        self.mat
+            .iter_mut()
+            .zip(other.mat.iter())
+            .for_each(|(xs, ys)| xs.iter_mut().zip(ys.iter()).for_each(|(x, &y)| *x += y));
+        self.del
+            .iter_mut()
+            .zip(other.del.iter())
+            .for_each(|(xs, ys)| xs.iter_mut().zip(ys.iter()).for_each(|(x, &y)| *x += y));
+        self.ins
+            .iter_mut()
+            .zip(other.ins.iter())
+            .for_each(|(xs, ys)| xs.iter_mut().zip(ys.iter()).for_each(|(x, &y)| *x += y));
+    }
+    pub fn sub_scalar(&mut self, a: f64) {
+        self.mat
+            .iter_mut()
+            .for_each(|xs| xs.iter_mut().for_each(|x| *x -= a));
+        self.del
+            .iter_mut()
+            .for_each(|xs| xs.iter_mut().for_each(|x| *x -= a));
+        self.ins
+            .iter_mut()
+            .for_each(|xs| xs.iter_mut().for_each(|x| *x -= a));
+    }
+}
+
 impl PHMM {
     /// construct a new pair HMM.
     /// # Example
@@ -487,23 +560,23 @@ impl PHMM {
         ys: &[u8],
         radius: usize,
     ) -> Option<(Vec<f64>, f64)> {
-        let ((mat_dp, del_dp, ins_dp), centers) = self.forward_banded(xs, ys, radius);
+        let (dp, centers) = self.forward_banded(xs, ys, radius);
         let (k, u) = (xs.len() + ys.len(), xs.len());
         let u_in_dp = u + radius - centers[k];
         let max_lk = Self::logsumexp(
-            *mat_dp[k].get(u_in_dp)?,
-            *del_dp[k].get(u_in_dp)?,
-            *ins_dp[k].get(u_in_dp)?,
+            dp.get_check(k, u_in_dp, State::Mat)?,
+            dp.get_check(k, u_in_dp, State::Del)?,
+            dp.get_check(k, u_in_dp, State::Ins)?,
         );
-        // let mut dump = vec![vec![0f64; ys.len() + 1]; xs.len() + 1];
         // Maybe this code is very slow...
         let mut lks: Vec<Vec<f64>> = vec![vec![]; xs.len() + 1];
         for k in 0..xs.len() + ys.len() + 1 {
             let u_center = centers[k];
-            for (u, ((&x, &y), &z)) in mat_dp[k]
+            for (u, ((&x, &y), &z)) in dp
+                .get_row(k, State::Mat)
                 .iter()
-                .zip(del_dp[k].iter())
-                .zip(ins_dp[k].iter())
+                .zip(dp.get_row(k, State::Del).iter())
+                .zip(dp.get_row(k, State::Ins).iter())
                 .enumerate()
             {
                 let i = if radius <= u + u_center && u + u_center - radius < xs.len() + 1 {
@@ -533,21 +606,14 @@ impl PHMM {
     }
     /// Forward algortihm in banded manner. Return the DP tables for each state,
     /// and the ceters of each anti-diagonal.
-    pub fn forward_banded(
-        &self,
-        xs: &[u8],
-        ys: &[u8],
-        radius: usize,
-    ) -> ((DiagonalDP, DiagonalDP, DiagonalDP), Vec<usize>) {
+    pub fn forward_banded(&self, xs: &[u8], ys: &[u8], radius: usize) -> (DiagonalDP, Vec<usize>) {
         let xs: Vec<_> = xs.iter().map(crate::alignment::convert_to_twobit).collect();
         let ys: Vec<_> = ys.iter().map(crate::alignment::convert_to_twobit).collect();
         // `radius` radius, plus 2 for padding.
         let mut centers: Vec<usize> = vec![0, 0, 1];
-        let mut mat_dp = vec![vec![EP; 2 * radius + 1 + 2]; xs.len() + ys.len() + 1];
-        let mut del_dp = vec![vec![EP; 2 * radius + 1 + 2]; xs.len() + ys.len() + 1];
-        let mut ins_dp = vec![vec![EP; 2 * radius + 1 + 2]; xs.len() + ys.len() + 1];
+        let mut dp = DiagonalDP::new(xs.len() + ys.len() + 1, 2 * radius + 1 + 2, EP);
         // The first diagonal.
-        mat_dp[0][radius] = 0f64;
+        *dp.get_mut(0, radius, State::Mat) = 0f64;
         let (del_prob, _): (Vec<f64>, f64) =
             xs.iter().fold((vec![0f64], 0f64), |(mut xs, acc), &x| {
                 let acc = self.log_gap_emit[x as usize] + acc;
@@ -561,23 +627,17 @@ impl PHMM {
                 (ys, acc)
             });
         // The second diagonal.
-        ins_dp[1][radius] = self.log_gap_open + self.log_gap_emit[ys[0] as usize] + ins_prob[0];
-        del_dp[1][radius + 1] = self.log_gap_open + self.log_gap_emit[xs[0] as usize] + del_prob[0];
+        *dp.get_mut(1, radius, State::Ins) =
+            self.log_gap_open + self.log_gap_emit[ys[0] as usize] + ins_prob[0];
+        *dp.get_mut(1, radius + 1, State::Del) =
+            self.log_gap_open + self.log_gap_emit[xs[0] as usize] + del_prob[0];
         for k in 2..xs.len() + ys.len() + 1 {
-            let u_center = *centers.last().unwrap();
-            // let u_start = (u_center.saturating_sub(radius)).max(k.saturating_sub(ys.len()));
-            // let u_end = (u_center + radius + 1).min(xs.len() + 1).min(k + 1);
-            let (matdiff, gapdiff) = match centers[k - 2..k] {
-                [u1, u2] => (
-                    u_center as isize - u1 as isize,
-                    u_center as isize - u2 as isize,
-                ),
-                _ => panic!(),
-            };
+            let center = *centers.last().unwrap();
+            let matdiff = center as isize - centers[k - 2] as isize;
+            let gapdiff = center as isize - centers[k - 1] as isize;
             // TODO: remove `if` statements as many as possible.
             for pos in 0..2 * radius + 1 {
-                // for u in u_start..u_end {
-                let u = (pos + u_center) as isize - radius as isize;
+                let u = (pos + center) as isize - radius as isize;
                 let (i, j) = (u, k as isize - u);
                 if !((0..xs.len() as isize + 1).contains(&i)
                     && (0..ys.len() as isize + 1).contains(&j))
@@ -585,13 +645,12 @@ impl PHMM {
                     continue;
                 }
                 let u = u as usize;
-                // let pos = u + radius - u_center;
                 if u == 0 {
-                    ins_dp[k][pos] =
+                    *dp.get_mut(k, pos, State::Ins) =
                         self.log_gap_open + self.log_gap_ext * (k - u - 1) as f64 + ins_prob[k - u];
                 } else if k == u {
                     // This is gap only. Skip mat, ins, Only del.
-                    del_dp[k][pos] =
+                    *dp.get_mut(k, pos, State::Del) =
                         self.log_gap_open + self.log_gap_ext * (u - 1) as f64 + del_prob[u];
                 } else {
                     let (x, y) = (xs[u - 1], ys[k - u - 1]);
@@ -599,50 +658,51 @@ impl PHMM {
                     let prev_gap = (pos as isize + gapdiff) as usize;
                     let mat = if 0 < prev_mat {
                         Self::logsumexp(
-                            mat_dp[k - 2][prev_mat - 1],
-                            del_dp[k - 2][prev_mat - 1],
-                            ins_dp[k - 2][prev_mat - 1],
+                            dp.get(k - 2, prev_mat - 1, State::Mat),
+                            dp.get(k - 2, prev_mat - 1, State::Del),
+                            dp.get(k - 2, prev_mat - 1, State::Ins),
                         ) + self.log_mat
                             + self.log_mat_emit[(x << 2 | y) as usize]
                     } else {
                         EP + self.log_mat + self.log_mat_emit[(x << 2 | y) as usize]
                     };
-                    mat_dp[k][pos] = mat;
+                    *dp.get_mut(k, pos, State::Mat) = mat;
                     let del = if 0 < prev_gap {
                         Self::logsumexp(
-                            mat_dp[k - 1][prev_gap - 1] + self.log_gap_open,
-                            del_dp[k - 1][prev_gap - 1] + self.log_gap_ext,
-                            ins_dp[k - 1][prev_gap - 1] + self.log_gap_switch,
+                            dp.get(k - 1, prev_gap - 1, State::Mat) + self.log_gap_open,
+                            dp.get(k - 1, prev_gap - 1, State::Del) + self.log_gap_ext,
+                            dp.get(k - 1, prev_gap - 1, State::Ins) + self.log_gap_switch,
                         )
                     } else {
                         EP
                     };
-                    del_dp[k][pos] = del + self.log_gap_emit[x as usize];
+                    *dp.get_mut(k, pos, State::Del) = del + self.log_gap_emit[x as usize];
                     // Always safe.
                     let ins = Self::logsumexp(
-                        mat_dp[k - 1][prev_gap] + self.log_gap_open,
-                        del_dp[k - 1][prev_gap] + self.log_gap_switch,
-                        ins_dp[k - 1][prev_gap] + self.log_gap_ext,
+                        dp.get(k - 1, prev_gap, State::Mat) + self.log_gap_open,
+                        dp.get(k - 1, prev_gap, State::Del) + self.log_gap_switch,
+                        dp.get(k - 1, prev_gap, State::Ins) + self.log_gap_ext,
                     ) + self.log_gap_emit[x as usize];
-                    ins_dp[k][pos] = ins;
+                    *dp.get_mut(k, pos, State::Ins) = ins;
                 }
             }
-            let (max_u, _max_lk) = mat_dp[k]
+            let (max_u, _max_lk) = dp
+                .get_row(k, State::Mat)
                 .iter()
-                .zip(del_dp[k].iter())
-                .zip(ins_dp[k].iter())
+                .zip(dp.get_row(k, State::Del).iter())
+                .zip(dp.get_row(k, State::Ins).iter())
                 .map(|((&x, &y), &z)| Self::logsumexp(x, y, z))
                 .enumerate()
                 .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
                 .unwrap();
-            let max_u = max_u + u_center - radius;
-            if u_center < max_u {
-                centers.push(u_center + 1);
+            let max_u = max_u + center - radius;
+            if center < max_u {
+                centers.push(center + 1);
             } else {
-                centers.push(u_center);
+                centers.push(center);
             };
         }
-        ((mat_dp, del_dp, ins_dp), centers)
+        (dp, centers)
     }
     /// Forward algorithm. Return the raw DP table.
     pub fn forward(&self, xs: &[u8], ys: &[u8]) -> DPTable {
@@ -702,12 +762,10 @@ impl PHMM {
         ys: &[u8],
         radius: usize,
         centers: &[usize],
-    ) -> (DiagonalDP, DiagonalDP, DiagonalDP) {
+    ) -> DiagonalDP {
         let xs: Vec<_> = xs.iter().map(crate::alignment::convert_to_twobit).collect();
         let ys: Vec<_> = ys.iter().map(crate::alignment::convert_to_twobit).collect();
-        let mut mat_dp = vec![vec![EP; 2 * radius + 1 + 2]; xs.len() + ys.len() + 1];
-        let mut ins_dp = vec![vec![EP; 2 * radius + 1 + 2]; xs.len() + ys.len() + 1];
-        let mut del_dp = vec![vec![EP; 2 * radius + 1 + 2]; xs.len() + ys.len() + 1];
+        let mut dp = DiagonalDP::new(xs.len() + ys.len() + 1, 2 * radius + 1 + 2, EP);
         // Calc the boundary score for each sequence, in other words,
         // calc DP[xs.len()][j] and DP[i][ys.len()] in the usual DP.
         // For DP[i][ys.len()].
@@ -740,9 +798,9 @@ impl PHMM {
         {
             let (k, u) = (xs.len() + ys.len(), xs.len());
             let u_in_dp = u + radius - centers[k];
-            mat_dp[k][u_in_dp] = 0f64;
-            del_dp[k][u_in_dp] = 0f64;
-            ins_dp[k][u_in_dp] = 0f64;
+            *dp.get_mut(k, u_in_dp, State::Mat) = 0f64;
+            *dp.get_mut(k, u_in_dp, State::Del) = 0f64;
+            *dp.get_mut(k, u_in_dp, State::Ins) = 0f64;
         }
         // Filling the 2nd-last DP cell.
         {
@@ -751,19 +809,21 @@ impl PHMM {
                 let (i, j) = (u, k - u);
                 let u = u + radius - centers[k];
                 if i == xs.len() {
-                    mat_dp[k][u] = gap_emit_ys[j]
+                    *dp.get_mut(k, u, State::Mat) = gap_emit_ys[j]
                         + self.log_gap_open
                         + self.log_gap_ext * (ys.len() - j - 1) as f64;
-                    del_dp[k][u] = gap_emit_ys[j]
+                    *dp.get_mut(k, u, State::Del) = gap_emit_ys[j]
                         + self.log_gap_switch
                         + self.log_gap_ext * (ys.len() - j - 1) as f64;
-                    ins_dp[k][u] = gap_emit_ys[j] + self.log_gap_ext * (ys.len() - j) as f64;
+                    *dp.get_mut(k, u, State::Ins) =
+                        gap_emit_ys[j] + self.log_gap_ext * (ys.len() - j) as f64;
                 } else if j == ys.len() {
-                    mat_dp[k][u] = gap_emit_xs[i]
+                    *dp.get_mut(k, u, State::Mat) = gap_emit_xs[i]
                         + self.log_gap_open
                         + self.log_gap_ext * (xs.len() - i - 1) as f64;
-                    del_dp[k][u] = gap_emit_xs[i] + self.log_gap_ext * (xs.len() - i) as f64;
-                    ins_dp[k][u] = gap_emit_xs[i]
+                    *dp.get_mut(k, u, State::Del) =
+                        gap_emit_xs[i] + self.log_gap_ext * (xs.len() - i) as f64;
+                    *dp.get_mut(k, u, State::Ins) = gap_emit_xs[i]
                         + self.log_gap_switch
                         + self.log_gap_ext * (xs.len() - i - 1) as f64;
                 } else {
@@ -785,19 +845,21 @@ impl PHMM {
                 }
                 let (i, j) = (i as usize, j as usize);
                 if i == xs.len() {
-                    mat_dp[k][pos] = gap_emit_ys[j]
+                    *dp.get_mut(k, pos, State::Mat) = gap_emit_ys[j]
                         + self.log_gap_open
                         + self.log_gap_ext * (ys.len() - j - 1) as f64;
-                    del_dp[k][pos] = gap_emit_ys[j]
+                    *dp.get_mut(k, pos, State::Del) = gap_emit_ys[j]
                         + self.log_gap_switch
                         + self.log_gap_ext * (ys.len() - j - 1) as f64;
-                    ins_dp[k][pos] = gap_emit_ys[j] + self.log_gap_ext * (ys.len() - j) as f64;
+                    *dp.get_mut(k, pos, State::Ins) =
+                        gap_emit_ys[j] + self.log_gap_ext * (ys.len() - j) as f64;
                 } else if j == ys.len() {
-                    mat_dp[k][pos] = gap_emit_xs[i]
+                    *dp.get_mut(k, pos, State::Mat) = gap_emit_xs[i]
                         + self.log_gap_open
                         + self.log_gap_ext * (xs.len() - i - 1) as f64;
-                    del_dp[k][pos] = gap_emit_xs[i] + self.log_gap_ext * (xs.len() - i) as f64;
-                    ins_dp[k][pos] = gap_emit_xs[i]
+                    *dp.get_mut(k, pos, State::Del) =
+                        gap_emit_xs[i] + self.log_gap_ext * (xs.len() - i) as f64;
+                    *dp.get_mut(k, pos, State::Ins) = gap_emit_xs[i]
                         + self.log_gap_switch
                         + self.log_gap_ext * (xs.len() - i - 1) as f64;
                 } else {
@@ -808,42 +870,41 @@ impl PHMM {
                     let mat = if 0 <= u_mat {
                         self.log_mat
                             + self.log_mat_emit[(x << 2 | y) as usize]
-                            + mat_dp[k + 2][u_mat as usize]
+                            + dp.get(k + 2, u_mat as usize, State::Mat)
                     } else {
                         EP
                     };
                     let del = if -1 <= u_gap {
                         self.log_gap_open
                             + self.log_gap_emit[x as usize]
-                            + del_dp[k + 1][(u_gap + 1) as usize]
+                            + dp.get(k + 1, (u_gap + 1) as usize, State::Del)
                     } else {
                         EP
                     };
                     let ins = if 0 <= u_gap {
                         self.log_gap_open
                             + self.log_gap_emit[y as usize]
-                            + ins_dp[k + 1][u_gap as usize]
+                            + dp.get(k + 1, u_gap as usize, State::Ins)
                     } else {
                         EP
                     };
-                    mat_dp[k][pos] = Self::logsumexp(mat, del, ins);
+                    *dp.get_mut(k, pos, State::Mat) = Self::logsumexp(mat, del, ins);
                     let del = del - self.log_gap_open + self.log_gap_ext;
                     let ins = ins - self.log_gap_open + self.log_gap_switch;
-                    del_dp[k][pos] = Self::logsumexp(mat, del, ins);
+                    *dp.get_mut(k, pos, State::Del) = Self::logsumexp(mat, del, ins);
                     let del = del - self.log_gap_ext + self.log_gap_switch;
                     let ins = ins - self.log_gap_switch + self.log_gap_ext;
-                    ins_dp[k][pos] = Self::logsumexp(mat, del, ins);
+                    *dp.get_mut(k, pos, State::Ins) = Self::logsumexp(mat, del, ins);
                 }
             }
         }
-        (mat_dp, ins_dp, del_dp)
+        dp
     }
     /// Naive implementation of backward algorithm.
     pub fn backward(&self, xs: &[u8], ys: &[u8]) -> DPTable {
         let xs: Vec<_> = xs.iter().map(crate::alignment::convert_to_twobit).collect();
         let ys: Vec<_> = ys.iter().map(crate::alignment::convert_to_twobit).collect();
         let mut dptable = DPTable::new(xs.len() + 1, ys.len() + 1);
-        // dptable.set(EP);
         *dptable.get_mut(xs.len(), ys.len(), State::Mat) = 0f64;
         *dptable.get_mut(xs.len(), ys.len(), State::Del) = 0f64;
         *dptable.get_mut(xs.len(), ys.len(), State::Ins) = 0f64;
@@ -901,19 +962,20 @@ impl PHMM {
         ys: &[u8],
         radius: usize,
     ) -> Option<LikelihoodSummary> {
-        let ((f_mat, f_del, f_ins), centers) = self.forward_banded(xs, ys, radius);
+        let (fwd, centers) = self.forward_banded(xs, ys, radius);
         let lk = {
             let (k, u) = (xs.len() + ys.len(), xs.len());
             let u_in_dp = u + radius - centers[k];
             Self::logsumexp(
-                *f_mat[k].get(u_in_dp)?,
-                *f_del[k].get(u_in_dp)?,
-                *f_ins[k].get(u_in_dp)?,
+                fwd.get_check(k, u_in_dp, State::Mat)?,
+                fwd.get_check(k, u_in_dp, State::Del)?,
+                fwd.get_check(k, u_in_dp, State::Ins)?,
             )
         };
         let likelihood_trajectry: Vec<_> = {
             let mut lk_trajectry: Vec<Vec<f64>> = vec![vec![]; xs.len() + 1];
-            for (center, mat) in centers.iter().zip(f_mat.iter()) {
+            for (k, center) in centers.iter().take(xs.len() + ys.len() + 1).enumerate() {
+                let mat = fwd.get_row(k, State::Mat);
                 for (u, &m) in mat.iter().enumerate() {
                     let pos = (u + center) as isize - radius as isize;
                     if (0..xs.len() as isize + 1).contains(&pos) {
@@ -923,30 +985,21 @@ impl PHMM {
             }
             lk_trajectry.iter().map(|xs| logsumexp(&xs)).collect()
         };
-        let (b_mat, b_del, b_ins) = self.backward_banded(xs, ys, radius, &centers);
-        let zip_two_vector = |xss: &[Vec<f64>], yss: &[Vec<f64>]| -> Vec<Vec<f64>> {
-            xss.iter()
-                .zip(yss)
-                .map(|(xs, ys)| xs.iter().zip(ys).map(|(x, y)| x + y - lk).collect())
-                .collect()
-        };
-        let fb_mat = zip_two_vector(&f_mat, &b_mat);
-        let fb_del = zip_two_vector(&f_del, &b_del);
-        let fb_ins = zip_two_vector(&f_ins, &b_ins);
+        // forward-backward.
+        let mut fbwd = self.backward_banded(xs, ys, radius, &centers);
+        fbwd.add(&fwd);
+        fbwd.sub_scalar(lk);
         // Allocate each prob of state
         let mut match_max_prob = vec![(EP, 0); xs.len()];
         let mut ins_max_prob = vec![(EP, 0); xs.len()];
         let mut match_prob: Vec<Vec<f64>> = vec![vec![]; xs.len()];
         let mut del_prob: Vec<Vec<f64>> = vec![vec![]; xs.len()];
         let mut ins_prob: Vec<Vec<f64>> = vec![vec![]; xs.len()];
-        for (k, (((center, mat), del), ins)) in centers
-            .iter()
-            .zip(fb_mat)
-            .zip(fb_del)
-            .zip(fb_ins)
-            .enumerate()
-        {
-            for (u, ((&mat, del), ins)) in mat.iter().zip(del).zip(ins).enumerate() {
+        for (k, center) in centers.iter().take(xs.len() + ys.len() + 1).enumerate() {
+            let mat = fbwd.get_row(k, State::Mat);
+            let del = fbwd.get_row(k, State::Del);
+            let ins = fbwd.get_row(k, State::Ins);
+            for (u, ((&mat, &del), &ins)) in mat.iter().zip(del).zip(ins).enumerate() {
                 let i = (u + center) as isize - radius as isize;
                 let j = k as isize - i;
                 if (1..xs.len() as isize + 1).contains(&i)
@@ -1321,27 +1374,6 @@ impl PHMM {
         ops.reverse();
         (dptable, ops, max_lk)
     }
-    // /// Correcting error of template by xs. In other words, it returns a
-    // /// estimation of `arg max sum_{x in xs} Pr{template,x|self}`.
-    // /// Or, it maximize `xs.iter().map(|x|self.likelihood(x,template)).sum::<f64>()`.
-    // pub fn correct<T: std::borrow::Borrow<[u8]>>(&self, template: &[u8], xs: &[T]) -> Vec<u8> {
-    //     let mut corrected_sequnce: Vec<u8> = template.to_vec();
-    //     while let Ok(res) = self.correct_one(&corrected_sequnce, xs) {
-    //         corrected_sequnce = res;
-    //     }
-    //     corrected_sequnce
-    // }
-    // /// Correcting error of template by xs, requiring that the distance between corrected sequence
-    // /// and the original sequence is 1 or less (not corrected).
-    // /// If we can correct the template sequence, it returns the corrected seuquence as `Ok(res)`,
-    // /// Otherwize it returns the original sequence as `Err(res)`
-    // pub fn correct_one<T: std::borrow::Borrow<[u8]>>(
-    //     &self,
-    //     _template: &[u8],
-    //     _xs: &[T],
-    // ) -> Result<Vec<u8>, Vec<u8>> {
-    //     unimplemented!()
-    // }
 }
 
 #[cfg(test)]
@@ -1405,13 +1437,16 @@ pub mod tests {
         let radius = 4;
         for _ in 0..10 {
             let seq = gen_seq::introduce_errors(&template, &mut rng, 1, 1, 1);
-            let ((f_mat, f_del, f_ins), centers) = hmm.forward_banded(&template, &seq, radius);
+            let (fwd, centers) = hmm.forward_banded(&template, &seq, radius);
             let k = template.len() + seq.len();
             let u_in_dp = template.len() + radius - centers[k];
-            assert!(f_mat[k].get(u_in_dp).is_some());
+            assert!(fwd.get_check(k, u_in_dp, State::Mat).is_some());
             let table = hmm.forward(&template, &seq);
-            let lk_banded =
-                PHMM::logsumexp(f_mat[k][u_in_dp], f_del[k][u_in_dp], f_ins[k][u_in_dp]);
+            let lk_banded = PHMM::logsumexp(
+                fwd.get(k, u_in_dp, State::Mat),
+                fwd.get(k, u_in_dp, State::Del),
+                fwd.get(k, u_in_dp, State::Ins),
+            );
             let lk = table.get_total_lk(template.len(), seq.len());
             assert!((lk - lk_banded).abs() < 0.001, "{},{}", lk, lk_banded);
             for i in 0..template.len() + 1 {
@@ -1427,10 +1462,11 @@ pub mod tests {
             }
             for k in 0..template.len() + seq.len() + 1 {
                 let center = centers[k];
-                for (u, ((&mat, &del), &ins)) in f_mat[k]
+                for (u, ((&mat, &del), &ins)) in fwd
+                    .get_row(k, State::Mat)
                     .iter()
-                    .zip(f_del[k].iter())
-                    .zip(f_ins[k].iter())
+                    .zip(fwd.get_row(k, State::Del).iter())
+                    .zip(fwd.get_row(k, State::Ins).iter())
                     .enumerate()
                     .take(2 * radius + 1)
                 {
@@ -1439,14 +1475,17 @@ pub mod tests {
                     let j = k as isize - u;
                     if 0 <= u && u <= template.len() as isize && 0 <= j && j <= seq.len() as isize {
                         let (i, j) = (i as usize, j as usize);
-                        if EP < mat {
+                        if 3f64 + EP + 1. < mat {
                             assert!((table.get(i, j, State::Mat) - mat).abs() < 2.);
                         }
                         if EP < del {
                             let del_exact = table.get(i, j, State::Del);
-                            assert!((del_exact - del).abs() < 2., "{},{}", del_exact, del);
+                            if 2f64 < (del_exact - del).abs() {
+                                println!("{},{}", i, j);
+                            }
+                            assert!((del_exact - del).abs() < 2., "E{},B{}", del_exact, del);
                         }
-                        if EP < ins {
+                        if 3f64 + EP < ins {
                             let ins_exact = table.get(i, j, State::Ins);
                             assert!((ins_exact - ins).abs() < 2., "{},{}", ins_exact, ins);
                         }
@@ -1463,9 +1502,9 @@ pub mod tests {
         let radius = 10;
         for _ in 0..10 {
             let seq = gen_seq::introduce_errors(&template, &mut rng, 1, 1, 1);
-            let ((_, _, _), centers) = hmm.forward_banded(&template, &seq, radius);
+            let (_, centers) = hmm.forward_banded(&template, &seq, radius);
             let table = hmm.backward(&template, &seq);
-            let (b_mat, b_del, b_ins) = hmm.backward_banded(&template, &seq, radius, &centers);
+            let bwd = hmm.backward_banded(&template, &seq, radius, &centers);
             println!();
             for i in 0..template.len() + 1 {
                 for j in 0..seq.len() + 1 {
@@ -1477,7 +1516,8 @@ pub mod tests {
             let mut dump_mat = vec![vec![0f64; seq.len() + 1]; template.len() + 1];
             for k in 0..template.len() + seq.len() + 1 {
                 let center = centers[k];
-                for (pos, &mat) in b_mat[k].iter().enumerate() {
+                //for (pos, &mat) in b_mat[k].iter().enumerate() {
+                for (pos, &mat) in bwd.get_row(k, State::Mat).iter().enumerate() {
                     let u = (pos + center) as isize - radius as isize;
                     let (i, j) = (u, k as isize - u);
                     if (0..template.len() as isize + 1).contains(&i)
@@ -1500,10 +1540,11 @@ pub mod tests {
 
             for k in 0..template.len() + seq.len() + 1 {
                 let center = centers[k];
-                for (u, ((&mat, &del), &ins)) in b_mat[k]
+                for (u, ((&mat, &del), &ins)) in bwd
+                    .get_row(k, State::Mat)
                     .iter()
-                    .zip(b_del[k].iter())
-                    .zip(b_ins[k].iter())
+                    .zip(bwd.get_row(k, State::Del).iter())
+                    .zip(bwd.get_row(k, State::Ins).iter())
                     .enumerate()
                     .take(2 * radius + 1)
                 {
@@ -1522,10 +1563,10 @@ pub mod tests {
                                 j
                             );
                         }
-                        if EP < del {
+                        if 3f64 + EP < del {
                             assert!((table.get(i, j, State::Del) - del).abs() < 2.);
                         }
-                        if EP < ins {
+                        if 3f64 + EP < ins {
                             assert!((table.get(i, j, State::Ins) - ins).abs() < 2.);
                         }
                     }
@@ -1554,7 +1595,21 @@ pub mod tests {
                 .iter()
                 .zip(profile_exact.match_prob.iter())
             {
-                assert!((x - y).abs() < 1f64);
+                assert!((x - y).abs() < 0.1f64);
+            }
+            for (x, y) in profile_banded
+                .deletion_prob
+                .iter()
+                .zip(profile_exact.deletion_prob.iter())
+            {
+                assert!((x - y).abs() < 0.1f64);
+            }
+            for (x, y) in profile_banded
+                .insertion_prob
+                .iter()
+                .zip(profile_exact.insertion_prob.iter())
+            {
+                assert!((x - y).abs() < 0.1f64);
             }
             for (x, y) in profile_banded
                 .match_bases
@@ -1567,20 +1622,6 @@ pub mod tests {
                     .map(|(x, y)| if x == y { 0 } else { 1 })
                     .sum::<u8>();
                 assert_eq!(diff, 0, "{:?},{:?}", x, y);
-            }
-            for (x, y) in profile_banded
-                .deletion_prob
-                .iter()
-                .zip(profile_exact.deletion_prob.iter())
-            {
-                assert!((x - y).abs() < 1f64);
-            }
-            for (x, y) in profile_banded
-                .insertion_prob
-                .iter()
-                .zip(profile_exact.insertion_prob.iter())
-            {
-                assert!((x - y).abs() < 1f64);
             }
             //     let mut total = 0;
             //     for (x, y) in profile_banded
