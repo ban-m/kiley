@@ -1,8 +1,7 @@
 //! Banded Trialignment.
-use super::convert_to_twobit;
 use super::Op;
 use super::MA32;
-use super::NULL;
+use crate::padseq::*;
 // TODO: maybe we can use macros to implement u32 bit version of code and u16 version of code.
 // Or, maybe we can use default implementation of trait for each type.
 // The DP table of the ternary alignment for long sequence.

@@ -89,10 +89,10 @@ pub fn edit_dist_slow(xs: &[u8], ys: &[u8]) -> u32 {
 
 pub fn fast_align(xs: &[u8], ys: &[u8]) -> u16 {
     let xs: Vec<_> = std::iter::once(0b111)
-        .chain(xs.iter().map(crate::alignment::convert_to_twobit))
+        .chain(xs.iter().map(crate::padseq::convert_to_twobit))
         .collect();
     let ys: Vec<_> = std::iter::once(0b111)
-        .chain(ys.iter().map(crate::alignment::convert_to_twobit))
+        .chain(ys.iter().map(crate::padseq::convert_to_twobit))
         .collect();
     let mut dp = vec![1_000; (ys.len() + 1) * (xs.len() + 1)];
     dp[0] = 0;
@@ -114,8 +114,8 @@ fn get_match(dp: &[u16], x: u8, y: u8, i: usize, j: usize, colnum: usize) -> u16
 }
 
 pub fn naive_align(xs: &[u8], ys: &[u8]) -> u16 {
-    let xs: Vec<_> = xs.iter().map(crate::alignment::convert_to_twobit).collect();
-    let ys: Vec<_> = ys.iter().map(crate::alignment::convert_to_twobit).collect();
+    let xs: Vec<_> = xs.iter().map(crate::padseq::convert_to_twobit).collect();
+    let ys: Vec<_> = ys.iter().map(crate::padseq::convert_to_twobit).collect();
     let mut dp = vec![0; (ys.len() + 1) * (xs.len() + 1)];
     let colnum = ys.len() + 1;
     for i in 0..xs.len() + 1 {

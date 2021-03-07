@@ -56,7 +56,7 @@ fn edit_dist(b: &mut test::Bencher) {
     });
 }
 
-const HMMLEN: usize = 1000;
+const HMMLEN: usize = 500;
 
 #[bench]
 fn hmm_naive(b: &mut test::Bencher) {

@@ -2,8 +2,6 @@
 pub mod banded;
 pub mod bialignment;
 pub mod naive;
-pub mod wavefront;
-
 /// Edit operation on a ternary alignment.
 /// Compared to the three operation (insertion to the reference, deletion from the reference, match between the query and the reference) in
 /// binary sequence alignment, there are seven operations in a ternary alignment.
@@ -73,26 +71,6 @@ impl std::convert::From<Op> for (bool, bool, bool) {
         }
     }
 }
-
-// Three bit encoding for each base, gap, and "sentinel" base.
-const ADENINE: u8 = 0b00;
-const CYTOSINE: u8 = 0b01;
-const GUANINE: u8 = 0b10;
-const THYMINE: u8 = 0b11;
-const GAP: u8 = 0b100;
-const NULL: u8 = 0b101;
-// Convert a char to two bit encoding.
-pub const fn convert_to_twobit(base: &u8) -> u8 {
-    match *base {
-        b'A' | b'a' => ADENINE,
-        b'C' | b'c' => CYTOSINE,
-        b'G' | b'g' => GUANINE,
-        b'T' | b't' => THYMINE,
-        b'-' => GAP,
-        _ => NULL,
-    }
-}
-
 // Return matching array, MA.
 // For three combination of THREE bit bases x, y, and, z,
 // we have MA[x << 6 | y <<  3 | z ] = the penalty to align x,y, and z.

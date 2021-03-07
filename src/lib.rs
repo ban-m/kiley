@@ -2,6 +2,7 @@ pub mod alignment;
 pub mod gen_seq;
 // use poa_hmm::POA;
 pub mod hmm;
+mod padseq;
 use rand::seq::*;
 use rand::Rng;
 use rand::SeedableRng;

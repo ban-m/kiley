@@ -1,4 +1,5 @@
 //! An tiny implementation of pair hidden Markov models.
+use crate::padseq;
 use rand::Rng;
 /// A pair hidden Markov model.
 /// Even though theoretically we have several degree of freedom on transition probabilities,
@@ -38,22 +39,31 @@ use rand::Rng;
 pub struct PairHiddenMarkovModel {
     /// log(Pr{X->Mat})
     pub log_mat: f64,
+    mat: f64,
     /// log(Pr{Mat->Ins}) or log(Pr{Mat->Del}).
     pub log_gap_open: f64,
+    gap_open: f64,
     /// log(Pr{Ins->Del}) or log(Pr{Del->Ins}).
     pub log_gap_switch: f64,
+    gap_switch: f64,
     /// log(Pr{Del->Del}) or log(Pr{Ins->Ins})
     pub log_gap_ext: f64,
+    gap_ext: f64,
     /// log(Pr{X->End})
     pub log_quit: f64,
     /// log(Pr{output base x | Del}) or log(Pr{output base x | Ins})
-    pub log_gap_emit: [f64; 4],
-    log_mat_emit: [f64; 4 * 4],
+    pub log_gap_emit: [f64; 5],
+    gap_emit: [f64; 5],
+    // It is sufficient to allocate 32, as 0b100_100 is max.
+    log_mat_emit: [f64; 32],
+    mat_emit: [f64; 32],
 }
 
 /// Shorthand for PairHiddenMarkovModel.
 pub type PHMM = PairHiddenMarkovModel;
 
+// Samll value.
+const EP: f64 = -10000000000000000000000000000000f64;
 /// A dynamic programming table. It is a serialized 2-d array.
 #[derive(Debug, Clone)]
 pub struct DPTable {
@@ -395,8 +405,6 @@ impl std::default::Default for PHMM {
     }
 }
 
-const EP: f64 = -10000000000000000000000000000000f64;
-
 #[derive(Debug, Clone)]
 pub struct DiagonalDP {
     mat: Vec<Vec<f64>>,
@@ -469,20 +477,20 @@ impl DiagonalDP {
             .iter_mut()
             .for_each(|xs| xs.iter_mut().for_each(|x| *x -= a));
     }
-    // pub fn sum_anti_diagonal(&self, k: usize) -> f64 {
-    //     self.mat[k]
-    //         .iter()
-    //         .chain(self.del[k].iter())
-    //         .chain(self.ins[k].iter())
-    //         .sum::<f64>()
-    // }
-    // pub fn div_anti_diagonal(&mut self, k: usize, div: f64) {
-    //     self.mat[k]
-    //         .iter_mut()
-    //         .chain(self.del[k].iter_mut())
-    //         .chain(self.ins[k].iter_mut())
-    //         .for_each(|x| *x /= div);
-    // }
+    pub fn sum_anti_diagonal(&self, k: usize) -> f64 {
+        self.mat[k]
+            .iter()
+            .chain(self.del[k].iter())
+            .chain(self.ins[k].iter())
+            .sum::<f64>()
+    }
+    pub fn div_anti_diagonal(&mut self, k: usize, div: f64) {
+        self.mat[k]
+            .iter_mut()
+            .chain(self.del[k].iter_mut())
+            .chain(self.ins[k].iter_mut())
+            .for_each(|x| *x /= div);
+    }
 }
 
 impl PHMM {
@@ -521,19 +529,35 @@ impl PHMM {
         let gap_open = (1f64 - mat) / 2f64;
         let gap_switch = 1f64 - gap_ext - mat;
         // let alive_prob = 1f64 - quit_prob;
+        let log_gap_emit = {
+            let mut slots = [EP; 5];
+            for i in 0..4 {
+                slots[i] = gap_output[i].ln();
+            }
+            slots
+        };
+        let gap_emit = {
+            let mut slots = [0f64; 5];
+            for i in 0..4 {
+                slots[i] = gap_output[i];
+            }
+            slots
+        };
         let log_mat_emit = {
-            let mut slots = [0f64; 16];
+            let mut slots = [EP; 32];
             for i in 0..4 {
                 for j in 0..4 {
-                    slots[(i << 2) | j] = mat_output[i][j].ln();
+                    slots[(i << 3) | j] = mat_output[i][j].ln();
                 }
             }
             slots
         };
-        let log_gap_emit = {
-            let mut slots = [0f64; 4];
+        let mat_emit = {
+            let mut slots = [0f64; 32];
             for i in 0..4 {
-                slots[i] = gap_output[i].ln();
+                for j in 0..4 {
+                    slots[(i << 3) | j] = mat_output[i][j];
+                }
             }
             slots
         };
@@ -547,6 +571,12 @@ impl PHMM {
         //     log_mat_emit,
         // }
         Self {
+            mat,
+            gap_open,
+            gap_ext,
+            gap_switch,
+            gap_emit,
+            mat_emit,
             log_mat: mat.ln(),
             log_gap_open: gap_open.ln(),
             log_gap_ext: gap_ext.ln(),
@@ -622,80 +652,70 @@ impl PHMM {
     /// and the ceters of each anti-diagonal.
     /// Currently, we use re-scaling method instead of log-sum-exp mode because of stability and efficiency.
     pub fn forward_banded(&self, xs: &[u8], ys: &[u8], radius: usize) -> (DiagonalDP, Vec<usize>) {
-        let xs: Vec<_> = xs.iter().map(crate::alignment::convert_to_twobit).collect();
-        let ys: Vec<_> = ys.iter().map(crate::alignment::convert_to_twobit).collect();
-        // `radius` radius, plus 2 for padding.
+        let xs = padseq::PadSeq::new(xs);
+        let ys = padseq::PadSeq::new(ys);
         let mut centers: Vec<usize> = vec![0, 0, 1];
-        // Sum of mat[k] + del[k] + ins[k]
-        // let mut scaling_factor: Vec<f64> = Vec::with_capacity(xs.len() + ys.len() + 2);
-        let mut dp = DiagonalDP::new(xs.len() + ys.len() + 1, 2 * radius + 1 + 2, EP);
-        // let mut dp = DiagonalDP::new(xs.len() + ys.len() + 1, 2 * radius + 1 + 2, 0f64);
+        let mut dp = DiagonalDP::new(xs.len() + ys.len() + 1, 2 * radius + 1 + 2, 0f64);
+        let mut scaling_factor: Vec<f64> = Vec::with_capacity(xs.len() + ys.len() + 2);
         // The first diagonal.
-        *dp.get_mut(0, radius, State::Mat) = 0f64;
-        // *dp.get_mut(0, radius, State::Mat) = 1f64;
-        // scaling_factor.push(1f64);
+        *dp.get_mut(0, radius, State::Mat) = 1f64;
+        scaling_factor.push(1f64);
         // The second diagonal.
-        *dp.get_mut(1, radius, State::Ins) = self.log_gap_open + self.log_gap_emit[ys[0] as usize];
-        *dp.get_mut(1, radius + 1, State::Del) =
-            self.log_gap_open + self.log_gap_emit[xs[0] as usize];
-        // let sum = dp.sum_anti_diagonal(1);
-        // dp.div_anti_diagonal(1, sum);
-        // scaling_factor.push(sum);
+        *dp.get_mut(1, radius, State::Ins) = self.gap_open * self.gap_emit[ys[0] as usize];
+        *dp.get_mut(1, radius + 1, State::Del) = self.gap_open * self.gap_emit[xs[0] as usize];
+        let sum = dp.sum_anti_diagonal(1);
+        dp.div_anti_diagonal(1, sum);
+        scaling_factor.push(sum);
         for k in 2..xs.len() + ys.len() + 1 {
-            let center = *centers.last().unwrap();
+            let center = centers[k];
             let matdiff = center as isize - centers[k - 2] as isize;
             let gapdiff = center as isize - centers[k - 1] as isize;
-            // TODO: remove `if` statements as many as possible.
-            for pos in 0..2 * radius + 1 {
-                let u = (pos + center) as isize - radius as isize;
-                let (i, j) = (u, k as isize - u);
-                if !((0..xs.len() as isize + 1).contains(&i)
-                    && (0..ys.len() as isize + 1).contains(&j))
-                {
-                    continue;
-                }
-                let u = u as usize;
+            let us: Vec<_> = (0..2 * radius + 1)
+                .filter_map(|pos| {
+                    let u = (pos + center) as isize - radius as isize;
+                    let (i, j) = (u, k as isize - u);
+                    (0 <= i && i < xs.len() as isize + 1 && 0 <= j && j < ys.len() as isize + 1)
+                        .then(|| (pos, u))
+                })
+                .collect();
+            for (pos, u) in us {
                 let prev_mat = pos as isize + matdiff;
                 let prev_gap = pos as isize + gapdiff;
-                let mat = if 0 < prev_mat && 0 < u && u < k {
-                    let (x, y) = (xs[u - 1], ys[k - u - 1]);
-                    Self::logsumexp(
-                        dp.get(k - 2, prev_mat as usize - 1, State::Mat),
-                        dp.get(k - 2, prev_mat as usize - 1, State::Del),
-                        dp.get(k - 2, prev_mat as usize - 1, State::Ins),
-                    ) + self.log_mat
-                        + self.log_mat_emit[(x << 2 | y) as usize]
-                } else {
-                    EP
-                };
-                *dp.get_mut(k, pos, State::Mat) = mat;
-                let del = if 0 < prev_gap && 0 < u {
-                    Self::logsumexp(
-                        dp.get(k - 1, prev_gap as usize - 1, State::Mat) + self.log_gap_open,
-                        dp.get(k - 1, prev_gap as usize - 1, State::Del) + self.log_gap_ext,
-                        dp.get(k - 1, prev_gap as usize - 1, State::Ins) + self.log_gap_switch,
-                    ) + self.log_gap_emit[xs[u - 1] as usize]
-                } else {
-                    EP
-                };
-                *dp.get_mut(k, pos, State::Del) = del;
-                let ins = if 0 <= prev_gap && u < k {
-                    Self::logsumexp(
-                        dp.get(k - 1, prev_gap as usize, State::Mat) + self.log_gap_open,
-                        dp.get(k - 1, prev_gap as usize, State::Del) + self.log_gap_switch,
-                        dp.get(k - 1, prev_gap as usize, State::Ins) + self.log_gap_ext,
-                    ) + self.log_gap_emit[ys[k - u - 1] as usize]
-                } else {
-                    EP
-                };
-                *dp.get_mut(k, pos, State::Ins) = ins;
+                let (i, j) = (u, k as isize - u);
+                if 0 < prev_mat && 0 < u && 0 < j {
+                    let (x, y) = (xs[i - 1], ys[j - 1]);
+                    *dp.get_mut(k, pos, State::Mat) =
+                        (dp.get(k - 2, prev_mat as usize - 1, State::Mat)
+                            + dp.get(k - 2, prev_mat as usize - 1, State::Del)
+                            + dp.get(k - 2, prev_mat as usize - 1, State::Ins))
+                            * self.mat
+                            * self.mat_emit[(x << 3 | y) as usize]
+                            / scaling_factor[k - 1];
+                }
+                if 0 < prev_gap && 0 < u {
+                    *dp.get_mut(k, pos, State::Del) =
+                        (dp.get(k - 1, prev_gap as usize - 1, State::Mat) * self.gap_open
+                            + dp.get(k - 1, prev_gap as usize - 1, State::Del) * self.gap_ext
+                            + dp.get(k - 1, prev_gap as usize - 1, State::Ins) * self.gap_switch)
+                            * self.gap_emit[xs[i - 1] as usize]
+                }
+                if 0 <= prev_gap && 0 < j {
+                    *dp.get_mut(k, pos, State::Ins) =
+                        (dp.get(k - 1, prev_gap as usize, State::Mat) * self.gap_open
+                            + dp.get(k - 1, prev_gap as usize, State::Del) * self.gap_switch
+                            + dp.get(k - 1, prev_gap as usize, State::Ins) * self.gap_ext)
+                            * self.gap_emit[ys[j - 1] as usize];
+                }
             }
+            let sum = dp.sum_anti_diagonal(k);
+            dp.div_anti_diagonal(k, sum);
+            scaling_factor.push(sum);
             let (max_u, _max_lk) = dp
                 .get_row(k, State::Mat)
                 .iter()
                 .zip(dp.get_row(k, State::Del).iter())
                 .zip(dp.get_row(k, State::Ins).iter())
-                .map(|((&x, &y), &z)| Self::logsumexp(x, y, z))
+                .map(|((&x, &y), &z)| x + y + z)
                 .enumerate()
                 .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
                 .unwrap();
@@ -706,12 +726,26 @@ impl PHMM {
                 centers.push(center);
             };
         }
+        for state in vec![State::Mat, State::Del, State::Ins] {
+            let mut log_factor = 0f64;
+            for k in 0..xs.len() + ys.len() + 1 {
+                log_factor += scaling_factor[k].ln();
+                for u in 0..2 * radius + 1 + 2 {
+                    let scaled = dp.get(k, u, state);
+                    *dp.get_mut(k, u, state) = if std::f64::EPSILON < scaled {
+                        scaled.ln() + log_factor
+                    } else {
+                        EP
+                    };
+                }
+            }
+        }
         (dp, centers)
     }
     /// Forward algorithm. Return the raw DP table.
     pub fn forward(&self, xs: &[u8], ys: &[u8]) -> DPTable {
-        let xs: Vec<_> = xs.iter().map(crate::alignment::convert_to_twobit).collect();
-        let ys: Vec<_> = ys.iter().map(crate::alignment::convert_to_twobit).collect();
+        let xs: Vec<_> = xs.iter().map(crate::padseq::convert_to_twobit).collect();
+        let ys: Vec<_> = ys.iter().map(crate::padseq::convert_to_twobit).collect();
         let mut dptable = DPTable::new(xs.len() + 1, ys.len() + 1);
         let mut gap = 0f64;
         for (i, &x) in xs.iter().enumerate().map(|(pos, x)| (pos + 1, x)) {
@@ -738,7 +772,7 @@ impl PHMM {
                     dptable.get(i - 1, j - 1, State::Del),
                     dptable.get(i - 1, j - 1, State::Ins),
                 ) + self.log_mat
-                    + self.log_mat_emit[((x << 2) | y) as usize];
+                    + self.log_mat_emit[((x << 3) | y) as usize];
                 *dptable.get_mut(i, j, State::Mat) = mat;
                 let del = Self::logsumexp(
                     dptable.get(i - 1, j, State::Mat) + self.log_gap_open,
@@ -767,44 +801,24 @@ impl PHMM {
         radius: usize,
         centers: &[usize],
     ) -> DiagonalDP {
-        let xs: Vec<_> = xs.iter().map(crate::alignment::convert_to_twobit).collect();
-        let ys: Vec<_> = ys.iter().map(crate::alignment::convert_to_twobit).collect();
-        let mut dp = DiagonalDP::new(xs.len() + ys.len() + 1, 2 * radius + 1 + 2, EP);
+        let xs: Vec<_> = xs.iter().map(crate::padseq::convert_to_twobit).collect();
+        let ys: Vec<_> = ys.iter().map(crate::padseq::convert_to_twobit).collect();
+        let mut dp = DiagonalDP::new(xs.len() + ys.len() + 1, 2 * radius + 1 + 2, 0f64);
+        let mut scaling_factors = vec![1f64; xs.len() + ys.len() + 1];
         // Calc the boundary score for each sequence, in other words,
         // calc DP[xs.len()][j] and DP[i][ys.len()] in the usual DP.
         // For DP[i][ys.len()].
-        let gap_emit_xs = {
-            let (mut gap_emit_xs_rev, _) = xs
-                .iter()
-                .rev()
-                .map(|&x| self.log_gap_emit[x as usize])
-                .fold((Vec::new(), 0f64), |(mut logs, acc), x| {
-                    logs.push(x + acc);
-                    (logs, x + acc)
-                });
-            gap_emit_xs_rev.reverse();
-            gap_emit_xs_rev
-        };
-        let gap_emit_ys = {
-            let (mut gap_emit_ys_rev, _) = ys
-                .iter()
-                .rev()
-                .map(|&y| self.log_gap_emit[y as usize])
-                .fold((Vec::new(), 0f64), |(mut logs, acc), y| {
-                    logs.push(y + acc);
-                    (logs, y + acc)
-                });
-            gap_emit_ys_rev.reverse();
-            gap_emit_ys_rev
-        };
         // Get the location corresponding to [xs.len()][ys.len()].
         // Fill the last DP call.
         {
             let (k, u) = (xs.len() + ys.len(), xs.len());
             let u_in_dp = u + radius - centers[k];
-            *dp.get_mut(k, u_in_dp, State::Mat) = 0f64;
-            *dp.get_mut(k, u_in_dp, State::Del) = 0f64;
-            *dp.get_mut(k, u_in_dp, State::Ins) = 0f64;
+            *dp.get_mut(k, u_in_dp, State::Mat) = 1f64;
+            *dp.get_mut(k, u_in_dp, State::Del) = 1f64;
+            *dp.get_mut(k, u_in_dp, State::Ins) = 1f64;
+            let sum = dp.sum_anti_diagonal(k);
+            dp.div_anti_diagonal(k, sum);
+            scaling_factors[k] = sum;
         }
         // Filling the 2nd-last DP cell.
         {
@@ -813,32 +827,29 @@ impl PHMM {
                 let (i, j) = (u, k - u);
                 let u = u + radius - centers[k];
                 if i == xs.len() {
-                    *dp.get_mut(k, u, State::Mat) = gap_emit_ys[j]
-                        + self.log_gap_open
-                        + self.log_gap_ext * (ys.len() - j - 1) as f64;
-                    *dp.get_mut(k, u, State::Del) = gap_emit_ys[j]
-                        + self.log_gap_switch
-                        + self.log_gap_ext * (ys.len() - j - 1) as f64;
-                    *dp.get_mut(k, u, State::Ins) =
-                        gap_emit_ys[j] + self.log_gap_ext * (ys.len() - j) as f64;
+                    assert_eq!(j, ys.len() - 1);
+                    let emit = self.gap_emit[ys[j] as usize];
+                    *dp.get_mut(k, u, State::Mat) = emit * self.gap_open;
+                    *dp.get_mut(k, u, State::Del) = emit * self.gap_switch;
+                    *dp.get_mut(k, u, State::Ins) = emit * self.gap_ext;
                 } else if j == ys.len() {
-                    *dp.get_mut(k, u, State::Mat) = gap_emit_xs[i]
-                        + self.log_gap_open
-                        + self.log_gap_ext * (xs.len() - i - 1) as f64;
-                    *dp.get_mut(k, u, State::Del) =
-                        gap_emit_xs[i] + self.log_gap_ext * (xs.len() - i) as f64;
-                    *dp.get_mut(k, u, State::Ins) = gap_emit_xs[i]
-                        + self.log_gap_switch
-                        + self.log_gap_ext * (xs.len() - i - 1) as f64;
+                    assert_eq!(i, xs.len() - 1);
+                    let emit = self.gap_emit[xs[i] as usize];
+                    *dp.get_mut(k, u, State::Mat) = emit * self.gap_open;
+                    *dp.get_mut(k, u, State::Del) = emit * self.gap_ext;
+                    *dp.get_mut(k, u, State::Ins) = emit * self.gap_switch;
                 } else {
                     unreachable!();
                 }
             }
+            let sum = dp.sum_anti_diagonal(k);
+            dp.div_anti_diagonal(k, sum);
+            scaling_factors[k] = sum / scaling_factors[k + 1];
         }
         for k in (0..xs.len() + ys.len() - 1).rev() {
             let center = centers[k];
-            let gapdiff = center as isize - centers[k + 1] as isize;
             let matdiff = center as isize - centers[k + 2] as isize;
+            let gapdiff = center as isize - centers[k + 1] as isize;
             for pos in 0..2 * radius + 1 {
                 let u = (pos + center) as isize - radius as isize;
                 let (i, j) = (u, k as isize - u);
@@ -853,41 +864,59 @@ impl PHMM {
                 let u_gap = pos as isize + gapdiff;
                 let mat = if 0 <= u_mat && i < xs.len() && j < ys.len() {
                     let (x, y) = (xs[i], ys[j]);
-                    self.log_mat
-                        + self.log_mat_emit[(x << 2 | y) as usize]
-                        + dp.get(k + 2, u_mat as usize, State::Mat)
+                    self.mat
+                        * self.mat_emit[(x << 3 | y) as usize]
+                        * dp.get(k + 2, u_mat as usize, State::Mat)
+                        / scaling_factors[k + 1]
                 } else {
-                    EP
+                    0f64
                 };
                 let del = if -1 <= u_gap && i < xs.len() {
-                    self.log_gap_open
-                        + self.log_gap_emit[xs[i] as usize]
-                        + dp.get(k + 1, (u_gap + 1) as usize, State::Del)
+                    self.gap_open
+                        * self.gap_emit[xs[i] as usize]
+                        * dp.get(k + 1, (u_gap + 1) as usize, State::Del)
                 } else {
-                    EP
+                    0f64
                 };
                 let ins = if 0 <= u_gap && j < ys.len() {
-                    self.log_gap_open
-                        + self.log_gap_emit[ys[j] as usize]
-                        + dp.get(k + 1, u_gap as usize, State::Ins)
+                    self.gap_open
+                        * self.gap_emit[ys[j] as usize]
+                        * dp.get(k + 1, u_gap as usize, State::Ins)
                 } else {
-                    EP
+                    0f64
                 };
-                *dp.get_mut(k, pos, State::Mat) = Self::logsumexp(mat, del, ins);
-                let del = del - self.log_gap_open + self.log_gap_ext;
-                let ins = ins - self.log_gap_open + self.log_gap_switch;
-                *dp.get_mut(k, pos, State::Del) = Self::logsumexp(mat, del, ins);
-                let del = del - self.log_gap_ext + self.log_gap_switch;
-                let ins = ins - self.log_gap_switch + self.log_gap_ext;
-                *dp.get_mut(k, pos, State::Ins) = Self::logsumexp(mat, del, ins);
+                *dp.get_mut(k, pos, State::Mat) = mat + del + ins;
+                let del = del / self.gap_open * self.gap_ext;
+                let ins = ins / self.gap_open * self.gap_switch;
+                *dp.get_mut(k, pos, State::Del) = mat + del + ins;
+                let del = del / self.gap_ext * self.gap_switch;
+                let ins = ins / self.gap_switch * self.gap_ext;
+                *dp.get_mut(k, pos, State::Ins) = mat + del + ins;
+            }
+            let sum = dp.sum_anti_diagonal(k);
+            dp.div_anti_diagonal(k, sum);
+            scaling_factors[k] = sum;
+        }
+        let mut log_factor = 0f64;
+        for k in (0..xs.len() + ys.len() + 1).rev() {
+            log_factor += scaling_factors[k].ln();
+            for u in 0..2 * radius + 1 + 2 {
+                for state in vec![State::Mat, State::Del, State::Ins] {
+                    let scaled = dp.get(k, u, state);
+                    *dp.get_mut(k, u, state) = if std::f64::EPSILON < scaled {
+                        scaled.ln() + log_factor
+                    } else {
+                        EP
+                    };
+                }
             }
         }
         dp
     }
     /// Naive implementation of backward algorithm.
     pub fn backward(&self, xs: &[u8], ys: &[u8]) -> DPTable {
-        let xs: Vec<_> = xs.iter().map(crate::alignment::convert_to_twobit).collect();
-        let ys: Vec<_> = ys.iter().map(crate::alignment::convert_to_twobit).collect();
+        let xs: Vec<_> = xs.iter().map(crate::padseq::convert_to_twobit).collect();
+        let ys: Vec<_> = ys.iter().map(crate::padseq::convert_to_twobit).collect();
         let mut dptable = DPTable::new(xs.len() + 1, ys.len() + 1);
         *dptable.get_mut(xs.len(), ys.len(), State::Mat) = 0f64;
         *dptable.get_mut(xs.len(), ys.len(), State::Del) = 0f64;
@@ -916,7 +945,7 @@ impl PHMM {
             for (j, &y) in ys.iter().enumerate().rev() {
                 // Match state;
                 let mat = self.log_mat
-                    + self.log_mat_emit[(x << 2 | y) as usize]
+                    + self.log_mat_emit[(x << 3 | y) as usize]
                     + dptable.get(i + 1, j + 1, State::Mat);
                 let del = self.log_gap_open
                     + self.log_gap_emit[x as usize]
@@ -1010,7 +1039,7 @@ impl PHMM {
             .iter()
             .map(|x| {
                 let mut slot = [0u8; 4];
-                slot[crate::alignment::convert_to_twobit(&x.1) as usize] += 1;
+                slot[crate::padseq::convert_to_twobit(&x.1) as usize] += 1;
                 slot
             })
             .collect();
@@ -1018,7 +1047,7 @@ impl PHMM {
             .iter()
             .map(|x| {
                 let mut slot = [0u8; 4];
-                slot[crate::alignment::convert_to_twobit(&x.1) as usize] += 1;
+                slot[crate::padseq::convert_to_twobit(&x.1) as usize] += 1;
                 slot
             })
             .collect();
@@ -1060,7 +1089,7 @@ impl PHMM {
                     .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
                     .map(|(j, _)| {
                         let mut slot = [0; 4];
-                        slot[crate::alignment::convert_to_twobit(&ys[j - 1]) as usize] += 1;
+                        slot[crate::padseq::convert_to_twobit(&ys[j - 1]) as usize] += 1;
                         slot
                     })
                     .unwrap()
@@ -1075,7 +1104,7 @@ impl PHMM {
                     .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
                     .map(|(j, _)| {
                         let mut slot = [0u8; 4];
-                        slot[crate::alignment::convert_to_twobit(&ys[j - 1]) as usize] += 1;
+                        slot[crate::padseq::convert_to_twobit(&ys[j - 1]) as usize] += 1;
                         slot
                     })
                     .unwrap()
@@ -1250,8 +1279,8 @@ impl PHMM {
     /// Return the alignment path between x and y.
     /// In HMM term, it is "viterbi" algorithm.
     pub fn align(&self, xs: &[u8], ys: &[u8]) -> (DPTable, Vec<Op>, f64) {
-        let xs: Vec<_> = xs.iter().map(crate::alignment::convert_to_twobit).collect();
-        let ys: Vec<_> = ys.iter().map(crate::alignment::convert_to_twobit).collect();
+        let xs: Vec<_> = xs.iter().map(crate::padseq::convert_to_twobit).collect();
+        let ys: Vec<_> = ys.iter().map(crate::padseq::convert_to_twobit).collect();
         let mut dptable = DPTable::new(xs.len() + 1, ys.len() + 1);
         *dptable.get_mut(0, 0, State::Ins) = EP;
         *dptable.get_mut(0, 0, State::Del) = EP;
@@ -1272,7 +1301,7 @@ impl PHMM {
                     .max(dptable.get(i - 1, j - 1, State::Ins))
                     .max(dptable.get(i - 1, j - 1, State::Del))
                     + self.log_mat
-                    + self.log_mat_emit[((x << 2) | y) as usize];
+                    + self.log_mat_emit[((x << 3) | y) as usize];
                 *dptable.get_mut(i, j, State::Mat) = mat;
                 let del = (dptable.get(i - 1, j, State::Mat) + self.log_gap_open)
                     .max(dptable.get(i - 1, j, State::Del) + self.log_gap_ext)
@@ -1300,7 +1329,7 @@ impl PHMM {
             ops.push(state.into());
             match state {
                 State::Mat => {
-                    let mat_lk = lk - (self.log_mat + self.log_mat_emit[((x << 2) | y) as usize]);
+                    let mat_lk = lk - (self.log_mat + self.log_mat_emit[((x << 3) | y) as usize]);
                     let mat = dptable.get(i - 1, j - 1, State::Mat);
                     let del = dptable.get(i - 1, j - 1, State::Del);
                     let ins = dptable.get(i - 1, j - 1, State::Ins);
@@ -1433,17 +1462,43 @@ pub mod tests {
             );
             let lk = table.get_total_lk(template.len(), seq.len());
             assert!((lk - lk_banded).abs() < 0.001, "{},{}", lk, lk_banded);
+            let state = State::Del;
             for i in 0..template.len() + 1 {
                 for j in 0..seq.len() + 1 {
-                    let x = table.get(i, j, State::Del);
+                    let x = table.get(i, j, state);
                     if EP < x {
-                        print!("{:.2}\t", x);
+                        print!("{:.1}\t", x);
                     } else {
-                        print!("{:.2}\t", 1f64);
+                        print!("{:.1}\t", 1f64);
                     }
                 }
                 println!();
             }
+            println!();
+            let mut dump = vec![vec![EP; seq.len() + 1]; template.len() + 1];
+            for k in 0..template.len() + seq.len() + 1 {
+                let center = centers[k];
+                for (pos, &lk) in fwd.get_row(k, state).iter().enumerate() {
+                    let u = (pos + center) as isize - radius as isize;
+                    let (i, j) = (u, k as isize - u);
+                    if (0..template.len() as isize + 1).contains(&i)
+                        && (0..seq.len() as isize + 1).contains(&j)
+                    {
+                        dump[i as usize][j as usize] = lk;
+                    }
+                }
+            }
+            for line in dump {
+                for x in line {
+                    if EP < x {
+                        print!("{:.1}\t", x);
+                    } else {
+                        print!("{:.1}\t", 1f64);
+                    }
+                }
+                println!();
+            }
+            println!();
             for k in 0..template.len() + seq.len() + 1 {
                 let center = centers[k];
                 for (u, ((&mat, &del), &ins)) in fwd
@@ -1452,27 +1507,22 @@ pub mod tests {
                     .zip(fwd.get_row(k, State::Del).iter())
                     .zip(fwd.get_row(k, State::Ins).iter())
                     .enumerate()
-                    .take(2 * radius + 1)
+                    .take(2 * radius - 2)
+                    .skip(2)
                 {
                     let u = (u + center) as isize - radius as isize;
                     let i = u;
                     let j = k as isize - u;
                     if 0 <= u && u <= template.len() as isize && 0 <= j && j <= seq.len() as isize {
                         let (i, j) = (i as usize, j as usize);
-                        if 3f64 + EP + 1. < mat {
-                            assert!((table.get(i, j, State::Mat) - mat).abs() < 2.);
+                        assert!((table.get(i, j, State::Mat) - mat).abs() < 2.);
+                        let del_exact = table.get(i, j, State::Del);
+                        if 2f64 < (del_exact - del).abs() {
+                            println!("{},{}", i, j);
                         }
-                        if EP < del {
-                            let del_exact = table.get(i, j, State::Del);
-                            if 2f64 < (del_exact - del).abs() {
-                                println!("{},{}", i, j);
-                            }
-                            assert!((del_exact - del).abs() < 2., "E{},B{}", del_exact, del);
-                        }
-                        if 3f64 + EP < ins {
-                            let ins_exact = table.get(i, j, State::Ins);
-                            assert!((ins_exact - ins).abs() < 2., "{},{}", ins_exact, ins);
-                        }
+                        assert!((del_exact - del).abs() < 2., "E{},B{}", del_exact, del);
+                        let ins_exact = table.get(i, j, State::Ins);
+                        assert!((ins_exact - ins).abs() < 2., "{},{}", ins_exact, ins);
                     }
                 }
             }
@@ -1483,45 +1533,88 @@ pub mod tests {
         let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198);
         let template = gen_seq::generate_seq(&mut rng, 30);
         let hmm = PHMM::default();
-        let radius = 10;
+        let radius = 5;
         for _ in 0..10 {
             let seq = gen_seq::introduce_errors(&template, &mut rng, 1, 1, 1);
             let (_, centers) = hmm.forward_banded(&template, &seq, radius);
             let table = hmm.backward(&template, &seq);
             let bwd = hmm.backward_banded(&template, &seq, radius, &centers);
             println!();
+            let state = State::Del;
             for i in 0..template.len() + 1 {
                 for j in 0..seq.len() + 1 {
-                    print!("{:.2}\t", table.get(i, j, State::Mat));
+                    print!("{:.1}\t", table.get(i, j, state));
                 }
                 println!();
             }
             println!();
-            let mut dump_mat = vec![vec![0f64; seq.len() + 1]; template.len() + 1];
+            // for k in 0..template.len() + seq.len() + 1 {
+            //     for &x in fwd.get_row(k, state) {
+            //         if EP < x {
+            //             print!("{:.1}\t", x);
+            //         } else {
+            //             print!("{:.1}\t", 1f64);
+            //         }
+            //     }
+            //     println!();
+            // }
+            // for k in 0..template.len() + seq.len() + 1 {
+            //     for &x in bwd.get_row(k, state) {
+            //         if EP < x {
+            //             print!("{:.1}\t", x);
+            //         } else {
+            //             print!("{:.1}\t", 1f64);
+            //         }
+            //     }
+            //     println!();
+            // }
+            // let mut dump = vec![vec![EP; seq.len() + 1]; template.len() + 1];
+            // for k in 0..template.len() + seq.len() + 1 {
+            //     let center = centers[k];
+            //     for (pos, &lk) in fwd.get_row(k, state).iter().enumerate() {
+            //         let u = (pos + center) as isize - radius as isize;
+            //         let (i, j) = (u, k as isize - u);
+            //         if (0..template.len() as isize + 1).contains(&i)
+            //             && (0..seq.len() as isize + 1).contains(&j)
+            //         {
+            //             dump[i as usize][j as usize] = lk;
+            //         }
+            //     }
+            // }
+            // for line in dump {
+            //     for x in line {
+            //         if EP < x {
+            //             print!("{:.2}\t", x);
+            //         } else {
+            //             print!("{:.2}\t", 1f64);
+            //         }
+            //     }
+            //     println!();
+            // }
+            println!();
+            let mut dump = vec![vec![EP; seq.len() + 1]; template.len() + 1];
             for k in 0..template.len() + seq.len() + 1 {
                 let center = centers[k];
-                //for (pos, &mat) in b_mat[k].iter().enumerate() {
-                for (pos, &mat) in bwd.get_row(k, State::Mat).iter().enumerate() {
+                for (pos, &lk) in bwd.get_row(k, state).iter().enumerate() {
                     let u = (pos + center) as isize - radius as isize;
                     let (i, j) = (u, k as isize - u);
                     if (0..template.len() as isize + 1).contains(&i)
                         && (0..seq.len() as isize + 1).contains(&j)
                     {
-                        dump_mat[i as usize][j as usize] = mat
+                        dump[i as usize][j as usize] = lk;
                     }
                 }
             }
-            for line in dump_mat {
+            for line in dump {
                 for x in line {
                     if EP < x {
-                        print!("{:.2}\t", x);
+                        print!("{:.1}\t", x);
                     } else {
-                        print!("{:.2}\t", 1f64);
+                        print!("{:.1}\t", 1f64);
                     }
                 }
                 println!();
             }
-
             for k in 0..template.len() + seq.len() + 1 {
                 let center = centers[k];
                 for (u, ((&mat, &del), &ins)) in bwd
@@ -1530,29 +1623,26 @@ pub mod tests {
                     .zip(bwd.get_row(k, State::Del).iter())
                     .zip(bwd.get_row(k, State::Ins).iter())
                     .enumerate()
-                    .take(2 * radius + 1)
+                    .take(2 * radius - 1)
+                    .skip(2)
                 {
                     let u = (u + center) as isize - radius as isize;
                     let (i, j) = (u, k as isize - u);
                     if 0 <= u && u <= template.len() as isize && 0 <= j && j <= seq.len() as isize {
                         let (i, j) = (i as usize, j as usize);
-                        if EP < mat {
-                            let mat_exact = table.get(i, j, State::Mat);
-                            assert!(
-                                (mat_exact - mat).abs() < 2.,
-                                "{},{},{},{}",
-                                mat_exact,
-                                mat,
-                                i,
-                                j
-                            );
-                        }
-                        if 3f64 + EP < del {
-                            assert!((table.get(i, j, State::Del) - del).abs() < 2.);
-                        }
-                        if 3f64 + EP < ins {
-                            assert!((table.get(i, j, State::Ins) - ins).abs() < 2.);
-                        }
+                        let mat_exact = table.get(i, j, State::Mat);
+                        assert!(
+                            (mat_exact - mat).abs() < 2.,
+                            "{},{},{},{}",
+                            mat_exact,
+                            mat,
+                            i,
+                            j
+                        );
+                        let diff = (table.get(i, j, State::Del) - del).abs() < 2f64;
+                        assert!(diff, "{},{},{}", diff, i, j);
+                        let diff = (table.get(i, j, State::Ins) - ins).abs() < 2.;
+                        assert!(diff, "{},{}", i, j);
                     }
                 }
             }
@@ -1607,26 +1697,6 @@ pub mod tests {
                     .sum::<u8>();
                 assert_eq!(diff, 0, "{:?},{:?}", x, y);
             }
-            //     let mut total = 0;
-            //     for (x, y) in profile_banded
-            //         .insertion_bases
-            //         .iter()
-            //         .zip(profile_exact.insertion_bases.iter())
-            //     {
-            //         println!("{:?}\t{:?}", x, y);
-            //         let diff = x
-            //             .iter()
-            //             .zip(y.iter())
-            //             .map(|(x, y)| if x == y { 0 } else { 1 })
-            //             .sum::<u32>();
-            //         total += diff;
-            //     }
-            //     println!(
-            //         "{}\n{}",
-            //         String::from_utf8_lossy(&template),
-            //         String::from_utf8_lossy(&seq)
-            //     );
-            //     assert_eq!(total, 0, "{}", template.len());
         }
     }
 }

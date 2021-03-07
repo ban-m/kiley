@@ -1,6 +1,6 @@
-use super::convert_to_twobit;
 use super::Op;
 use super::MA32;
+use crate::padseq::*;
 /// Compute the exact edit distance among `xs`, `ys`, and `zs`, and return the distance and edit operations.
 pub fn alignment(xs: &[u8], ys: &[u8], zs: &[u8]) -> (u32, Vec<Op>) {
     let xs: Vec<_> = xs.iter().map(convert_to_twobit).collect();
