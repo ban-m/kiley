@@ -6,6 +6,7 @@ fn main() {
     let coverage: usize = args[3].parse().unwrap();
     let error_rate: f64 = args[4].parse().unwrap();
     let mut rng: rand_xoshiro::Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(seed);
+    let phmm = kiley::hmm::PHMM::default();
     use kiley::gen_seq;
     let template: Vec<_> = gen_seq::generate_seq(&mut rng, len);
     let prof = gen_seq::PROFILE.norm().mul(error_rate);
@@ -24,10 +25,16 @@ fn main() {
     let poa_time = (end - start).as_millis();
     let poa_dist = edit_dist(&template, &consensus);
     let start = std::time::Instant::now();
-    let consensus = kiley::consensus_canonical(&seqs, seed, 10);
+    let consensus = phmm
+        .correct_flip_banded(&consensus, &seqs, &mut rng, 20, 10)
+        .0;
     let end = std::time::Instant::now();
     let can_time = (end - start).as_millis();
     let can_dist = edit_dist(&template, &consensus);
+    for (x, y) in consensus.chunks(200).zip(template.chunks(200)) {
+        println!("{}", String::from_utf8_lossy(x));
+        println!("{}\n", String::from_utf8_lossy(y));
+    }
     println!(
         "{}\t{}\t{}\t{}\t{}\t{}\tTernary",
         len, seed, coverage, error_rate, kiley_time, kiley_dist

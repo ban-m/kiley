@@ -5,16 +5,23 @@ pub const GUANINE: u8 = 0b10;
 pub const THYMINE: u8 = 0b11;
 pub const GAP: u8 = 0b100;
 pub const NULL: u8 = 0b101;
+const fn lookup_table() -> [u8; 256] {
+    let mut slots = [NULL; 256];
+    slots[b'A' as usize] = ADENINE;
+    slots[b'a' as usize] = ADENINE;
+    slots[b'C' as usize] = CYTOSINE;
+    slots[b'c' as usize] = CYTOSINE;
+    slots[b'G' as usize] = GUANINE;
+    slots[b'g' as usize] = GUANINE;
+    slots[b'T' as usize] = THYMINE;
+    slots[b't' as usize] = THYMINE;
+    slots[b'-' as usize] = GAP;
+    slots
+}
+pub const LOOKUP_TABLE: [u8; 256] = lookup_table();
 // Convert a char to two bit encoding.
 pub const fn convert_to_twobit(base: &u8) -> u8 {
-    match *base {
-        b'A' | b'a' => ADENINE,
-        b'C' | b'c' => CYTOSINE,
-        b'G' | b'g' => GUANINE,
-        b'T' | b't' => THYMINE,
-        b'-' => GAP,
-        _ => NULL,
-    }
+    LOOKUP_TABLE[*base as usize]
 }
 #[derive(Debug, Clone)]
 pub struct PadSeq(Vec<u8>);
