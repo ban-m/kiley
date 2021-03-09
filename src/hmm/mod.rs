@@ -246,8 +246,17 @@ impl LikelihoodSummary {
             .iter()
             .map(|x| Self::choose_max_base(x))
             .collect();
+        let chunks = Self::chunk_by_homopolymer(&template);
         if rng.gen_bool(0.5) {
             // const THRESHOLD: f64 = 0.1;
+            let (position, _) = chunks
+                .iter()
+                .map(|&(start, end)| {
+                    let sum = self.deletion_prob[start..end].iter().sum::<f64>();
+                    (start, sum)
+                })
+                .max_by(|x, y| (x.1).partial_cmp(&y.1).unwrap())
+                .unwrap();
             // let sum = self
             //     .deletion_prob
             //     .iter()
@@ -264,12 +273,12 @@ impl LikelihoodSummary {
             //     }
             //     position += 1;
             // }
-            let (position, _) = self
-                .deletion_prob
-                .iter()
-                .enumerate()
-                .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
-                .unwrap();
+            // let (position, _) = self
+            //     .deletion_prob
+            //     .iter()
+            //     .enumerate()
+            //     .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
+            //     .unwrap();
             template.remove(position);
         } else {
             // const THRESHOLD: f64 = 0.2;
@@ -289,21 +298,59 @@ impl LikelihoodSummary {
             //     }
             //     position += 1;
             // }
-            let (position, _) = self
-                .insertion_prob
+            let (start, end, _) = chunks
                 .iter()
-                .enumerate()
-                .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
+                .map(|&(start, end)| {
+                    let sum = self.insertion_prob[start..end].iter().sum::<f64>();
+                    (start, end, sum)
+                })
+                .max_by(|x, y| (x.1).partial_cmp(&y.1).unwrap())
                 .unwrap();
-            let base = {
-                let (index, _) = self.insertion_bases[position]
+            let (position, base) = {
+                let position = (start..end)
+                    .max_by(|&x, &y| {
+                        self.insertion_prob[x]
+                            .partial_cmp(&self.insertion_prob[y])
+                            .unwrap()
+                    })
+                    .unwrap();
+                let base = self.insertion_bases[position]
                     .iter()
                     .enumerate()
                     .max_by_key(|x| x.1)
+                    .map(|(idx, _)| b"ACGT"[idx])
                     .unwrap();
-                b"ACGT"[index]
+                (position, base)
+                // self.insertion_bases[start..end]
+                //     .iter()
+                //     .fold(vec![0; 4], |mut xs, ys| {
+                //         for i in 0..4 {
+                //             xs[i] += ys[i];
+                //         }
+                //         xs
+                //     })
+                //     .into_iter()
+                //     .enumerate()
+                //     .max_by_key(|x| x.1)
+                //     .map(|(idx, _)| b"ACGT"[idx])
+                //     .unwrap()
             };
-            template.insert(position + 1, base);
+            template.insert(position, base);
+            // let (position, _) = self
+            //     .insertion_prob
+            //     .iter()
+            //     .enumerate()
+            //     .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
+            //     .unwrap();
+            // let base = {
+            //     let (index, _) = self.insertion_bases[position]
+            //         .iter()
+            //         .enumerate()
+            //         .max_by_key(|x| x.1)
+            //         .unwrap();
+            //     b"ACGT"[index]
+            // };
+            // template.insert(position + 1, base);
         };
         template
     }
