@@ -33,6 +33,31 @@ fn banded_aln(b: &mut test::Bencher) {
 }
 
 #[bench]
+fn edit_dist_ops(b: &mut test::Bencher) {
+    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+    let prof = &kiley::gen_seq::PROFILE;
+    b.iter(|| {
+        let template = kiley::gen_seq::generate_seq(&mut rng, 2_000);
+        let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        kiley::alignment::bialignment::edit_dist_slow_ops(&xs, &ys)
+    });
+}
+
+#[bench]
+fn edit_dist_banded_ops(b: &mut test::Bencher) {
+    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+    let prof = &kiley::gen_seq::PROFILE;
+    let band = 20;
+    b.iter(|| {
+        let template = kiley::gen_seq::generate_seq(&mut rng, 2_000);
+        let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        kiley::alignment::bialignment::edit_dist_banded(&xs, &ys, band)
+    });
+}
+
+#[bench]
 fn edit_dist_naive(b: &mut test::Bencher) {
     let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
     let prof = &kiley::gen_seq::PROFILE;

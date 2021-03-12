@@ -81,6 +81,7 @@ pub fn alignment_u32(xs: &[u8], ys: &[u8], zs: &[u8], rad: usize) -> (u32, Vec<O
             let (x, y): (&mut [u32], &mut [u32]) = dp.split_at_mut(get!(s, 0, 0, len));
             (x as &[u32], y)
         };
+        let (mut min, mut min_t, mut min_u) = (total_length, 0, 0);
         for t in t_start..t_end {
             let t_orig = t + t_center - rad;
             let x_axis = s - t_orig;
@@ -100,19 +101,11 @@ pub fn alignment_u32(xs: &[u8], ys: &[u8], zs: &[u8], rad: usize) -> (u32, Vec<O
                 let score =
                     get_next_score(&filled_dp, len, (s, t, u), &diffs, (x_base, y_base, z_base));
                 filling_dp[(t * len + u) as usize] = score;
-            }
-        }
-        let start = ((len * len * s) + len * 3 + 3) as usize;
-        let end = ((len * len * s) + len * (2 * rad + 3) + (2 * rad + 3)) as usize;
-        let (mut min, mut min_t, mut min_u) = (total_length, 0, 0);
-        for (idx, &score) in dp[start..end + 1].iter().enumerate() {
-            if score < min {
-                let location = idx as isize % (len * len);
-                let t = location / len - 3;
-                let u = location % len - 3;
-                min = score;
-                min_t = t;
-                min_u = u;
+                if score < min {
+                    min = score;
+                    min_t = t;
+                    min_u = u;
+                }
             }
         }
         let next_t = min_t + t_center - rad;

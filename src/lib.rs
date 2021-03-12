@@ -9,9 +9,9 @@ use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256StarStar;
 
 pub fn consensus<T: std::borrow::Borrow<[u8]>>(seqs: &[T], seed: u64, repnum: usize) -> Vec<u8> {
-    let radius = (seqs.iter().map(|x| x.borrow().len()).max().unwrap() / 200).max(8);
+    let radius = (seqs.iter().map(|x| x.borrow().len()).max().unwrap() / 200).max(10);
     let fold_num = (1..)
-        .take_while(|&x| 3usize.pow(x as u32) < seqs.len())
+        .take_while(|&x| 3usize.pow(x as u32) <= seqs.len())
         .count();
     if repnum <= fold_num {
         consensus_inner(seqs, radius)
@@ -100,7 +100,6 @@ pub fn correct_by_alignment(xs: &[u8], ys: &[u8], zs: &[u8], aln: &[alignment::O
     for &op in aln {
         match op {
             alignment::Op::XInsertion => {
-                // Insertion from x. Discard.
                 x += 1;
             }
             alignment::Op::YInsertion => {
@@ -213,6 +212,134 @@ pub fn consensus_poa<T: std::borrow::Borrow<[u8]>>(
         let subseq: Vec<_> = subseq.iter().map(|e| e.as_slice()).collect();
         POA::from_slice_banded(&subseq, (-1, -1, &score), max_len / 10).consensus()
     }
+}
+
+pub fn polish_by_pileup<T: std::borrow::Borrow<[u8]>>(
+    template: &[u8],
+    xs: &[T],
+    radius: usize,
+) -> Vec<u8> {
+    let mut matches = vec![[0; 4]; template.len()];
+    let mut insertions = vec![[0; 4]; template.len() + 1];
+    let mut deletions = vec![0; template.len()];
+    use alignment::bialignment::edit_dist_banded;
+    use alignment::bialignment::Op;
+    for x in xs.iter() {
+        let x = x.borrow();
+        let (_dist, ops): (u32, Vec<Op>) = match edit_dist_banded(&template, x, radius) {
+            Some(res) => res,
+            None => continue,
+        };
+        let (mut i, mut j) = (0, 0);
+        for op in ops {
+            match op {
+                Op::Mat => {
+                    matches[i][padseq::convert_to_twobit(&x[j]) as usize] += 1;
+                    i += 1;
+                    j += 1;
+                }
+                Op::Del => {
+                    deletions[i] += 1;
+                    i += 1;
+                }
+                Op::Ins => {
+                    insertions[i][padseq::convert_to_twobit(&x[j]) as usize] += 1;
+                    j += 1;
+                }
+            }
+        }
+    }
+    let mut template = vec![];
+    for ((i, m), &d) in insertions.iter().zip(matches.iter()).zip(deletions.iter()) {
+        let insertion = i.iter().sum::<usize>();
+        let coverage = m.iter().sum::<usize>() + d;
+        if coverage / 2 < insertion {
+            if let Some(base) = i
+                .iter()
+                .enumerate()
+                .max_by_key(|x| x.1)
+                .map(|(idx, _)| b"ACGT"[idx])
+            {
+                template.push(base);
+            }
+        }
+        if d < coverage / 2 {
+            if let Some(base) = m
+                .iter()
+                .enumerate()
+                .max_by_key(|x| x.1)
+                .map(|(idx, _)| b"ACGT"[idx])
+            {
+                template.push(base);
+            }
+        }
+    }
+    // We neglect the last insertion.
+    template
+}
+
+pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(template: &[u8], xs: &[T]) -> Vec<u8> {
+    let mut polished = template.to_vec();
+    while let Some(imp) = polish_by_flip(&polished, xs) {
+        polished = imp;
+    }
+    polished
+}
+
+pub fn polish_by_flip<T: std::borrow::Borrow<[u8]>>(template: &[u8], xs: &[T]) -> Option<Vec<u8>> {
+    use alignment::bialignment;
+    // let start = std::time::Instant::now();
+    let dps: Vec<_> = xs
+        .iter()
+        .map(|x| {
+            let pre_dp = bialignment::edit_dist_dp_pre(template, x.borrow());
+            let post_dp = bialignment::edit_dist_dp_post(template, x.borrow());
+            (x.borrow(), pre_dp, post_dp)
+        })
+        .collect();
+    //let end = std::time::Instant::now();
+    let current_edit_distance = dps.iter().map(|(_, _, dp)| dp[0][0]).sum::<u32>();
+    //println!("{:?},{}", end - start, current_edit_distance);
+    let mut improved = template.to_vec();
+    for pos in 0..template.len() {
+        // Check mutation.
+        for &base in b"ACGT" {
+            let edit_dist = dps
+                .iter()
+                .map(|(x, pre, post)| bialignment::edit_dist_with_mutation(x, pre, post, pos, base))
+                .sum::<u32>();
+            if edit_dist < current_edit_distance {
+                // println!("{}->{}", current_edit_distance, edit_dist);
+                improved[pos] = base;
+                return Some(improved);
+            }
+        }
+        // Insertion
+        for &base in b"ACGT" {
+            let edit_dist = dps
+                .iter()
+                .map(|(x, pre, post)| {
+                    bialignment::edit_dist_with_insertion(x, pre, post, pos, base)
+                })
+                .sum::<u32>();
+            if edit_dist < current_edit_distance {
+                // println!("{}->{}", current_edit_distance, edit_dist);
+                improved.insert(pos, base);
+                return Some(improved);
+            }
+        }
+        // Deletion
+        let edit_dist = dps
+            .iter()
+            .map(|(_, pre, post)| bialignment::edit_dist_with_deletion(pre, post, pos))
+            .sum::<u32>();
+        if edit_dist < current_edit_distance {
+            // println!("{}->{}", current_edit_distance, edit_dist);
+            improved.remove(pos);
+            return Some(improved);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

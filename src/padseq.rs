@@ -40,8 +40,17 @@ impl PadSeq {
     pub fn get(&self, index: isize) -> Option<&u8> {
         self.0.get((index + OFFSET as isize) as usize)
     }
+    pub fn get_mut(&mut self, index: isize) -> Option<&mut u8> {
+        self.0.get_mut((index + OFFSET as isize) as usize)
+    }
     pub fn len(&self) -> usize {
         self.0.len() - 2 * OFFSET
+    }
+}
+
+impl std::convert::AsRef<[u8]> for PadSeq {
+    fn as_ref(&self) -> &[u8] {
+        &self.0[OFFSET..self.0.len() - OFFSET]
     }
 }
 
@@ -49,5 +58,23 @@ impl std::ops::Index<isize> for PadSeq {
     type Output = u8;
     fn index(&self, index: isize) -> &Self::Output {
         self.get(index).unwrap()
+    }
+}
+
+impl std::ops::IndexMut<isize> for PadSeq {
+    fn index_mut(&mut self, index: isize) -> &mut Self::Output {
+        self.get_mut(index).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn padseq() {
+        let xs = b"CACAGTCGATGCTAGCTAGTACGTACGTACGT";
+        let xs_converted: Vec<_> = xs.iter().map(convert_to_twobit).collect();
+        let xs = PadSeq::new(xs.as_ref());
+        assert_eq!(xs.as_ref(), xs_converted);
     }
 }
