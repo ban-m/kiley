@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 // min_swap(x,y) is equivalent to x = x.min(y), but is more efficient.
 // macro_rules! min_swap {
 //     ($x:expr,$y:expr) => {
@@ -327,13 +326,13 @@ impl DPTable {
         &self.data[start..end]
     }
     // Return the i-th row. Conaining trailing offsets.
-    fn get_row_pad(&self, i: isize) -> &[u32] {
-        let row = (i + Self::OFFSET as isize) as usize;
-        let collen = self.column + 2 * Self::OFFSET;
-        let start = row * collen + Self::OFFSET;
-        let end = (row + 1) * collen;
-        &self.data[start..end]
-    }
+    // fn get_row_pad(&self, i: isize) -> &[u32] {
+    //     let row = (i + Self::OFFSET as isize) as usize;
+    //     let collen = self.column + 2 * Self::OFFSET;
+    //     let start = row * collen + Self::OFFSET;
+    //     let end = (row + 1) * collen;
+    //     &self.data[start..end]
+    // }
 }
 
 fn edit_dist_banded_dp_pre(xs: &PadSeq, ys: &PadSeq, radius: usize) -> (Vec<isize>, DPTable) {
