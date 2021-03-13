@@ -1,3 +1,4 @@
+#![feature(is_sorted)]
 pub mod alignment;
 pub mod gen_seq;
 // use poa_hmm::POA;
@@ -276,70 +277,6 @@ pub fn polish_by_pileup<T: std::borrow::Borrow<[u8]>>(
     }
     // We neglect the last insertion.
     template
-}
-
-pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(template: &[u8], xs: &[T]) -> Vec<u8> {
-    let mut polished = template.to_vec();
-    while let Some(imp) = polish_by_flip(&polished, xs) {
-        polished = imp;
-    }
-    polished
-}
-
-pub fn polish_by_flip<T: std::borrow::Borrow<[u8]>>(template: &[u8], xs: &[T]) -> Option<Vec<u8>> {
-    use alignment::bialignment;
-    // let start = std::time::Instant::now();
-    let dps: Vec<_> = xs
-        .iter()
-        .map(|x| {
-            let pre_dp = bialignment::edit_dist_dp_pre(template, x.borrow());
-            let post_dp = bialignment::edit_dist_dp_post(template, x.borrow());
-            (x.borrow(), pre_dp, post_dp)
-        })
-        .collect();
-    //let end = std::time::Instant::now();
-    let current_edit_distance = dps.iter().map(|(_, _, dp)| dp[0][0]).sum::<u32>();
-    //println!("{:?},{}", end - start, current_edit_distance);
-    let mut improved = template.to_vec();
-    for pos in 0..template.len() {
-        // Check mutation.
-        for &base in b"ACGT" {
-            let edit_dist = dps
-                .iter()
-                .map(|(x, pre, post)| bialignment::edit_dist_with_mutation(x, pre, post, pos, base))
-                .sum::<u32>();
-            if edit_dist < current_edit_distance {
-                // println!("{}->{}", current_edit_distance, edit_dist);
-                improved[pos] = base;
-                return Some(improved);
-            }
-        }
-        // Insertion
-        for &base in b"ACGT" {
-            let edit_dist = dps
-                .iter()
-                .map(|(x, pre, post)| {
-                    bialignment::edit_dist_with_insertion(x, pre, post, pos, base)
-                })
-                .sum::<u32>();
-            if edit_dist < current_edit_distance {
-                // println!("{}->{}", current_edit_distance, edit_dist);
-                improved.insert(pos, base);
-                return Some(improved);
-            }
-        }
-        // Deletion
-        let edit_dist = dps
-            .iter()
-            .map(|(_, pre, post)| bialignment::edit_dist_with_deletion(pre, post, pos))
-            .sum::<u32>();
-        if edit_dist < current_edit_distance {
-            // println!("{}->{}", current_edit_distance, edit_dist);
-            improved.remove(pos);
-            return Some(improved);
-        }
-    }
-    None
 }
 
 #[cfg(test)]

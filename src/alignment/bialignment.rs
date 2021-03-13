@@ -1,4 +1,12 @@
 #![allow(dead_code)]
+// min_swap(x,y) is equivalent to x = x.min(y), but is more efficient.
+// macro_rules! min_swap {
+//     ($x:expr,$y:expr) => {
+//         if $y < $x {
+//             $x = $y;
+//         }
+//     };
+// }
 use crate::padseq::PadSeq;
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum Op {
@@ -214,6 +222,68 @@ pub fn edit_dist_with_deletion(pre_dp: &[Vec<u32>], post_dp: &[Vec<u32>], positi
         .unwrap()
 }
 
+pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(template: &[u8], xs: &[T]) -> Vec<u8> {
+    let mut polished = template.to_vec();
+    let mut start_position = 0;
+    while let Some((imp, pos)) = polish_by_flip(&polished, xs, start_position) {
+        polished = imp;
+        start_position = pos;
+    }
+    polished
+}
+
+pub fn polish_by_flip<T: std::borrow::Borrow<[u8]>>(
+    template: &[u8],
+    xs: &[T],
+    start_position: usize,
+) -> Option<(Vec<u8>, usize)> {
+    let dps: Vec<_> = xs
+        .iter()
+        .map(|x| {
+            let pre_dp = edit_dist_dp_pre(template, x.borrow());
+            let post_dp = edit_dist_dp_post(template, x.borrow());
+            (x.borrow(), pre_dp, post_dp)
+        })
+        .collect();
+    let current_edit_distance = dps.iter().map(|(_, _, dp)| dp[0][0]).sum::<u32>();
+    let mut improved = template.to_vec();
+    for pos in 0..template.len() {
+        let pos = (start_position + pos) % template.len();
+        // Check mutation.
+        for &base in b"ACGT" {
+            let edit_dist = dps
+                .iter()
+                .map(|(x, pre, post)| edit_dist_with_mutation(x, pre, post, pos, base))
+                .sum::<u32>();
+            if edit_dist < current_edit_distance {
+                improved[pos] = base;
+                return Some((improved, pos));
+            }
+        }
+        // Insertion
+        for &base in b"ACGT" {
+            let edit_dist = dps
+                .iter()
+                .map(|(x, pre, post)| edit_dist_with_insertion(x, pre, post, pos, base))
+                .sum::<u32>();
+            if edit_dist < current_edit_distance {
+                improved.insert(pos, base);
+                return Some((improved, pos));
+            }
+        }
+        // Deletion
+        let edit_dist = dps
+            .iter()
+            .map(|(_, pre, post)| edit_dist_with_deletion(pre, post, pos))
+            .sum::<u32>();
+        if edit_dist < current_edit_distance {
+            improved.remove(pos);
+            return Some((improved, pos));
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone)]
 struct DPTable {
     data: Vec<u32>,
@@ -222,45 +292,53 @@ struct DPTable {
 }
 
 impl DPTable {
+    const OFFSET: usize = 3;
     fn new(row: usize, column: usize, init: u32) -> Self {
         Self {
-            data: vec![init; row * column],
+            data: vec![init; (row + 2 * Self::OFFSET) * (column + 2 * Self::OFFSET)],
             column,
             row,
         }
     }
     fn get_location(&self, i: isize, j: isize) -> usize {
-        i as usize * self.column + j as usize
+        let r = (i + Self::OFFSET as isize) as usize;
+        let c = (j + Self::OFFSET as isize) as usize;
+        r * (self.column + 2 * Self::OFFSET) + c
     }
     fn get(&self, i: isize, j: isize) -> u32 {
-        self.data[self.get_location(i, j)]
+        unsafe { *self.data.get_unchecked(self.get_location(i, j)) }
+        // let location = self.get_location(i, j);
+        // assert!(location < self.data.len());
+        // self.data[self.get_location(i, j)]
     }
     fn get_check(&self, i: isize, j: isize) -> Option<u32> {
-        if 0 <= i && 0 <= j {
-            self.data.get(self.get_location(i, j)).copied()
-        } else {
-            None
-        }
+        self.data.get(self.get_location(i, j)).copied()
     }
     fn get_mut(&mut self, i: isize, j: isize) -> &mut u32 {
         let location = self.get_location(i, j);
-        assert!(
-            location < self.data.len(),
-            "{},{},{},{}",
-            i,
-            j,
-            location,
-            self.data.len()
-        );
         self.data.get_mut(location).unwrap()
+    }
+    // Return the i-th row. Exact.
+    fn get_row(&self, i: isize) -> &[u32] {
+        let row = (i + Self::OFFSET as isize) as usize;
+        let collen = self.column + 2 * Self::OFFSET;
+        let start = row * collen + Self::OFFSET;
+        let end = (row + 1) * collen - Self::OFFSET;
+        &self.data[start..end]
+    }
+    // Return the i-th row. Conaining trailing offsets.
+    fn get_row_pad(&self, i: isize) -> &[u32] {
+        let row = (i + Self::OFFSET as isize) as usize;
+        let collen = self.column + 2 * Self::OFFSET;
+        let start = row * collen + Self::OFFSET;
+        let end = (row + 1) * collen;
+        &self.data[start..end]
     }
 }
 
 fn edit_dist_banded_dp_pre(xs: &PadSeq, ys: &PadSeq, radius: usize) -> (Vec<isize>, DPTable) {
     let ub = UPPER_BOUND;
     let mut dp = DPTable::new(xs.len() + ys.len() + 1, 2 * radius + 1, ub);
-    // let mut centers = vec![0, 0, 1];
-    let mut centers = vec![0, 0, 1];
     let radius = radius as isize;
     // Fill the first diagonal.
     *dp.get_mut(0, radius) = 0;
@@ -268,10 +346,9 @@ fn edit_dist_banded_dp_pre(xs: &PadSeq, ys: &PadSeq, radius: usize) -> (Vec<isiz
     *dp.get_mut(1, radius) = 1;
     *dp.get_mut(1, radius + 1) = 1;
     // Fill diagonals.
+    let mut centers = vec![0, 0, 1];
+    let (mut center, mut matdiff, mut gapdiff) = (1, 1, 1);
     for k in 2..(xs.len() + ys.len() + 1) as isize {
-        let center = centers[k as usize];
-        let matdiff = center - centers[k as usize - 2];
-        let gapdiff = center - centers[k as usize - 1];
         let (start, end) = {
             let start = (radius - center).max(k - center + radius - ys.len() as isize);
             let end = (xs.len() as isize + 1 - center + radius).min(k + 1 - center + radius);
@@ -280,27 +357,27 @@ fn edit_dist_banded_dp_pre(xs: &PadSeq, ys: &PadSeq, radius: usize) -> (Vec<isiz
         let (mut min_dist, mut min_pos) = (ub, end);
         for pos in start..end {
             let u = pos + center - radius;
-            let (i, j) = (u, k - u);
+            let y = ys[k - u - 1];
+            let x = xs[u - 1];
             let prev_mat = pos as isize + matdiff;
             let prev_gap = pos as isize + gapdiff;
-            let (x, y) = (xs[i - 1], ys[j - 1]);
             let mat_pen = MATMAT[(x << 3 | y) as usize];
-            let mat = dp.get_check(k - 2, prev_mat - 1).unwrap_or(ub) + mat_pen;
-            let del = dp.get_check(k - 1, prev_gap - 1).unwrap_or(ub) + 1;
-            let ins = dp.get_check(k - 1, prev_gap).unwrap_or(ub) + 1;
+            let mat = dp.get(k - 2, prev_mat - 1) + mat_pen;
+            let del = dp.get(k - 1, prev_gap - 1) + 1;
+            let ins = dp.get(k - 1, prev_gap) + 1;
             let dist = mat.min(del).min(ins);
-            *dp.get_mut(k, pos) = dist;
             if dist < min_dist {
                 min_dist = dist;
                 min_pos = pos;
             }
+            *dp.get_mut(k, pos) = dist;
         }
         let min_u = min_pos as isize + center - radius;
-        if center < min_u {
-            centers.push(center + 1);
-        } else {
-            centers.push(center);
-        };
+        let diff = (center < min_u) as isize;
+        center += diff;
+        matdiff = gapdiff + diff;
+        gapdiff = diff;
+        centers.push(center);
     }
     (centers, dp)
 }
@@ -315,28 +392,33 @@ fn edit_dist_banded_with_mutation(
     base: u8,
 ) -> u32 {
     let (start, end) = ranges[position as usize];
-    let mut modified_row = vec![UPPER_BOUND; (end - start) as usize + 1];
-    for ypos in (start..end).rev() {
-        let j = ypos - start;
-        let next_j = ypos - ranges[position as usize + 1].0;
-        let ins = modified_row[j as usize + 1] + 1;
-        let del = post_dp
-            .get_check(position + 1, next_j)
-            .unwrap_or(UPPER_BOUND)
-            + 1;
-        let mat_pen = MATMAT[(base << 3 | ys[ypos]) as usize];
-        let mat = post_dp
-            .get_check(position + 1, next_j + 1)
-            .unwrap_or(UPPER_BOUND)
-            + mat_pen;
-        modified_row[j as usize] = ins.min(del).min(mat);
-    }
-    modified_row
+    let (prev_start, _) = ranges[position as usize + 1];
+    let mut modified_row = vec![UPPER_BOUND; (end - start) as usize];
+    let mut prev = UPPER_BOUND;
+    let matmat = &MATMAT[(base << 3) as usize..(base << 3 | 0b111) as usize];
+    for ((j, &y), x) in ys
+        .get_range(start, end)
         .iter()
         .enumerate()
-        .map(|(j, post)| post + pre_dp.get(position, j as isize))
+        .zip(modified_row.iter_mut())
+        .rev()
+    {
+        let j = j as isize;
+        let next_j = j + start - prev_start;
+        let mat_pen = matmat[y as usize];
+        let mat = post_dp.get(position + 1, next_j + 1) + mat_pen;
+        let del = post_dp.get(position + 1, next_j) + 1;
+        let current = mat.min(del).min(prev + 1);
+        *x = current;
+        prev = current;
+    }
+    pre_dp
+        .get_row(position)
+        .iter()
+        .zip(modified_row.iter())
+        .map(|(x, y)| x + y)
         .min()
-        .unwrap()
+        .unwrap_or(UPPER_BOUND)
 }
 
 fn edit_dist_banded_with_insertion(
@@ -348,23 +430,31 @@ fn edit_dist_banded_with_insertion(
     base: u8,
 ) -> u32 {
     let (start, end) = ranges[position as usize];
-    let mut modified_row = vec![UPPER_BOUND; (end - start) as usize + 1];
-    for ypos in (start..end).rev() {
-        let j = ypos - start;
-        let mat_pen = MATMAT[(base << 3 | ys[ypos]) as usize];
-        let mat = post_dp.get_check(position, j + 1).unwrap_or(UPPER_BOUND) + mat_pen;
-        let ins = modified_row[j as usize + 1] + 1;
-        let del = post_dp.get_check(position, j).unwrap_or(UPPER_BOUND) + 1;
-        modified_row[j as usize] = ins.min(del).min(mat);
-    }
-    // Maybe just pop the last element?
-    modified_row
+    let mut modified_row = vec![UPPER_BOUND; (end - start) as usize];
+    let mut prev = UPPER_BOUND;
+    let matmat = &MATMAT[(base << 3) as usize..(base << 3 | 6) as usize];
+    for ((j, &y), x) in ys
+        .get_range(start, end)
         .iter()
         .enumerate()
-        .take((end - start) as usize)
-        .map(|(j, post)| post + pre_dp.get(position, j as isize))
+        .zip(modified_row.iter_mut())
+        .rev()
+    {
+        let j = j as isize;
+        let matpen = matmat[y as usize];
+        let mat = post_dp.get(position, j + 1) + matpen;
+        let del = post_dp.get(position, j) + 1;
+        let current = mat.min(del).min(prev + 1);
+        *x = current;
+        prev = current;
+    }
+    pre_dp
+        .get_row(position)
+        .iter()
+        .zip(modified_row.iter())
+        .map(|(x, y)| x + y)
         .min()
-        .unwrap()
+        .unwrap_or(UPPER_BOUND)
 }
 
 fn edit_dist_banded_with_deletion(
@@ -373,16 +463,15 @@ fn edit_dist_banded_with_deletion(
     ranges: &[(isize, isize)],
     position: isize,
 ) -> u32 {
-    let (start, end) = ranges[position as usize];
+    let (start, _) = ranges[position as usize];
     let (next_start, _) = ranges[position as usize + 1];
-    (start..end)
-        .map(|ypos| {
-            let j = ypos - start;
-            let next_j = ypos - next_start;
-            pre_dp.get(position, j) + post_dp.get(position + 1, next_j)
-        })
+    pre_dp
+        .get_row(position)
+        .iter()
+        .enumerate()
+        .map(|(j, dist)| dist + post_dp.get(position + 1, j as isize + start - next_start))
         .min()
-        .unwrap()
+        .unwrap_or(UPPER_BOUND)
 }
 
 // Convert diagonl DP into usual orthogonal DP.
@@ -396,42 +485,64 @@ fn convert_diagonal_to_orthogonal(
     radius: isize,
 ) -> (DPTable, DPTable, Vec<(isize, isize)>) {
     // Registered the filled cells.
-    let mut cells: Vec<_> = vec![vec![]; xs.len() + 1];
-    for k in 0..(xs.len() + ys.len()) as isize + 1 {
-        let center = centers[k as usize];
-        let (start, end) = {
+    let loop_ranges: Vec<_> = centers
+        .iter()
+        .enumerate()
+        .map(|(k, center)| {
+            let k = k as isize;
             let start = (radius - center).max(k - center + radius - ys.len() as isize);
             let end = (xs.len() as isize + 1 - center + radius).min(k + 1 - center + radius);
-            (start.max(0), end.min(2 * radius + 1))
-        };
+            (k, center, start.max(0), end.min(2 * radius + 1))
+        })
+        .collect();
+    // (longest range so far, current expanding range)
+    let mut max_ranges: Vec<_> = vec![((0, 0), (0, 0)); xs.len() + 1];
+    for &(k, center, start, end) in loop_ranges.iter() {
         for pos in start..end {
-            let x_pos = pos + center - radius;
-            let y_pos = k - x_pos;
-            cells[x_pos as usize].push(y_pos);
+            let x_pos = (pos + center - radius) as usize;
+            let y_pos = k - x_pos as isize;
+            let ((m_start, m_end), (c_start, c_end)) = max_ranges.get_mut(x_pos).unwrap();
+            if *c_end == y_pos {
+                // Expanding current range.
+                *c_end = y_pos + 1;
+            } else if *m_end - *m_start <= *c_end - *c_start {
+                // Update if needed.
+                *m_start = *c_start;
+                *m_end = *c_end;
+                *c_start = y_pos;
+                *c_end = y_pos + 1;
+            }
         }
     }
-    let ranges: Vec<_> = cells
-        .into_iter()
-        .map(|y_positions| get_range(y_positions))
+    let ranges: Vec<_> = max_ranges
+        .iter()
+        .map(|&((m_start, m_end), (c_start, c_end))| {
+            if m_end - m_start <= c_end - c_start {
+                (c_start, c_end)
+            } else {
+                (m_start, m_end)
+            }
+        })
         .collect();
     // Note that the length of the ranges can be any length.
     let max_range = ranges.iter().map(|(s, e)| (e - s)).max().unwrap() as usize;
+    // Maybe we can make it faster here.
     let mut pre_dp_orth = DPTable::new(xs.len() + 1, max_range, UPPER_BOUND);
     let mut post_dp_orth = DPTable::new(xs.len() + 1, max_range, UPPER_BOUND);
-    for k in 0..((xs.len() + ys.len()) as isize + 1) {
-        let center = centers[k as usize];
-        let (start, end) = {
-            let start = (radius - center).max(k - center + radius - ys.len() as isize);
-            let end = (xs.len() as isize + 1 - center + radius).min(k + 1 - center + radius);
-            (start.max(0), end.min(2 * radius + 1))
-        };
-        for pos in start..end {
-            let x_pos = pos + center - radius;
+    for (k, center, start, end) in loop_ranges {
+        let pre_dp = pre_dp.get_row(k);
+        let post_dp = post_dp.get_row(k);
+        let (start, end) = (start as usize, end as usize);
+        for (position, (&pre, &post)) in
+            pre_dp.iter().zip(post_dp).enumerate().take(end).skip(start)
+        {
+            let position = position as isize;
+            let x_pos = position + center - radius;
             let y_pos = k - x_pos;
             let (orth_start, orth_end) = ranges[x_pos as usize];
             if orth_start <= y_pos && y_pos < orth_end {
-                *pre_dp_orth.get_mut(x_pos, y_pos - orth_start) = pre_dp.get(k, pos);
-                *post_dp_orth.get_mut(x_pos, y_pos - orth_start) = post_dp.get(k, pos);
+                *pre_dp_orth.get_mut(x_pos, y_pos - orth_start) = pre;
+                *post_dp_orth.get_mut(x_pos, y_pos - orth_start) = post;
             }
         }
     }
@@ -443,26 +554,27 @@ fn convert_diagonal_to_orthogonal(
 // It consumes ypos, so that we can certain that the retrn value is not the index of ypos,
 // but the index of the original DP table.
 // Note that ypos should not be an emtpry array.
-fn get_range(mut ypos: Vec<isize>) -> (isize, isize) {
-    assert!(!ypos.is_empty());
-    ypos.sort_unstable();
-    let mut pointer = 0;
-    let (mut max_pointer, mut max_run_length) = (0, 1);
-    while pointer < ypos.len() {
-        let mut reach = pointer + 1;
-        while reach < ypos.len() && ypos[reach - 1] + 1 == ypos[reach] {
-            reach += 1;
-        }
-        if max_run_length < reach - pointer {
-            max_run_length = reach - pointer;
-            max_pointer = pointer;
-        }
-        pointer = reach;
-    }
-    let start = ypos[max_pointer];
-    let end = ypos[max_pointer + max_run_length - 1] + 1;
-    (start, end)
-}
+// fn get_range(ypos: Vec<isize>) -> (isize, isize) {
+//     assert!(!ypos.is_empty());
+//     assert!(ypos.is_sorted());
+//     // ypos.sort_unstable();
+//     let mut pointer = 0;
+//     let (mut max_pointer, mut max_run_length) = (0, 1);
+//     while pointer < ypos.len() {
+//         let mut reach = pointer + 1;
+//         while reach < ypos.len() && ypos[reach - 1] + 1 == ypos[reach] {
+//             reach += 1;
+//         }
+//         if max_run_length < reach - pointer {
+//             max_run_length = reach - pointer;
+//             max_pointer = pointer;
+//         }
+//         pointer = reach;
+//     }
+//     let start = ypos[max_pointer];
+//     let end = ypos[max_pointer + max_run_length - 1] + 1;
+//     (start, end)
+// }
 
 // return "Post" DP.
 fn edit_dist_banded_dp_post(xs: &PadSeq, ys: &PadSeq, radius: usize, centers: &[isize]) -> DPTable {
@@ -489,7 +601,8 @@ fn edit_dist_banded_dp_post(xs: &PadSeq, ys: &PadSeq, radius: usize, centers: &[
             *dp.get_mut(k, pos) = 1;
         }
     }
-    for k in (0..((xs.len() + ys.len()) as isize - 1)).rev() {
+    for k in (0..(xs.len() + ys.len() - 1) as isize).rev() {
+        // for (k, centers) in centers.windows(3).enumerate().rev() {
         let center = centers[k as usize];
         let matdiff = center - centers[k as usize + 2];
         let gapdiff = center - centers[k as usize + 1];
@@ -500,19 +613,102 @@ fn edit_dist_banded_dp_post(xs: &PadSeq, ys: &PadSeq, radius: usize, centers: &[
         };
         for pos in start..end {
             let u = pos + center - radius;
-            let (i, j) = (u, k - u);
+            let (x, y) = (xs[u], ys[k - u]);
             let prev_mat = pos as isize + matdiff;
             let prev_gap = pos as isize + gapdiff;
-            let (x, y) = (xs[i], ys[j]);
             let mat_pen = MATMAT[(x << 3 | y) as usize];
-            let mat = dp.get_check(k + 2, prev_mat + 1).unwrap_or(ub) + mat_pen;
-            let ins = dp.get_check(k + 1, prev_gap + 1).unwrap_or(ub) + 1;
-            let del = dp.get_check(k + 1, prev_gap).unwrap_or(ub) + 1;
+            let mat = dp.get(k + 2, prev_mat + 1) + mat_pen;
+            let ins = dp.get(k + 1, prev_gap + 1) + 1;
+            let del = dp.get(k + 1, prev_gap) + 1;
             let dist = mat.min(del).min(ins);
             *dp.get_mut(k, pos) = dist;
         }
     }
     dp
+}
+
+pub fn polish_until_converge_banded<T: std::borrow::Borrow<[u8]>>(
+    template: &[u8],
+    xs: &[T],
+    radius: usize,
+) -> Vec<u8> {
+    let xs: Vec<_> = xs.iter().map(|x| PadSeq::new(x.borrow())).collect();
+    let mut polished = PadSeq::new(template);
+    let mut start_position = 0;
+    while let Some((imp, pos)) = polish_by_flip_banded(&polished, &xs, start_position, radius) {
+        start_position = pos;
+        polished = imp;
+    }
+    polished.into()
+}
+
+pub fn polish_by_flip_banded<T: std::borrow::Borrow<PadSeq>>(
+    template: &PadSeq,
+    queries: &[T],
+    start_position: usize,
+    radius: usize,
+) -> Option<(PadSeq, usize)> {
+    let mut current_edit_distance = 0;
+    let dps: Vec<_> = queries
+        .iter()
+        .filter_map(|query| {
+            let q = query.borrow();
+            let (centers, pre_dp) = edit_dist_banded_dp_pre(template, q, radius);
+            let post_dp = edit_dist_banded_dp_post(template, q, radius, &centers);
+            let radius = radius as isize;
+            let lk = {
+                let k = (template.len() + q.len()) as isize;
+                let u = template.len() as isize;
+                let u_in_dp = u - centers[k as usize] + radius as isize;
+                pre_dp.get_check(k, u_in_dp)?
+            };
+            current_edit_distance += lk;
+            let (pre_dp, post_dp, ranges) =
+                convert_diagonal_to_orthogonal(&template, q, &pre_dp, &post_dp, &centers, radius);
+            Some((q, ranges, pre_dp, post_dp))
+        })
+        .collect();
+    let mut improved = template.clone();
+    for pos in 0..template.len() {
+        use crate::padseq;
+        let pos = ((start_position + pos) % template.len()) as isize;
+        // Check mutation.
+        for base in b"ACGT".iter().map(padseq::convert_to_twobit) {
+            let edit_dist = dps
+                .iter()
+                .map(|(x, ranges, pre, post)| {
+                    edit_dist_banded_with_mutation(x, pre, post, ranges, pos, base)
+                })
+                .sum::<u32>();
+            if edit_dist < current_edit_distance {
+                improved[pos] = base;
+                return Some((improved, pos as usize));
+            }
+        }
+        // Insertion
+        for base in b"ACGT".iter().map(padseq::convert_to_twobit) {
+            let edit_dist = dps
+                .iter()
+                .map(|(x, ranges, pre, post)| {
+                    edit_dist_banded_with_insertion(x, pre, post, ranges, pos, base)
+                })
+                .sum::<u32>();
+            if edit_dist < current_edit_distance {
+                improved.insert(pos, base);
+                return Some((improved, pos as usize));
+            }
+        }
+        // Deletion
+        let edit_dist = dps
+            .iter()
+            .map(|(_, ranges, pre, post)| edit_dist_banded_with_deletion(pre, post, ranges, pos))
+            .sum::<u32>();
+        if edit_dist < current_edit_distance {
+            improved.remove(pos);
+            return Some((improved, pos as usize));
+        }
+    }
+    None
 }
 
 pub fn edit_dist_banded(xs: &[u8], ys: &[u8], radius: usize) -> Option<(u32, Vec<Op>)> {
@@ -868,10 +1064,10 @@ mod test {
             }
         }
     }
-    #[test]
-    fn get_range_test() {
-        let ypos = vec![0, 1, 2, 3, 4, 5];
-        let range = get_range(ypos);
-        assert_eq!(range, (0, 6));
-    }
+    // #[test]
+    // fn get_range_test() {
+    //     let ypos = vec![0, 1, 2, 3, 4, 5];
+    //     let range = get_range(ypos);
+    //     assert_eq!(range, (0, 6));
+    // }
 }

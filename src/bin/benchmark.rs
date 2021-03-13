@@ -26,7 +26,9 @@ fn main() {
         );
         //// Polish
         let start = std::time::Instant::now();
-        let consensus = kiley::polish_until_converge(&consensus, &seqs);
+        // let consensus = kiley::alignment::bialignment::polish_until_converge(&consensus, &seqs);
+        let consensus =
+            kiley::alignment::bialignment::polish_until_converge_banded(&consensus, &seqs, 30);
         let end = std::time::Instant::now();
         let can_time = (end - start).as_millis();
         let can_dist = edit_dist(&template, &consensus);

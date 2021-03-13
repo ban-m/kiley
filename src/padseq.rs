@@ -27,30 +27,59 @@ pub const fn convert_to_twobit(base: &u8) -> u8 {
 pub struct PadSeq(Vec<u8>);
 
 // Leading and trailing sequnce size. Filled with NULL.
-const OFFSET: usize = 3;
 impl PadSeq {
+    const OFFSET: usize = 3;
     pub fn new<T: std::borrow::Borrow<[u8]>>(xs: T) -> Self {
         let seq: Vec<_> = std::iter::repeat(NULL)
-            .take(OFFSET)
+            .take(Self::OFFSET)
             .chain(xs.borrow().iter().map(convert_to_twobit))
-            .chain(std::iter::repeat(NULL).take(OFFSET))
+            .chain(std::iter::repeat(NULL).take(Self::OFFSET))
             .collect();
         PadSeq(seq)
     }
+    pub fn from(mut xs: Vec<u8>) -> Self {
+        xs.iter_mut().for_each(|x| *x = convert_to_twobit(x));
+        xs.extend(std::iter::repeat(NULL).take(Self::OFFSET));
+        xs.reverse();
+        xs.extend(std::iter::repeat(NULL).take(Self::OFFSET));
+        xs.reverse();
+        PadSeq(xs)
+    }
     pub fn get(&self, index: isize) -> Option<&u8> {
-        self.0.get((index + OFFSET as isize) as usize)
+        self.0.get((index + Self::OFFSET as isize) as usize)
     }
     pub fn get_mut(&mut self, index: isize) -> Option<&mut u8> {
-        self.0.get_mut((index + OFFSET as isize) as usize)
+        self.0.get_mut((index + Self::OFFSET as isize) as usize)
     }
     pub fn len(&self) -> usize {
-        self.0.len() - 2 * OFFSET
+        self.0.len() - 2 * Self::OFFSET
+    }
+    pub fn remove(&mut self, index: isize) -> u8 {
+        self.0.remove((index + Self::OFFSET as isize) as usize)
+    }
+    pub fn insert(&mut self, index: isize, base: u8) {
+        self.0
+            .insert((index + Self::OFFSET as isize) as usize, base)
+    }
+    /// Return [start..end)
+    pub fn get_range(&self, start: isize, end: isize) -> &[u8] {
+        let start = (start + Self::OFFSET as isize) as usize;
+        let end = (end + Self::OFFSET as isize) as usize;
+        &self.0[start..end]
+    }
+}
+
+impl std::convert::From<PadSeq> for Vec<u8> {
+    fn from(PadSeq(mut inner): PadSeq) -> Vec<u8> {
+        inner.retain(|&x| x != NULL && x != GAP);
+        inner.iter_mut().for_each(|x| *x = b"ACGT"[*x as usize]);
+        inner
     }
 }
 
 impl std::convert::AsRef<[u8]> for PadSeq {
     fn as_ref(&self) -> &[u8] {
-        &self.0[OFFSET..self.0.len() - OFFSET]
+        &self.0[Self::OFFSET..self.0.len() - Self::OFFSET]
     }
 }
 
