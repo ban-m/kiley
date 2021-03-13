@@ -9,8 +9,27 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256StarStar;
 
-pub fn consensus<T: std::borrow::Borrow<[u8]>>(seqs: &[T], seed: u64, repnum: usize) -> Vec<u8> {
-    let radius = (seqs.iter().map(|x| x.borrow().len()).max().unwrap() / 200).max(10);
+/// Take consensus and polish it. It consists of three step.
+/// 1: Make consensus by ternaly alignments.
+/// 2: Polish consensus by ordinary pileup method
+/// 3: polish consensus by increment polishing method
+pub fn consensus<T: std::borrow::Borrow<[u8]>>(
+    seqs: &[T],
+    seed: u64,
+    repnum: usize,
+    radius: usize,
+) -> Vec<u8> {
+    let consensus = ternary_consensus(seqs, seed, repnum, radius);
+    let consensus = polish_by_pileup(&consensus, seqs, radius);
+    alignment::bialignment::polish_until_converge_banded(&consensus, &seqs, radius)
+}
+
+pub fn ternary_consensus<T: std::borrow::Borrow<[u8]>>(
+    seqs: &[T],
+    seed: u64,
+    repnum: usize,
+    radius: usize,
+) -> Vec<u8> {
     let fold_num = (1..)
         .take_while(|&x| 3usize.pow(x as u32) <= seqs.len())
         .count();
@@ -19,11 +38,11 @@ pub fn consensus<T: std::borrow::Borrow<[u8]>>(seqs: &[T], seed: u64, repnum: us
     } else {
         let mut seqs: Vec<_> = seqs.iter().map(|x| x.borrow()).collect();
         let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
-        let xs = consensus(&seqs, rng.gen(), repnum - 1);
+        let xs = ternary_consensus(&seqs, rng.gen(), repnum - 1, radius);
         seqs.shuffle(&mut rng);
-        let ys = consensus(&seqs, rng.gen(), repnum - 1);
+        let ys = ternary_consensus(&seqs, rng.gen(), repnum - 1, radius);
         seqs.shuffle(&mut rng);
-        let zs = consensus(&seqs, rng.gen(), repnum - 1);
+        let zs = ternary_consensus(&seqs, rng.gen(), repnum - 1, radius);
         let (_dist, cons) = get_consensus_kiley(&xs, &ys, &zs, 10);
         cons
     }
@@ -39,53 +58,6 @@ fn consensus_inner<T: std::borrow::Borrow<[u8]>>(seqs: &[T], radius: usize) -> V
         if consensus.len() < 3 {
             break;
         }
-    }
-    consensus.pop().unwrap()
-}
-
-pub fn consensus_canonical<T: std::borrow::Borrow<[u8]>>(
-    seqs: &[T],
-    seed: u64,
-    radius: usize,
-) -> Vec<u8> {
-    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
-    let mut seqs: Vec<_> = seqs.iter().map(|x| x.borrow()).collect();
-    let xs = consensus_inner(&seqs, radius);
-    seqs.shuffle(&mut rng);
-    let ys = consensus_inner(&seqs, radius);
-    seqs.shuffle(&mut rng);
-    let zs = consensus_inner(&seqs, radius);
-    get_consensus_kiley(&xs, &ys, &zs, 10).1
-}
-
-pub fn consensus_kiley<T: std::borrow::Borrow<[u8]>>(
-    seqs: &[T],
-    seed: u64,
-    repnum: usize,
-    radius: usize,
-) -> Vec<u8> {
-    assert!(seqs.len() > 2);
-    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
-    let mut consensus: Vec<Vec<u8>> = seqs.iter().map(|x| x.borrow().to_vec()).collect();
-    for t in 1..=repnum {
-        let rad = (radius / t).max(10);
-        let consensus_dist: Vec<_> = (0..seqs.len())
-            .map(|_| {
-                let mut picked = consensus.choose_multiple(&mut rng, 3);
-                let xs = picked.next().unwrap();
-                let ys = picked.next().unwrap();
-                let zs = picked.next().unwrap();
-                get_consensus_kiley(xs, ys, zs, rad)
-            })
-            .collect();
-        let mean = consensus_dist.iter().map(|x| x.0 as f64).sum::<f64>() / seqs.len() as f64;
-        let diffsq = |&(x, _): &(u32, _)| (x as f64 - mean).powi(2);
-        let sd = (consensus_dist.iter().map(diffsq).sum::<f64>() / seqs.len() as f64).sqrt();
-        let thr = (mean + 2f64 * sd).floor() as u32 + 2;
-        consensus = consensus_dist
-            .into_iter()
-            .filter_map(|(dist, seq)| if dist < thr { Some(seq) } else { None })
-            .collect();
     }
     consensus.pop().unwrap()
 }

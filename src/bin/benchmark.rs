@@ -15,26 +15,13 @@ fn main() {
     {
         ///// Kiley
         let start = std::time::Instant::now();
-        let consensus = kiley::consensus(&seqs, seed, 4);
-        let consensus = kiley::polish_by_pileup(&consensus, &seqs, 20);
+        let consensus = kiley::consensus(&seqs, seed, 3, 15);
         let end = std::time::Instant::now();
         let kiley_time = (end - start).as_millis();
         let kiley_dist = edit_dist(&template, &consensus);
         println!(
             "{}\t{}\t{}\t{}\t{}\t{}\tTernary",
             len, seed, coverage, error_rate, kiley_time, kiley_dist
-        );
-        //// Polish
-        let start = std::time::Instant::now();
-        // let consensus = kiley::alignment::bialignment::polish_until_converge(&consensus, &seqs);
-        let consensus =
-            kiley::alignment::bialignment::polish_until_converge_banded(&consensus, &seqs, 30);
-        let end = std::time::Instant::now();
-        let can_time = (end - start).as_millis();
-        let can_dist = edit_dist(&template, &consensus);
-        println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\tPolish",
-            len, seed, coverage, error_rate, can_time, can_dist
         );
     }
     //// POA
