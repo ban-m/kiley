@@ -1185,6 +1185,7 @@ impl PHMM {
         summary.div_probs(queries.len() as f64);
         (new_template, summary)
     }
+    /// Correct input until convergence.
     pub fn correct<T: std::borrow::Borrow<[u8]>>(
         &self,
         template: &[u8],
@@ -1205,11 +1206,6 @@ impl PHMM {
         let mut corrected = template.to_vec();
         loop {
             let (new_corrected, new_lks) = self.correct_step(&corrected, queries, &lks);
-            // println!(
-            //     "LK:{:.3}->{:.3}",
-            //     lks.total_likelihood, new_lks.total_likelihood
-            // );
-            // println!("CurrentSQ:{}", String::from_utf8_lossy(&corrected));
             if lks.total_likelihood < new_lks.total_likelihood {
                 corrected = new_corrected;
                 lks = new_lks;
@@ -1281,7 +1277,6 @@ impl PHMM {
         for _ in 0..repeat_time {
             let new_template = lks.correct_flip(rng);
             let new_lks = self.get_profiles_banded(&new_template, queries, radius);
-            println!("{:.0}", new_lks.total_likelihood);
             let ratio = (new_lks.total_likelihood - lks.total_likelihood)
                 .exp()
                 .min(1f64);

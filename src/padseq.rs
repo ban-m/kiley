@@ -23,7 +23,7 @@ pub const LOOKUP_TABLE: [u8; 256] = lookup_table();
 pub const fn convert_to_twobit(base: &u8) -> u8 {
     LOOKUP_TABLE[*base as usize]
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PadSeq(Vec<u8>);
 
 // Leading and trailing sequnce size. Filled with NULL.

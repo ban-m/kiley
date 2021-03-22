@@ -15,7 +15,7 @@ fn main() {
     {
         ///// Kiley
         let start = std::time::Instant::now();
-        let consensus = kiley::consensus(&seqs, seed, 3, 15);
+        let consensus = kiley::consensus(&seqs, seed, 3, 15).unwrap();
         let end = std::time::Instant::now();
         let kiley_time = (end - start).as_millis();
         let kiley_dist = edit_dist(&template, &consensus);

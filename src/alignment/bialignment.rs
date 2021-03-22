@@ -129,23 +129,26 @@ pub fn edit_dist_dp_post(xs: &[u8], ys: &[u8]) -> Vec<Vec<u32>> {
     dp
 }
 
+/// Edit distance and its operations.
+/// We prefer to insertion/deletion over mutation,
+/// which makes the alignment more compact when represented in cigar.
 pub fn edit_dist_slow_ops(xs: &[u8], ys: &[u8]) -> (u32, Vec<Op>) {
     let dp = edit_dist_dp_pre(xs, ys);
     let (mut i, mut j) = (xs.len(), ys.len());
     let mut ops = vec![];
     while 0 < i && 0 < j {
         let dist = dp[i][j];
-        let mat_pen = (xs[i - 1] != ys[j - 1]) as u32;
-        if dist == dp[i - 1][j - 1] + mat_pen {
-            ops.push(Op::Mat);
-            i -= 1;
-            j -= 1;
-        } else if dist == dp[i - 1][j] + 1 {
+        if dist == dp[i - 1][j] + 1 {
             ops.push(Op::Del);
             i -= 1;
-        } else {
-            assert_eq!(dist, dp[i][j - 1] + 1);
+        } else if dist == dp[i][j - 1] + 1 {
             ops.push(Op::Ins);
+            j -= 1;
+        } else {
+            let mat_pen = (xs[i - 1] != ys[j - 1]) as u32;
+            assert_eq!(dist, dp[i - 1][j - 1] + mat_pen);
+            ops.push(Op::Mat);
+            i -= 1;
             j -= 1;
         }
     }
@@ -630,23 +633,143 @@ pub fn polish_until_converge_banded<T: std::borrow::Borrow<[u8]>>(
     template: &[u8],
     xs: &[T],
     radius: usize,
-) -> Vec<u8> {
+) -> Option<Vec<u8>> {
     let xs: Vec<_> = xs.iter().map(|x| PadSeq::new(x.borrow())).collect();
     let mut polished = PadSeq::new(template);
     let mut start_position = 0;
-    while let Some((imp, pos)) = polish_by_flip_banded(&polished, &xs, start_position, radius) {
+    let mut total_edit_dist = UPPER_BOUND;
+    while let Some((imp, pos, dist)) = polish_by_flip_banded(&polished, &xs, start_position, radius)
+    {
         start_position = pos;
         polished = imp;
+        if total_edit_dist <= dist {
+            return None;
+        } else {
+            total_edit_dist = dist;
+        }
     }
-    polished.into()
+    Some(polished.into())
 }
 
+// /// Find a candidate x such that
+// /// the sum of edit distance from x to queries would
+// /// possibly smaller thant that from template.
+// /// If the edit distance from x to template is 1,
+// /// then that condition is comfirmed.
+// /// Also, if this function returns None,
+// /// there is no such sequence, for sure.
+// /// I recommend you to use this function for a few time,
+// /// then polish up by `polish_by_flip_banded`.
+// /// This is because there is no theoritically support for halting,
+// /// and in some case iterative polishing by this function never stops.
+// /// DONOT USE THIS FUNCTION.
+// #[allow(dead_code)]
+// fn polish_by_batch_banded<T: std::borrow::Borrow<PadSeq>>(
+//     template: &PadSeq,
+//     queries: &[T],
+//     radius: usize,
+// ) -> Option<PadSeq> {
+//     eprintln!("DO NOT USE THIS FUNCTION");
+//     let mut current_edit_distance = 0;
+//     let dps: Vec<_> = queries
+//         .iter()
+//         .filter_map(|query| {
+//             let q = query.borrow();
+//             let (centers, pre_dp) = edit_dist_banded_dp_pre(template, q, radius);
+//             let post_dp = edit_dist_banded_dp_post(template, q, radius, &centers);
+//             let radius = radius as isize;
+//             let dist = {
+//                 let k = (template.len() + q.len()) as isize;
+//                 let u = template.len() as isize;
+//                 let u_in_dp = u - centers[k as usize] + radius as isize;
+//                 pre_dp.get_check(k, u_in_dp)?
+//             };
+//             current_edit_distance += dist;
+//             let (pre_dp, post_dp, ranges) =
+//                 convert_diagonal_to_orthogonal(&template, q, &pre_dp, &post_dp, &centers, radius);
+//             Some((q, ranges, pre_dp, post_dp))
+//         })
+//         .collect();
+//     let mut improved_sequence = vec![];
+//     use crate::padseq;
+//     'outer: for (pos, &refr) in template.as_ref().iter().enumerate() {
+//         let pos = pos as isize;
+//         // Insertion
+//         let insertion = b"ACGT".iter().find(|b| {
+//             let base = padseq::convert_to_twobit(b);
+//             let edit_dist = dps
+//                 .iter()
+//                 .map(|(x, ranges, pre, post)| {
+//                     edit_dist_banded_with_insertion(x, pre, post, ranges, pos, base)
+//                 })
+//                 .sum::<u32>();
+//             edit_dist < current_edit_distance
+//         });
+//         if let Some(base) = insertion {
+//             eprintln!("I:{}", pos);
+//             improved_sequence.push(*base);
+//         }
+//         // Check deletion
+//         let edit_dist = dps
+//             .iter()
+//             .map(|(_, ranges, pre, post)| edit_dist_banded_with_deletion(pre, post, ranges, pos))
+//             .sum::<u32>();
+//         if edit_dist < current_edit_distance {
+//             eprintln!("D:{}", pos);
+//             continue 'outer;
+//         }
+//         // Check mutations
+//         let mutation = b"ACGT".iter().find(|b| {
+//             let base = padseq::convert_to_twobit(b);
+//             let edit_dist = dps
+//                 .iter()
+//                 .map(|(x, ranges, pre, post)| {
+//                     edit_dist_banded_with_mutation(x, pre, post, ranges, pos, base)
+//                 })
+//                 .sum::<u32>();
+//             edit_dist < current_edit_distance
+//         });
+//         if let Some(base) = mutation {
+//             improved_sequence.push(*base);
+//             eprintln!("M:{}", pos);
+//             continue 'outer;
+//         }
+//         // Here, we arrive at "match" state.
+//         improved_sequence.push(b"ACGT"[refr as usize]);
+//     }
+//     // Check the last insertion.
+//     let insertion = b"ACGT".iter().find(|b| {
+//         let pos = template.len() as isize;
+//         let base = padseq::convert_to_twobit(b);
+//         let edit_dist = dps
+//             .iter()
+//             .map(|(x, ranges, pre, post)| {
+//                 edit_dist_banded_with_insertion(x, pre, post, ranges, pos, base)
+//             })
+//             .sum::<u32>();
+//         edit_dist < current_edit_distance
+//     });
+//     if let Some(base) = insertion {
+//         improved_sequence.push(*base);
+//     }
+//     let improved_sequence = PadSeq::new(improved_sequence.as_slice());
+//     if improved_sequence.as_ref() == template.as_ref() {
+//         None
+//     } else {
+//         Some(improved_sequence)
+//     }
+// }
+
+/// Find if there is a sequence x such that
+/// the edit distance from x to template is 1,
+/// and the sum of edit distance from x to queries is
+/// smaller than that from template.
 pub fn polish_by_flip_banded<T: std::borrow::Borrow<PadSeq>>(
     template: &PadSeq,
     queries: &[T],
     start_position: usize,
     radius: usize,
-) -> Option<(PadSeq, usize)> {
+) -> Option<(PadSeq, usize, u32)> {
     let mut current_edit_distance = 0;
     let dps: Vec<_> = queries
         .iter()
@@ -668,24 +791,59 @@ pub fn polish_by_flip_banded<T: std::borrow::Borrow<PadSeq>>(
         })
         .collect();
     let mut improved = template.clone();
+    use crate::padseq;
     for pos in 0..template.len() {
-        use crate::padseq;
         let pos = ((start_position + pos) % template.len()) as isize;
-        // Check mutation.
-        for base in b"ACGT".iter().map(padseq::convert_to_twobit) {
-            let edit_dist = dps
-                .iter()
-                .map(|(x, ranges, pre, post)| {
-                    edit_dist_banded_with_mutation(x, pre, post, ranges, pos, base)
-                })
-                .sum::<u32>();
-            if edit_dist < current_edit_distance {
-                improved[pos] = base;
-                return Some((improved, pos as usize));
+        let deletion = dps
+            .iter()
+            .map(|(_, ranges, pre, post)| edit_dist_banded_with_deletion(pre, post, ranges, pos))
+            .sum::<u32>();
+        let (mutation, mut_base) = b"ACGT"
+            .iter()
+            .map(padseq::convert_to_twobit)
+            .map(|base| {
+                let edit_dist = dps
+                    .iter()
+                    .map(|(x, ranges, pre, post)| {
+                        edit_dist_banded_with_mutation(x, pre, post, ranges, pos, base)
+                    })
+                    .sum::<u32>();
+                (edit_dist, base)
+            })
+            .min_by_key(|x| x.0)
+            .unwrap();
+        let (insertion, ins_base) = b"ACGT"
+            .iter()
+            .map(padseq::convert_to_twobit)
+            .map(|base| {
+                let edit_dist = dps
+                    .iter()
+                    .map(|(x, ranges, pre, post)| {
+                        edit_dist_banded_with_insertion(x, pre, post, ranges, pos, base)
+                    })
+                    .sum::<u32>();
+                (edit_dist, base)
+            })
+            .min_by_key(|x| x.0)
+            .unwrap();
+        let minimum = deletion.min(insertion).min(mutation);
+        if minimum < current_edit_distance {
+            if minimum == insertion {
+                improved.insert(pos, ins_base);
+            } else if minimum == deletion {
+                improved.remove(pos);
+            } else {
+                assert_eq!(minimum, mutation);
+                improved[pos] = mut_base;
             }
+            return Some((improved, pos as usize, minimum));
         }
-        // Insertion
-        for base in b"ACGT".iter().map(padseq::convert_to_twobit) {
+    }
+    let pos = template.len() as isize;
+    let insertion = b"ACGT"
+        .iter()
+        .map(padseq::convert_to_twobit)
+        .filter_map(|base| {
             let edit_dist = dps
                 .iter()
                 .map(|(x, ranges, pre, post)| {
@@ -693,19 +851,15 @@ pub fn polish_by_flip_banded<T: std::borrow::Borrow<PadSeq>>(
                 })
                 .sum::<u32>();
             if edit_dist < current_edit_distance {
-                improved.insert(pos, base);
-                return Some((improved, pos as usize));
+                Some((edit_dist, base))
+            } else {
+                None
             }
-        }
-        // Deletion
-        let edit_dist = dps
-            .iter()
-            .map(|(_, ranges, pre, post)| edit_dist_banded_with_deletion(pre, post, ranges, pos))
-            .sum::<u32>();
-        if edit_dist < current_edit_distance {
-            improved.remove(pos);
-            return Some((improved, pos as usize));
-        }
+        })
+        .min_by_key(|x| x.0);
+    if let Some((dist, base)) = insertion {
+        improved.insert(pos, base);
+        return Some((improved, pos as usize, dist));
     }
     None
 }

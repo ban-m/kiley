@@ -2,6 +2,7 @@
 pub mod alignment;
 pub mod gen_seq;
 // use poa_hmm::POA;
+pub use alignment::bialignment::polish_until_converge_banded;
 pub mod hmm;
 mod padseq;
 use rand::seq::*;
@@ -13,15 +14,43 @@ use rand_xoshiro::Xoshiro256StarStar;
 /// 1: Make consensus by ternaly alignments.
 /// 2: Polish consensus by ordinary pileup method
 /// 3: polish consensus by increment polishing method
+/// If the radius was too small for the dataset, return None.
+/// In such case, please increase radius(recommend doubling) and try again.
 pub fn consensus<T: std::borrow::Borrow<[u8]>>(
     seqs: &[T],
     seed: u64,
     repnum: usize,
     radius: usize,
-) -> Vec<u8> {
+) -> Option<Vec<u8>> {
     let consensus = ternary_consensus(seqs, seed, repnum, radius);
     let consensus = polish_by_pileup(&consensus, seqs, radius);
     alignment::bialignment::polish_until_converge_banded(&consensus, &seqs, radius)
+}
+
+/// Almost the same as `consensus`, but it automatically scale the radius
+/// if needed, until it reaches the configured upper bound.
+pub fn consensus_bounded<T: std::borrow::Borrow<[u8]>>(
+    seqs: &[T],
+    seed: u64,
+    repnum: usize,
+    radius: usize,
+    max_radius: usize,
+) -> Option<Vec<u8>> {
+    let consensus = ternary_consensus(seqs, seed, repnum, radius);
+    let consensus = polish_by_pileup(&consensus, seqs, radius);
+    let mut radius = radius;
+    loop {
+        let consensus =
+            alignment::bialignment::polish_until_converge_banded(&consensus, &seqs, radius);
+        if consensus.is_some() {
+            break consensus;
+        } else if max_radius <= radius {
+            break None;
+        } else {
+            radius *= 2;
+            radius = radius.min(max_radius);
+        }
+    }
 }
 
 pub fn ternary_consensus<T: std::borrow::Borrow<[u8]>>(
@@ -43,8 +72,7 @@ pub fn ternary_consensus<T: std::borrow::Borrow<[u8]>>(
         let ys = ternary_consensus(&seqs, rng.gen(), repnum - 1, radius);
         seqs.shuffle(&mut rng);
         let zs = ternary_consensus(&seqs, rng.gen(), repnum - 1, radius);
-        let (_dist, cons) = get_consensus_kiley(&xs, &ys, &zs, 10);
-        cons
+        get_consensus_kiley(&xs, &ys, &zs, radius).1
     }
 }
 
@@ -274,7 +302,7 @@ mod test {
                     .map(|_| gen_seq::introduce_randomness(&template1, &mut rng, &gen_seq::PROFILE))
                     .collect();
                 let seqs: Vec<_> = seqs.iter().map(|e| e.as_slice()).collect();
-                let consensus = consensus(&seqs, cov as u64, 7);
+                let consensus = consensus(&seqs, cov as u64, 7, 30);
                 let dist = edit_dist(&consensus, &template1);
                 eprintln!("LONG:{}", dist);
                 dist <= 2
@@ -364,7 +392,7 @@ mod test {
             let seqs: Vec<_> = (0..coverage)
                 .map(|_| gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE))
                 .collect();
-            let consensus = consensus_kiley(&seqs, i, 7, 20);
+            let consensus = consensus(&seqs, i, 7, 20);
             let dist = edit_dist(&consensus, &template);
             eprintln!("T:{}", String::from_utf8_lossy(&template));
             eprintln!("C:{}", String::from_utf8_lossy(&consensus));
@@ -385,7 +413,7 @@ mod test {
                 let seqs: Vec<_> = (0..cov)
                     .map(|_| gen_seq::introduce_randomness(&template1, &mut rng, &gen_seq::PROFILE))
                     .collect();
-                let consensus = consensus_kiley(&seqs, cov as u64, 7, 10);
+                let consensus = consensus(&seqs, cov as u64, 7, 10);
                 let dist = edit_dist(&consensus, &template1);
                 eprintln!("LONG:{}", dist);
                 dist <= 2
@@ -414,7 +442,7 @@ mod test {
                 let seqs: Vec<_> = (0..cov)
                     .map(|_| gen_seq::introduce_randomness(&template1, &mut rng, &gen_seq::PROFILE))
                     .collect();
-                let consensus = consensus_kiley(&seqs, cov as u64, 6, 10);
+                let consensus = consensus(&seqs, cov as u64, 6, 10);
                 let dist = edit_dist(&consensus, &template1);
                 eprintln!(
                     "{}\n{}\n{}",
