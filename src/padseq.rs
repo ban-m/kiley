@@ -23,6 +23,7 @@ pub const LOOKUP_TABLE: [u8; 256] = lookup_table();
 pub const fn convert_to_twobit(base: &u8) -> u8 {
     LOOKUP_TABLE[*base as usize]
 }
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PadSeq(Vec<u8>);
 
@@ -66,6 +67,9 @@ impl PadSeq {
         let start = (start + Self::OFFSET as isize) as usize;
         let end = (end + Self::OFFSET as isize) as usize;
         &self.0[start..end]
+    }
+    pub fn iter(&self) -> std::slice::Iter<'_, u8> {
+        self.0[Self::OFFSET..self.0.len() - Self::OFFSET].iter()
     }
 }
 

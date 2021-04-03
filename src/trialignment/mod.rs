@@ -1,6 +1,5 @@
 //! Alignment packages. In contrast to other packages, it contains alignment modules for three sequence, not two.
 pub mod banded;
-pub mod bialignment;
 pub mod naive;
 /// Edit operation on a ternary alignment.
 /// Compared to the three operation (insertion to the reference, deletion from the reference, match between the query and the reference) in
