@@ -151,6 +151,24 @@ impl std::default::Default for GPHMM {
 }
 
 impl GPHMM {
+    /// transition matrix: the [to *self.states + from]-th element should be Pr{from->to}
+    /// observation_matrix: the [states << 6 | x << 3 | y]-th element should be Pr{(x,y)|states},
+    /// or Pr{(x,y)|states, x} in the case of conditional pair-HMM.
+    /// where x and y are three-bit encoded bases as follows: (A->000,C->001,G->010,T->011,'-'->100)
+    /// initial_distribution: the [i]-th element should be Pr{i} at the beggining.
+    pub fn from_raw_elements(
+        states: usize,
+        transition_matrix: Vec<f64>,
+        observation_matrix: Vec<f64>,
+        initial_distribution: Vec<f64>,
+    ) -> Self {
+        Self {
+            states,
+            transition_matrix,
+            observation_matrix,
+            initial_distribution,
+        }
+    }
     /// Create a new generalized pair hidden Markov model.
     /// There is a few restriction on the input arguments.
     /// 1. transition matrix should be states x states matrix,
