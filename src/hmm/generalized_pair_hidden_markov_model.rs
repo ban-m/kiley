@@ -21,8 +21,9 @@
 /// The input sequences should be strings on the alphabet b"ATGCacgt", and there is no distinction between lower-case letter and upper-case letter.
 /// Note that ,for each exact algorithm, there is `banded` version approximate the result.
 /// If the computational time matters, please try these method, even though it can reach sub-optimal solutions.
-#[derive(Debug, Clone)]
-pub struct GeneralizedPairHiddenMarkovModel {
+/// To specify the mode of the pair HMM(Full or conditional), `GPHMM::<Full>::` or `GPHMM::<Cond>::` would be OK.
+#[derive(Clone, Debug)]
+pub struct GeneralizedPairHiddenMarkovModel<T: HMMType> {
     // Number of states.
     states: usize,
     // Transition between each states.
@@ -34,14 +35,74 @@ pub struct GeneralizedPairHiddenMarkovModel {
     observation_matrix: Vec<f64>,
     // Initial distribution. Should be normalized to 1.
     initial_distribution: Vec<f64>,
+    // Mode.
+    _mode: std::marker::PhantomData<T>,
 }
 
-pub type GPHMM = GeneralizedPairHiddenMarkovModel;
+/// Please Do not implement this trait by your own program.
+pub trait HMMType {}
+
+/// This is a marker type associated with Generalized Pair Hidden Markov Model.
+/// If you want to use full, unconditional model, please tag GPHMM with this type, like
+/// GPHMM::<FullHiddenmarkovmodel>;
+pub struct FullHiddenMarkovModel;
+/// Alius.
+pub type Full = FullHiddenMarkovModel;
+impl HMMType for FullHiddenMarkovModel {}
+
+/// This is a marker type associated with Generalized Pair Hidden Markov Model.
+/// If you want to use full, unconditional model, please tag GPHMM with this type, like
+/// GPHMM::<ConditionalHiddenmarkovmodel>;
+pub struct ConditionalHiddenMarkovModel;
+/// Alius
+pub type Cond = ConditionalHiddenMarkovModel;
+impl HMMType for ConditionalHiddenMarkovModel {}
+
+impl<T: HMMType> std::fmt::Display for GPHMM<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        writeln!(f, "Type:{}", std::any::type_name::<T>())?;
+        writeln!(f, "States:{}", self.states)?;
+        writeln!(f, "Transition:")?;
+        for from in 0..self.states {
+            let probs: Vec<_> = (0..self.states)
+                .map(|to| self.transition(from, to))
+                .map(|x| format!("{:.2}", x))
+                .collect();
+            writeln!(f, "{}", probs.join("\t"))?;
+        }
+        writeln!(f, "Observation")?;
+        for state in 0..self.states {
+            for x in 0..5 {
+                let probs: Vec<_> = (0..5)
+                    .map(|y| self.observe(state, x, y))
+                    .map(|x| format!("{:.2}", x))
+                    .collect();
+                writeln!(f, "{}", probs.join("\t"))?
+            }
+            writeln!(f)?;
+        }
+        let probs: Vec<_> = self
+            .initial_distribution
+            .iter()
+            .map(|x| format!("{:.2}", x))
+            .collect();
+        writeln!(f, "Initial:{}", probs.join("\t"))
+    }
+}
+
+pub type GPHMM<T> = GeneralizedPairHiddenMarkovModel<T>;
 
 // We define additional structure for easy implementation.
 // This is offset around a DP table for each state.
 const OFFSET: usize = 3;
 // This is the DP table. We have one sheet for each state.
+fn logsumexp(xs: &[f64]) -> f64 {
+    if xs.is_empty() {
+        return EP;
+    }
+    let max = xs.iter().max_by(|x, y| x.partial_cmp(y).unwrap()).unwrap();
+    xs.iter().map(|x| (x - max).exp()).sum::<f64>().ln() + max
+}
 #[derive(Debug, Clone)]
 struct DPTable {
     column: usize,
@@ -127,7 +188,7 @@ fn log(x: &f64) -> f64 {
     }
 }
 
-impl std::default::Default for GPHMM {
+impl std::default::Default for GPHMM<FullHiddenMarkovModel> {
     fn default() -> Self {
         // Return very simple single state hidden Markov model.
         let mat = 0.2;
@@ -139,7 +200,7 @@ impl std::default::Default for GPHMM {
         let gap = 0.01;
         let del_prob = [gap; 4];
         let ins_prob = [gap; 4];
-        GPHMM::new(
+        Self::new(
             1,
             &[vec![1f64]],
             &[match_prob],
@@ -150,7 +211,29 @@ impl std::default::Default for GPHMM {
     }
 }
 
-impl GPHMM {
+impl std::default::Default for GPHMM<ConditionalHiddenMarkovModel> {
+    // Return very simple single state hidden Markov model.
+    fn default() -> Self {
+        let mat = 0.6;
+        let mism = 0.1;
+        let match_prob = [
+            mat, mism, mism, mism, mism, mat, mism, mism, mism, mism, mat, mism, mism, mism, mism,
+            mat,
+        ];
+        let del_prob = [mism; 4];
+        let ins_prob = [4f64.recip(); 4];
+        Self::new(
+            1,
+            &[vec![1f64]],
+            &[match_prob],
+            &[del_prob],
+            &[ins_prob],
+            &[1f64],
+        )
+    }
+}
+
+impl<M: HMMType> GPHMM<M> {
     /// transition matrix: the [to *self.states + from]-th element should be Pr{from->to}
     /// observation_matrix: the [states << 6 | x << 3 | y]-th element should be Pr{(x,y)|states},
     /// or Pr{(x,y)|states, x} in the case of conditional pair-HMM.
@@ -167,19 +250,24 @@ impl GPHMM {
             transition_matrix,
             observation_matrix,
             initial_distribution,
+            _mode: std::marker::PhantomData,
         }
     }
+}
+
+impl GPHMM<FullHiddenMarkovModel> {
     /// Create a new generalized pair hidden Markov model.
     /// There is a few restriction on the input arguments.
     /// 1. transition matrix should be states x states matrix,
     /// all rowsum to be 1. In other words, transition_matrix[i][j] = Pr(i -> j).
     /// 2. Match_prob, del_prob, ins_prob, and initial_distribution should be the length of `states`.
     /// 3. The sum of initial_distribution should be 1.
-    /// 4. The sum of match_prob[x][y] + del_prob[x] + ins_prob[x] should be 1.
+    /// 4. The sum of match_prob[x][y] + del_prob[x] + ins_prob[x] should be 1 (summing over x and y).
     /// Each 16-length array of match probabilities is:
     /// [(A,A), (A,C), (A,G), (A,T), (C,A), ... ,(T,T)]
     /// and Each array of del_prob is [(A,-), ...,(T,-)],
     /// and each array of ins_prob is [(-,A), ... ,(-,A)]
+    // TODO:Sanity check.
     pub fn new(
         states: usize,
         transition_matrix: &[Vec<f64>],
@@ -188,7 +276,7 @@ impl GPHMM {
         ins_prob: &[[f64; 4]],
         initial_distribution: &[f64],
     ) -> Self {
-        let mut observation_matrix = vec![0f64; (states << 6) | (8 * 8)];
+        let mut observation_matrix = vec![0f64; ((states - 1) << 6) + (8 * 8)];
         for (state, ((mat, del), ins)) in match_prob
             .iter()
             .zip(del_prob.iter())
@@ -215,59 +303,8 @@ impl GPHMM {
             transition_matrix: transposed_transition,
             observation_matrix,
             initial_distribution: initial_distribution.to_vec(),
+            _mode: std::marker::PhantomData,
         }
-    }
-    /// Return a simple single state pair HMM for computing conditional likelihood, LK(y|x).
-    /// (match_prob + del_prob) should be smaller than 1f64.
-    pub fn new_conditional_single_state(match_prob: f64, del_prob: f64) -> Self {
-        let states = 1;
-        let mismatch = (1f64 - match_prob - del_prob) / 3f64;
-        let transition_matrix = vec![1f64];
-        let match_prob = [
-            match_prob, mismatch, mismatch, mismatch, mismatch, match_prob, mismatch, mismatch,
-            mismatch, mismatch, match_prob, mismatch, mismatch, mismatch, mismatch, match_prob,
-        ];
-        let del_prob = [del_prob; 4];
-        let ins_prob = [4f64.recip(); 4];
-        Self::new(
-            states,
-            &[transition_matrix],
-            &[match_prob],
-            &[del_prob],
-            &[ins_prob],
-            &[1f64],
-        )
-    }
-    /// Return a three states pair HMM for computing conditional likelihood, LK(y|x)
-    pub fn new_conditional_three_state(
-        match_prob: f64,
-        gap_open: f64,
-        gap_ext: f64,
-        match_emit: f64,
-    ) -> Self {
-        let states = 3;
-        let transition_matrix = [
-            vec![match_prob, gap_open, gap_open],
-            vec![1f64 - gap_ext - gap_open, gap_ext, gap_open],
-            vec![1f64 - gap_ext - gap_open, gap_ext, gap_open],
-        ];
-        let (mat, mism) = (match_emit, (1f64 - match_emit) / 3f64);
-        let match_emit = [
-            mat, mism, mism, mism, mism, mat, mism, mism, mism, mism, mat, mism, mism, mism, mism,
-            mat,
-        ];
-        let match_prob = vec![match_emit, [0f64; 16], [0f64; 16]];
-        let ins_prob = vec![[0f64; 4], [0f64; 4], [4f64.recip(); 4]];
-        let del_prob = vec![[0f64; 4], [1f64; 4], [0f64; 4]];
-        let init = [1f64, 0f64, 0f64];
-        Self::new(
-            states,
-            &transition_matrix,
-            &match_prob,
-            &del_prob,
-            &ins_prob,
-            &init,
-        )
     }
     /// Return usual three state pair Hidden Markov model.
     pub fn new_three_state(match_prob: f64, gap_open: f64, gap_ext: f64, match_emit: f64) -> Self {
@@ -299,6 +336,207 @@ impl GPHMM {
             &init,
         )
     }
+    /// Parameter estimation by set of sequences.
+    /// As there *is* difference between the reference and the query,
+    /// this function takes one template and several queries.
+    /// For conditional pair-HMM, please use `fit_conditional`. `_banded` mode would be much faster.
+    /// If this function would be called repeatedly, maybe `fit_inner` would reduce computational time.
+    /// ----- This is general comment on any function like `fit_*` ----
+    /// It only updates the parameters once. If you want to loop updates until convergence, like EM-algorithm,
+    /// You need to call this function repeatedly until watching the total likelihood will not increase, or
+    /// the total likelihood will decrease.
+    /// Note that this function is based on "analogy" to EM-algorithm, not any formal theory.
+    /// So there is no garantee that the total likelihood would increase by calling this function.
+    pub fn fit<T: std::borrow::Borrow<[u8]>>(&self, template: &[u8], queries: &[T]) -> Self {
+        let template = PadSeq::new(template);
+        let queries: Vec<_> = queries.iter().map(|x| PadSeq::new(x.borrow())).collect();
+        self.fit_inner(&template, &queries)
+    }
+    pub fn fit_inner(&self, xs: &PadSeq, yss: &[PadSeq]) -> Self {
+        let profiles: Vec<_> = yss.iter().map(|ys| Profile::new(self, xs, ys)).collect();
+        let initial_distribution = self.estimate_initial_distribution(&profiles);
+        let transition_matrix = self.estimate_transition_prob(&profiles);
+        let observation_matrix = self.estimate_observation_prob(&profiles);
+        Self {
+            states: self.states,
+            initial_distribution,
+            transition_matrix,
+            observation_matrix,
+            _mode: std::marker::PhantomData,
+        }
+    }
+    // [states << 6 | x << 3 | y] = Pr{(x,y)|states}.
+    // In other words, the length is states << 6 + 8 * 8
+    fn estimate_observation_prob(&self, profiles: &[Profile<FullHiddenMarkovModel>]) -> Vec<f64> {
+        let mut buffer = vec![0f64; ((self.states - 1) << 6) + 8 * 8];
+        for prob in profiles.iter().map(|prf| prf.observation_probability()) {
+            buffer.iter_mut().zip(prob).for_each(|(x, y)| *x += y);
+        }
+        // Normalize (states << 6) | 0b000_000 - (state << 6) | 0b111_111.
+        for probs in buffer.chunks_mut(8 * 8) {
+            let sum: f64 = probs.iter().sum();
+            if 0.00001 < sum {
+                probs.iter_mut().for_each(|x| *x /= sum);
+            }
+        }
+        buffer
+    }
+}
+impl GPHMM<ConditionalHiddenMarkovModel> {
+    /// Create a new generalized pair hidden Markov model.
+    /// There is a few restriction on the input arguments.
+    /// 1. transition matrix should be states x states matrix,
+    /// all rowsum to be 1. In other words, transition_matrix[i][j] = Pr(i -> j).
+    /// 2. Match_prob, del_prob, ins_prob, and initial_distribution should be the length of `states`.
+    /// 3. The sum of initial_distribution should be 1.
+    /// 4. The sum of match_prob[x][y] + del_prob[x] should be 1 for each x, summing over y.
+    /// 5: The sum of ins_prob[x] should be 1 (summing over x).
+    /// Each 16-length array of match probabilities is:
+    /// [(A|A), (C|A), (G|A), (T|A), (C,A), ... ,(T|T)]
+    /// and Each array of del_prob is [(-|A), ...,(-|T)],
+    /// and each array of ins_prob is [(A|-), ... ,(T|-)]
+    // TODO:Sanity check.
+    pub fn new(
+        states: usize,
+        transition_matrix: &[Vec<f64>],
+        match_prob: &[[f64; 16]],
+        del_prob: &[[f64; 4]],
+        ins_prob: &[[f64; 4]],
+        initial_distribution: &[f64],
+    ) -> Self {
+        let mut observation_matrix = vec![0f64; ((states - 1) << 6) + (8 * 8)];
+        for (state, ((mat, del), ins)) in match_prob
+            .iter()
+            .zip(del_prob.iter())
+            .zip(ins_prob.iter())
+            .enumerate()
+        {
+            for x in 0..4 {
+                observation_matrix[(state << 6) | (x << 3) | GAP as usize] = del[x];
+                observation_matrix[(state << 6) | ((GAP as usize) << 3) | x] = ins[x];
+                for y in 0..4 {
+                    observation_matrix[(state << 6) | (x << 3) | y] = mat[x << 2 | y];
+                }
+            }
+        }
+        let mut transposed_transition = vec![0f64; states * states];
+        for from in 0..states {
+            for to in 0..states {
+                // This is transposed!
+                transposed_transition[to * states + from] = transition_matrix[from][to];
+            }
+        }
+        Self {
+            states,
+            transition_matrix: transposed_transition,
+            observation_matrix,
+            initial_distribution: initial_distribution.to_vec(),
+            _mode: std::marker::PhantomData,
+        }
+    }
+    /// Return a simple single state pair HMM for computing conditional likelihood, LK(y|x).
+    /// (match_prob + del_prob) should be smaller than 1f64.
+    pub fn new_single_state(match_prob: f64, del_prob: f64) -> Self {
+        let states = 1;
+        let mismatch = (1f64 - match_prob - del_prob) / 3f64;
+        let transition_matrix = vec![1f64];
+        let match_prob = [
+            match_prob, mismatch, mismatch, mismatch, mismatch, match_prob, mismatch, mismatch,
+            mismatch, mismatch, match_prob, mismatch, mismatch, mismatch, mismatch, match_prob,
+        ];
+        let del_prob = [del_prob; 4];
+        let ins_prob = [4f64.recip(); 4];
+        Self::new(
+            states,
+            &[transition_matrix],
+            &[match_prob],
+            &[del_prob],
+            &[ins_prob],
+            &[1f64],
+        )
+    }
+    /// Return a three states pair HMM for computing conditional likelihood, LK(y|x)
+    pub fn new_three_state(match_prob: f64, gap_open: f64, gap_ext: f64, match_emit: f64) -> Self {
+        let sum = match_prob + 2f64 * gap_open;
+        let (match_prob, gap_open) = (match_prob / sum, gap_open / sum);
+        let states = 3;
+        let transition_matrix = [
+            vec![match_prob, gap_open, gap_open],
+            vec![1f64 - gap_ext - gap_open, gap_ext, gap_open],
+            vec![1f64 - gap_ext - gap_open, gap_ext, gap_open],
+        ];
+        let (mat, mism) = (match_emit, (1f64 - match_emit) / 3f64);
+        let match_emit = [
+            mat, mism, mism, mism, mism, mat, mism, mism, mism, mism, mat, mism, mism, mism, mism,
+            mat,
+        ];
+        let match_prob = vec![match_emit, [0f64; 16], [0f64; 16]];
+        let ins_prob = vec![[0f64; 4], [0f64; 4], [4f64.recip(); 4]];
+        let del_prob = vec![[0f64; 4], [1f64; 4], [0f64; 4]];
+        let init = [1f64, 0f64, 0f64];
+        Self::new(
+            states,
+            &transition_matrix,
+            &match_prob,
+            &del_prob,
+            &ins_prob,
+            &init,
+        )
+    }
+    pub fn fit<T: std::borrow::Borrow<[u8]>>(&self, template: &[u8], queries: &[T]) -> Self {
+        let template = PadSeq::new(template);
+        let queries: Vec<_> = queries.iter().map(|x| PadSeq::new(x.borrow())).collect();
+        self.fit_inner(&template, &queries)
+    }
+    /// Paramter estimation by set of setquence.
+    /// As there *is* difference between the reference and the query,
+    /// this function takes one template and several queries.
+    /// For conditional pair-HMM, please use `fit_conditional`. `_banded` mode would be much faster.
+    /// If this function would be called repeatedly, maybe `fit_inner` would reduce computational time.
+    /// Please see [fit] function for more detailed information.
+    pub fn fit_inner(&self, xs: &PadSeq, yss: &[PadSeq]) -> Self {
+        let profiles: Vec<_> = yss.iter().map(|ys| Profile::new(self, xs, ys)).collect();
+        let initial_distribution = self.estimate_initial_distribution(&profiles);
+        let transition_matrix = self.estimate_transition_prob(&profiles);
+        let observation_matrix = self.estimate_observation_prob(&profiles);
+        Self {
+            states: self.states,
+            initial_distribution,
+            transition_matrix,
+            observation_matrix,
+            _mode: std::marker::PhantomData,
+        }
+    }
+    fn estimate_observation_prob(&self, profiles: &[Profile<Cond>]) -> Vec<f64> {
+        let mut buffer = vec![0f64; ((self.states - 1) << 6) + 8 * 8];
+        for prob in profiles.iter().map(|prf| prf.observation_probability()) {
+            buffer.iter_mut().zip(prob).for_each(|(x, y)| *x += y);
+        }
+        // Normalize (states << 6) | 0b_i__000 - (state << 6) | 0b_i_111.
+        for probs in buffer.chunks_mut(8) {
+            let sum: f64 = probs.iter().sum();
+            if 0.00001 < sum {
+                probs.iter_mut().for_each(|x| *x /= sum);
+            }
+        }
+        buffer
+    }
+    pub fn fit_banded<T: std::borrow::Borrow<[u8]>>(
+        &self,
+        _template: &[u8],
+        _queries: &[T],
+        _radius: usize,
+    ) -> Self {
+        unimplemented!()
+    }
+    pub fn fit_banded_inner(&self, _xs: &PadSeq, _yss: &[PadSeq], _radius: usize) -> Self {
+        unimplemented!()
+    }
+}
+
+impl<M: HMMType> GPHMM<M> {
+    // The reason why these code are here is that the procedure is exactly the same between full/conditional
+    // hidden Markov model.
     /// get transition probability from `from` to `to`
     pub fn transition(&self, from: usize, to: usize) -> f64 {
         let (from, to) = (from as usize, to as usize);
@@ -483,22 +721,88 @@ impl GPHMM {
         (max_lk, ops, states)
     }
     /// Banded version of `align` method.
-    pub fn align_banded(&self, xs: &[u8], ys: &[u8], radius: usize) -> (f64, Vec<Op>, Vec<usize>) {
-        unimplemented!()
+    pub fn align_banded(
+        &self,
+        xs: &[u8],
+        ys: &[u8],
+        radius: usize,
+    ) -> Option<(f64, Vec<Op>, Vec<usize>)> {
+        let (xs, ys) = (PadSeq::new(xs), PadSeq::new(ys));
+        self.align_banded_inner(&xs, &ys, radius)
     }
-    fn logsumexp(xs: &[f64]) -> f64 {
-        if xs.is_empty() {
-            return 0f64;
+    pub fn align_banded_inner(
+        &self,
+        xs: &PadSeq,
+        ys: &PadSeq,
+        radius: usize,
+    ) -> Option<(f64, Vec<Op>, Vec<usize>)> {
+        if ys.len() < 2 * radius {
+            return Some(self.align_inner(xs, ys));
         }
-        let max = xs.iter().max_by(|x, y| x.partial_cmp(y).unwrap()).unwrap();
-        xs.iter().map(|x| (x - max).exp()).sum::<f64>().ln() + max
+        let mut dp = DPTable::new(xs.len() + 1, 2 * radius + 1, self.states, EP);
+        // The center of the i-th row.
+        // In other words, it is where the `radius`-th element of in the i-th row corresponds in the
+        // original DP table.
+        let mut centers = vec![0 as isize];
+        let log_transit = self.get_log_transition();
+        let log_observe = self.get_log_observation();
+        let radius = radius as isize;
+        // (0,0,s) is at (0, radius, s)
+        for s in 0..self.states {
+            dp[(0, radius - centers[0], s as isize)] = log(&self.initial_distribution[s]);
+        }
+        // Initial values.
+        // j_orig ranges in 1..radius
+        for j in radius + 1..2 * radius + 1 {
+            let j_orig = j + centers[0] - radius;
+            let y = ys[j_orig - 1];
+            for s in 0..self.states {
+                dp[(0, j, s as isize)] = (0..self.states as isize)
+                    .map(|t| {
+                        dp[(0, j - 1, t)]
+                            + log_transit[t as usize][s]
+                            + log_observe[s][(GAP << 3 | y) as usize]
+                    })
+                    .max_by(|x, y| x.partial_cmp(y).unwrap())
+                    .unwrap();
+            }
+            // Update center.
+            // Until reached radius, the center would be always 0.
+            centers.push(0);
+        }
+        // Fill DP cells
+        for (i, &x) in xs.iter().enumerate().map(|(pos, x)| (pos + 1, x)) {
+            for j in 0..2 * radius as isize {
+                let (center, prev) = (centers[i], centers[i - 1]);
+                let j_in_ys = j - centers[i];
+                if j_in_ys < 0 {
+                    continue;
+                }
+                let y = ys[j_in_ys];
+                for s in 0..self.states {
+                    let (i, j, s) = (i as isize, j as isize, s as isize);
+                    let max_path = (0..self.states).map(|t| {});
+                }
+            }
+        }
+        let max_j = (0..radius as isize)
+            .map(|j| {
+                let max_lk = (0..self.states as isize)
+                    .map(|s| dp[(0, centers[0] + j, s)])
+                    .max_by(|x, y| x.partial_cmp(&y).unwrap())
+                    .unwrap();
+                (j, max_lk)
+            })
+            .max_by(|x, y| (x.1).partial_cmp(&y.1).unwrap())
+            .unwrap();
+        unimplemented!()
     }
     /// same as likelihood. A naive log-sum-exp implementation.
     pub fn likelihood_naive(&self, xs: &[u8], ys: &[u8]) -> f64 {
         let dp = self.forward_naive(xs, ys);
         let (n, m) = (xs.len() as isize, ys.len() as isize);
         let lks: Vec<_> = (0..self.states).map(|s| dp[(n, m, s as isize)]).collect();
-        Self::logsumexp(&lks)
+        logsumexp(&lks)
     }
     fn forward_naive(&self, xs: &[u8], ys: &[u8]) -> DPTable {
         let (xs, ys) = (PadSeq::new(xs), PadSeq::new(ys));
@@ -518,7 +822,7 @@ impl GPHMM {
                             + log_observe[s][(x << 3 | GAP) as usize]
                     })
                     .collect();
-                dp[(i, 0, s as isize)] = Self::logsumexp(&lks);
+                dp[(i, 0, s as isize)] = logsumexp(&lks);
             }
         }
         for (j, &y) in ys.iter().enumerate().map(|(pos, y)| (pos + 1, y)) {
@@ -531,7 +835,7 @@ impl GPHMM {
                             + log_observe[s][(GAP << 3 | y) as usize]
                     })
                     .collect();
-                dp[(0, j, s as isize)] = Self::logsumexp(&lks);
+                dp[(0, j, s as isize)] = logsumexp(&lks);
             }
         }
         // Fill DP cells.
@@ -547,10 +851,10 @@ impl GPHMM {
                                 + log_observe[s as usize][(x << 3 | GAP) as usize];
                             let ins = dp[(i, j - 1, t as isize)]
                                 + log_observe[s as usize][(GAP << 3 | y) as usize];
-                            Self::logsumexp(&[mat, del, ins]) + log_transit[t as usize][s as usize]
+                            logsumexp(&[mat, del, ins]) + log_transit[t as usize][s as usize]
                         })
                         .collect();
-                    dp[(i, j, s)] = Self::logsumexp(&lks);
+                    dp[(i, j, s)] = logsumexp(&lks);
                 }
             }
         }
@@ -653,7 +957,7 @@ impl GPHMM {
                             + dp[(i as isize + 1, ys.len() as isize, t as isize)]
                     })
                     .collect();
-                dp[(i as isize, ys.len() as isize, s as isize)] = Self::logsumexp(&lks);
+                dp[(i as isize, ys.len() as isize, s as isize)] = logsumexp(&lks);
             }
         }
         for (j, &y) in ys.iter().enumerate().rev() {
@@ -665,7 +969,7 @@ impl GPHMM {
                             + dp[(xs.len() as isize, j as isize + 1, t as isize)]
                     })
                     .collect();
-                dp[(xs.len() as isize, j as isize, s as isize)] = Self::logsumexp(&lks);
+                dp[(xs.len() as isize, j as isize, s as isize)] = logsumexp(&lks);
             }
         }
         // Loop.
@@ -681,10 +985,10 @@ impl GPHMM {
                                 + dp[(i + 1, j, t as isize)];
                             let ins = log_observe[t][(GAP << 3 | y) as usize]
                                 + dp[(i, j + 1, t as isize)];
-                            log_transit[s][t] + Self::logsumexp(&[mat, del, ins])
+                            log_transit[s][t] + logsumexp(&[mat, del, ins])
                         })
                         .collect();
-                    dp[(i as isize, j as isize, s as isize)] = Self::logsumexp(&lks);
+                    dp[(i as isize, j as isize, s as isize)] = logsumexp(&lks);
                 }
             }
         }
@@ -759,10 +1063,32 @@ impl GPHMM {
         norm_factors.reverse();
         (dp, norm_factors)
     }
-    pub fn likelihood_banded(&self, xs: &[u8], ys: &[u8], radius: usize) -> f64 {
+    pub fn likelihood_banded(&self, _xs: &[u8], _ys: &[u8], _radius: usize) -> Option<f64> {
         unimplemented!()
     }
-    fn forward_banded(&self, xs: &PadSeq, ys: &PadSeq, radius: usize) -> (DPTable, f64) {
+    pub fn likelihood_banded_inner(
+        &self,
+        _xs: &PadSeq,
+        _ys: &PadSeq,
+        _radius: usize,
+    ) -> Option<f64> {
+        unimplemented!()
+    }
+    fn forward_banded(
+        &self,
+        _xs: &PadSeq,
+        _ys: &PadSeq,
+        _radius: usize,
+    ) -> Option<(DPTable, Vec<f64>, Vec<isize>)> {
+        unimplemented!()
+    }
+    fn backward_banded(
+        &self,
+        _xs: &PadSeq,
+        _ys: &PadSeq,
+        _radius: usize,
+        _centers: &[isize],
+    ) -> (DPTable, Vec<f64>) {
         unimplemented!()
     }
     pub fn correct_until_convergence<T: std::borrow::Borrow<[u8]>>(
@@ -818,8 +1144,7 @@ impl GPHMM {
                 };
                 subst.or(deletion).or(insertion).or(ins_last)
             })
-            .map(|(pos, op, base, new_lk)| {
-                eprintln!("{:?}:{:.4}->{:.4}({})", op, total_lk, new_lk, pos);
+            .map(|(pos, op, base, _lk)| {
                 let mut template = template.clone();
                 match op {
                     Op::Match => template[pos as isize] = base,
@@ -833,37 +1158,67 @@ impl GPHMM {
                 (template, pos + 1)
             })
     }
-    pub fn correct_until_converge_banded<T: std::borrow::Borrow<[u8]>>(
+    pub fn correct_until_convergence_banded<T: std::borrow::Borrow<[u8]>>(
         &self,
-        template: &[u8],
-        queries: &[T],
-        radius: usize,
-    ) -> Vec<u8> {
+        _template: &[u8],
+        _queries: &[T],
+        _radius: usize,
+    ) -> Option<Vec<u8>> {
         unimplemented!()
     }
     pub fn correction_banded(
         &self,
-        template: &PadSeq,
-        queries: &[PadSeq],
-        radius: usize,
+        _template: &PadSeq,
+        _queries: &[PadSeq],
+        _radius: usize,
     ) -> Option<PadSeq> {
         unimplemented!()
+    }
+    fn estimate_initial_distribution(&self, profiles: &[Profile<M>]) -> Vec<f64> {
+        let mut buffer = vec![0f64; self.states];
+        for init in profiles.iter().map(|prf| prf.initial_distribution()) {
+            buffer.iter_mut().zip(init).for_each(|(x, y)| *x += y);
+        }
+        let sum: f64 = buffer.iter().sum();
+        buffer.iter_mut().for_each(|x| *x /= sum);
+        buffer
+    }
+    fn estimate_transition_prob(&self, profiles: &[Profile<M>]) -> Vec<f64> {
+        let states = self.states;
+        // [from * states + to] = Pr(from->to)
+        // Because it is easier to normalize.
+        let mut buffer = vec![0f64; states * states];
+        for prob in profiles.iter().map(|prf| prf.transition_probability()) {
+            buffer.iter_mut().zip(prob).for_each(|(x, y)| *x += y);
+        }
+        // Normalize.
+        for row in buffer.chunks_mut(states) {
+            let sum: f64 = row.iter().sum();
+            row.iter_mut().for_each(|x| *x /= sum);
+        }
+        // Transpose. [to * states + from] = Pr{from->to}.
+        (0..states * states)
+            .map(|idx| {
+                let (to, from) = (idx / states, idx % states);
+                buffer[from * states + to]
+            })
+            .collect()
     }
 }
 
 #[derive(Debug, Clone)]
-struct Profile<'a, 'b, 'c> {
+struct Profile<'a, 'b, 'c, T: HMMType> {
     template: &'a PadSeq,
     query: &'b PadSeq,
-    model: &'c GPHMM,
+    model: &'c GPHMM<T>,
     forward: DPTable,
     forward_factor: Vec<f64>,
     backward: DPTable,
     backward_factor: Vec<f64>,
 }
 
-impl<'a, 'b, 'c> Profile<'a, 'b, 'c> {
-    fn new(model: &'c GPHMM, template: &'a PadSeq, query: &'b PadSeq) -> Self {
+impl<'a, 'b, 'c, T: HMMType> Profile<'a, 'b, 'c, T> {
+    fn new(model: &'c GPHMM<T>, template: &'a PadSeq, query: &'b PadSeq) -> Self {
         let (forward, forward_factor) = model.forward(template, query);
         let (backward, backward_factor) = model.backward(template, query);
         Self {
@@ -973,25 +1328,235 @@ impl<'a, 'b, 'c> Profile<'a, 'b, 'c> {
         let backward_factor: f64 = self.backward_factor[pos..].iter().map(log).sum();
         lk.ln() + forward_factor + backward_factor
     }
+    fn initial_distribution(&self) -> Vec<f64> {
+        let mut probs: Vec<_> = (0..self.model.states as isize)
+            .map(|s| {
+                // We should multiply the scaling factors,
+                // but it would be cancelled out by normalizing.
+                self.forward[(0, 0, s)] * self.backward[(0, 0, s)]
+            })
+            .collect();
+        let sum = probs.iter().sum::<f64>();
+        probs.iter_mut().for_each(|x| *x /= sum);
+        probs
+    }
+    // Return [from * states + to] = Pr{from->to},
+    // because it is much easy to normalize.
+    // TODO: This code just sucks.
+    fn transition_probability(&self) -> Vec<f64> {
+        let states = self.model.states;
+        // Log probability.
+        let mut probs: Vec<_> = vec![vec![]; self.model.states.pow(2)];
+        for (i, &x) in self.template.iter().enumerate() {
+            let forward_factor: f64 = self.forward_factor.iter().map(log).take(i + 1).sum();
+            let backward1: f64 = self.backward_factor.iter().map(log).skip(i + 1).sum();
+            let backward2: f64 = self.backward_factor.iter().map(log).skip(i).sum();
+            for (j, &y) in self.query.iter().enumerate() {
+                let (i, j) = (i as isize, j as isize);
+                for from in 0..states {
+                    for to in 0..states {
+                        let forward = log(&self.forward[(i, j, from as isize)]) + forward_factor;
+                        let transition = log(&self.model.transition(from, to));
+                        let backward_match = self.model.observe(from, x, y)
+                            * self.backward[(i + 1, j + 1, to as isize)];
+                        let backward_del = self.model.observe(from, x, GAP)
+                            * self.backward[(i + 1, j, to as isize)];
+                        let backward_ins = self.model.observe(from, GAP, y)
+                            * self.backward[(i, j + 1, to as isize)];
+                        let backward = [
+                            log(&backward_match) + backward1,
+                            log(&backward_del) + backward1,
+                            log(&backward_ins) + backward2,
+                        ];
+                        probs[from * states + to].push(forward + transition + logsumexp(&backward));
+                    }
+                }
+            }
+        }
+        // Normalizing.
+        probs
+            .chunks_mut(states)
+            .flat_map(|row| {
+                // These are log-probability.
+                let mut sums: Vec<_> = row.iter().map(|xs| logsumexp(&xs)).collect();
+                // This is also log.
+                let sum = logsumexp(&sums);
+                // This is normal value.
+                sums.iter_mut().for_each(|x| *x = (*x - sum).exp());
+                assert!((1f64 - sums.iter().sum::<f64>()) < 0.001);
+                sums
+            })
+            .collect()
+    }
+}
+impl<'a, 'b, 'c> Profile<'a, 'b, 'c, Full> {
+    // [state << 6 | x | y] = Pr{(x,y)|state}
+    fn observation_probability(&self) -> Vec<f64> {
+        // This is log_probabilities.
+        let states = self.model.states;
+        let mut prob = vec![vec![]; ((states - 1) << 6) + 8 * 8];
+        for (i, &x) in self.template.iter().enumerate() {
+            let forward_factor: f64 = self.forward_factor.iter().take(i + 1).map(log).sum();
+            let backward_factor1: f64 = self.backward_factor.iter().skip(i + 1).map(log).sum();
+            let backward_factor2: f64 = self.backward_factor.iter().skip(i).map(log).sum();
+            for (j, &y) in self.query.iter().enumerate() {
+                let (i, j) = (i as isize, j as isize);
+                for state in 0..self.model.states {
+                    let back_match = self.backward[(i + 1, j + 1, state as isize)];
+                    let back_del = self.backward[(i + 1, j, state as isize)];
+                    let back_ins = self.backward[(i, j + 1, state as isize)];
+                    let (mat, del, ins) = (0..self.model.states)
+                        .map(|from| {
+                            let forward = self.forward[(i, j, from as isize)]
+                                * self.model.transition(from, state);
+                            let mat = forward * self.model.observe(state, x, y) * back_match;
+                            let del = forward * self.model.observe(state, x, GAP) * back_del;
+                            let ins = forward * self.model.observe(state, GAP, y) * back_ins;
+                            (mat, del, ins)
+                        })
+                        .fold((0f64, 0f64, 0f64), |(x, y, z), (a, b, c)| {
+                            (x + a, y + b, z + c)
+                        });
+                    let match_log_prob = log(&mat) + forward_factor + backward_factor1;
+                    let del_log_prob = log(&del) + forward_factor + backward_factor1;
+                    let ins_log_prob = log(&ins) + forward_factor + backward_factor2;
+                    prob[state << 6 | (x << 3 | y) as usize].push(match_log_prob);
+                    prob[state << 6 | (x << 3 | GAP) as usize].push(del_log_prob);
+                    prob[state << 6 | (GAP << 3 | y) as usize].push(ins_log_prob);
+                }
+            }
+        }
+        // Normalizing.
+        prob.chunks_mut(8 * 8)
+            .flat_map(|row| {
+                // These are log prob.
+                let mut sums: Vec<_> = row.iter().map(|xs| logsumexp(xs)).collect();
+                let sum = logsumexp(&sums);
+                if EP < sum {
+                    // These are usual probabilities.
+                    sums.iter_mut().for_each(|x| *x = (*x - sum).exp());
+                    assert!((1f64 - sums.iter().sum::<f64>()).abs() < 0.0001);
+                } else {
+                    sums.iter_mut().for_each(|x| *x = 0f64);
+                }
+                sums
+            })
+            .collect()
+    }
+}
+
+impl<'a, 'b, 'c> Profile<'a, 'b, 'c, Cond> {
+    // [state << 6 | x | y] = Pr{(x,y)|state, x}
+    fn observation_probability(&self) -> Vec<f64> {
+        // This is log_probabilities.
+        let states = self.model.states;
+        let mut prob = vec![vec![]; ((states - 1) << 6) + 8 * 8];
+        for (i, &x) in self.template.iter().enumerate() {
+            let forward_factor: f64 = self.forward_factor.iter().take(i + 1).map(log).sum();
+            let backward_factor1: f64 = self.backward_factor.iter().skip(i + 1).map(log).sum();
+            let backward_factor2: f64 = self.backward_factor.iter().skip(i).map(log).sum();
+            for (j, &y) in self.query.iter().enumerate() {
+                let (i, j) = (i as isize, j as isize);
+                for state in 0..self.model.states {
+                    let back_match = self.backward[(i + 1, j + 1, state as isize)];
+                    let back_del = self.backward[(i + 1, j, state as isize)];
+                    let back_ins = self.backward[(i, j + 1, state as isize)];
+                    let (mat, del, ins) = (0..self.model.states)
+                        .map(|from| {
+                            let forward = self.forward[(i, j, from as isize)]
+                                * self.model.transition(from, state);
+                            let mat = forward * self.model.observe(state, x, y) * back_match;
+                            let del = forward * self.model.observe(state, x, GAP) * back_del;
+                            let ins = forward * self.model.observe(state, GAP, y) * back_ins;
+                            (mat, del, ins)
+                        })
+                        .fold((0f64, 0f64, 0f64), |(x, y, z), (a, b, c)| {
+                            (x + a, y + b, z + c)
+                        });
+                    let match_log_prob = log(&mat) + forward_factor + backward_factor1;
+                    let del_log_prob = log(&del) + forward_factor + backward_factor1;
+                    let ins_log_prob = log(&ins) + forward_factor + backward_factor2;
+                    prob[state << 6 | (x << 3 | y) as usize].push(match_log_prob);
+                    prob[state << 6 | (x << 3 | GAP) as usize].push(del_log_prob);
+                    prob[state << 6 | (GAP << 3 | y) as usize].push(ins_log_prob);
+                }
+            }
+        }
+        // Normalizing.
+        prob.chunks_mut(8)
+            .flat_map(|row| {
+                // These are log prob.
+                let mut sums: Vec<_> = row.iter().map(|xs| logsumexp(xs)).collect();
+                let sum = logsumexp(&sums);
+                if EP < sum {
+                    // These are usual probabilities. (Sometime is is for a phony row,
+                    // not corresponding to any base or gap).
+                    sums.iter_mut().for_each(|x| *x = (*x - sum).exp());
+                } else {
+                    sums.iter_mut().for_each(|x| *x = 0f64);
+                }
+                sums
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProfileBanded<'a, 'b, 'c, T: HMMType> {
+    template: &'a PadSeq,
+    query: &'b PadSeq,
+    model: &'c GPHMM<T>,
+    forward: DPTable,
+    forward_factor: Vec<f64>,
+    backward: DPTable,
+    backward_factor: Vec<f64>,
+    centers: Vec<isize>,
+    radius: usize,
+}
+
+impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
+    fn new(
+        _model: &'c GPHMM<T>,
+        _template: &'a PadSeq,
+        _query: &'b PadSeq,
+        _radius: usize,
+    ) -> Option<Self> {
+        unimplemented!()
+    }
+    fn lk(&self) -> f64 {
+        unimplemented!()
+    }
+    fn with_mutation(&self, pos: usize, base: u8) -> f64 {
+        unimplemented!()
+    }
+    fn with_deletion(&self, pos: usize) -> f64 {
+        unimplemented!()
+    }
+    fn with_insertion(&self, pos: usize, base: u8) -> f64 {
+        unimplemented!()
+    }
 }
 
 #[cfg(test)]
 mod gphmm {
+    // TODO:Write more tests for conditional hidden Markov models.
     use super::*;
     use crate::hmm::Op;
     use rand::SeedableRng;
     use rand_xoshiro::Xoroshiro128PlusPlus;
     #[test]
     fn default_test() {
-        GPHMM::default();
+        GPHMM::<FullHiddenMarkovModel>::default();
+        GPHMM::<ConditionalHiddenMarkovModel>::default();
     }
     #[test]
     fn three_state_test() {
-        GPHMM::new_three_state(0.9, 0.1, 0.2, 0.9);
+        GPHMM::<Full>::new_three_state(0.9, 0.1, 0.2, 0.9);
+        GPHMM::<Cond>::new_three_state(0.9, 0.1, 0.2, 0.9);
     }
     #[test]
     fn align_test() {
-        let phmm = GPHMM::default();
+        let phmm: GPHMM<FullHiddenMarkovModel> = GPHMM::default();
         let xs = b"AAAAA";
         let ys = b"AAAAA";
         let (lk, ops, states) = phmm.align(xs, ys);
@@ -1030,11 +1595,13 @@ mod gphmm {
             let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(i);
             let len = 1000;
             let profile = &crate::gen_seq::PROFILE;
-            let phmm = GPHMM::default();
+            let phmm: GPHMM<FullHiddenMarkovModel> = GPHMM::default();
             let xs = crate::gen_seq::generate_seq(&mut rng, len);
             let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &profile);
             let _ = phmm.align(&xs, &ys);
-            let phmm = GPHMM::new_three_state(0.8, 0.2, 0.3, 0.9);
+            let phmm = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
+            let _ = phmm.align(&xs, &ys);
+            let phmm = GPHMM::<Cond>::new_three_state(0.8, 0.2, 0.3, 0.9);
             let _ = phmm.align(&xs, &ys);
         }
     }
@@ -1046,7 +1613,11 @@ mod gphmm {
             let profile = &crate::gen_seq::PROFILE;
             let xs = crate::gen_seq::generate_seq(&mut rng, len);
             let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &profile);
-            let phmm = GPHMM::new_three_state(0.8, 0.2, 0.3, 0.9);
+            let phmm = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
+            let (lk, _, _) = phmm.align(&xs, &ys);
+            let lkt = phmm.likelihood_naive(&xs, &ys);
+            assert!(lk < lkt);
+            let phmm = GPHMM::<Cond>::new_three_state(0.8, 0.2, 0.3, 0.9);
             let (lk, _, _) = phmm.align(&xs, &ys);
             let lkt = phmm.likelihood_naive(&xs, &ys);
             assert!(lk < lkt);
@@ -1054,19 +1625,21 @@ mod gphmm {
     }
     #[test]
     fn likelihood_scaling_test() {
-        let phmm = GPHMM::default();
+        let phmm = GPHMM::<Full>::default();
+        let chmm = GPHMM::<Full>::default();
         let xs = b"ATGC";
         let lkn = phmm.likelihood_naive(xs, xs);
         let lks = phmm.likelihood(xs, xs);
         println!("{}", phmm.align(xs, xs).0);
         assert!((lkn - lks).abs() < 0.001, "{},{}", lkn, lks);
+        assert!((chmm.likelihood_naive(xs, xs) - chmm.likelihood(xs, xs)).abs() < 0.001);
         for i in 0..2u64 {
             let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(i);
             let len = 100;
             let profile = &crate::gen_seq::PROFILE;
             let xs = crate::gen_seq::generate_seq(&mut rng, len);
             let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &profile);
-            let phmm = GPHMM::new_three_state(0.8, 0.2, 0.3, 0.9);
+            let phmm = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
             let lkn = phmm.likelihood_naive(&xs, &ys);
             let lks = phmm.likelihood(&xs, &ys);
             assert!((lkn - lks).abs() < 0.001, "{},{}", lkn, lks);
@@ -1096,7 +1669,7 @@ mod gphmm {
     }
     #[test]
     fn likelihood_backward_test() {
-        let phmm = GPHMM::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let phmm: GPHMM<Full> = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
         for i in 0..2u64 {
             let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(i);
             let len = 1000;
@@ -1111,14 +1684,13 @@ mod gphmm {
                 .enumerate()
                 .map(|(s, init)| dp[(0, 0, s as isize)] + log(init))
                 .collect();
-            eprintln!("{:?}", lkbs);
-            let lkb = GPHMM::logsumexp(&lkbs);
+            let lkb = logsumexp(&lkbs);
             assert!((lkn - lkb).abs() < 0.01, "{},{}", lkn, lkb);
         }
     }
     #[test]
     fn likelihood_backward_scaling_test() {
-        let phmm = GPHMM::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let phmm: GPHMM<Full> = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
         for i in 0..2u64 {
             let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(i);
             let len = 1000;
@@ -1162,7 +1734,7 @@ mod gphmm {
     }
     #[test]
     fn profile_lk_test() {
-        let phmm = GPHMM::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let phmm: GPHMM<Full> = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
         for i in 0..2u64 {
             let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(i);
             let len = 1000;
@@ -1179,7 +1751,7 @@ mod gphmm {
     }
     #[test]
     fn profile_mutation_test() {
-        let phmm = GPHMM::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let phmm: GPHMM<Full> = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
         for i in 0..10u64 {
             let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(i);
             let len = 200;
@@ -1223,7 +1795,7 @@ mod gphmm {
     }
     #[test]
     fn profile_insertion_test() {
-        let phmm = GPHMM::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let phmm: GPHMM<Full> = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
         for i in 0..10u64 {
             let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(i);
             let len = 200;
@@ -1255,7 +1827,7 @@ mod gphmm {
 
     #[test]
     fn profile_deletion_test() {
-        let phmm = GPHMM::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let phmm = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
         for i in 0..10u64 {
             let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(i);
             let len = 200;
@@ -1283,7 +1855,7 @@ mod gphmm {
     }
     #[test]
     fn correction_test() {
-        let phmm = GPHMM::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let phmm: GPHMM<Cond> = GPHMM::<Cond>::new_three_state(0.8, 0.2, 0.3, 0.9);
         let coverage = 30;
         for i in 0..2u64 {
             let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(i);
@@ -1293,15 +1865,279 @@ mod gphmm {
             let queries: Vec<_> = (0..coverage)
                 .map(|_| crate::gen_seq::introduce_randomness(&template, &mut rng, &profile))
                 .collect();
-            let qv = crate::gen_seq::Profile {
-                sub: 0.01,
-                del: 0.01,
-                ins: 0.01,
-            };
-            let draft = crate::gen_seq::introduce_randomness(&template, &mut rng, &qv);
+            let draft = crate::gen_seq::introduce_errors(&template, &mut rng, 1, 1, 1);
             let polished = phmm.correct_until_convergence(&draft, &queries);
             let dist = crate::bialignment::edit_dist(&polished, &template);
-            assert_eq!(0, dist);
+            let dist_old = crate::bialignment::edit_dist(&draft, &template);
+            assert!(dist < dist_old, "{},{}", dist, dist_old);
+        }
+    }
+    fn align_banded_check<T: HMMType>(model: &GPHMM<T>, xs: &[u8], ys: &[u8], radius: usize) {
+        let (lk, ops, states) = model.align(&xs, &ys);
+        let (lk_b, ops_b, states_b) = model.align_banded(&xs, &ys, radius).unwrap();
+        assert_eq!(ops, ops_b);
+        assert_eq!(states, states_b);
+        assert!((lk - lk_b).abs() < 0.0001);
+    }
+    #[test]
+    fn align_test_banded() {
+        let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(4280);
+        let single = GPHMM::<Full>::default();
+        let single_cond = GPHMM::<Cond>::default();
+        let three = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let three_cond = GPHMM::<Cond>::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let prof = crate::gen_seq::PROFILE;
+        let radius = 30;
+        for _ in 0..20 {
+            let xs = crate::gen_seq::generate_seq(&mut rng, 200);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+            align_banded_check(&single, &xs, &ys, radius);
+            align_banded_check(&single_cond, &xs, &ys, radius);
+            align_banded_check(&three, &xs, &ys, radius);
+            align_banded_check(&three_cond, &xs, &ys, radius);
+        }
+    }
+    fn likelihood_banded_check<T: HMMType>(model: &GPHMM<T>, xs: &[u8], ys: &[u8], radius: usize) {
+        let lk = model.likelihood(xs, ys);
+        let lkb = model.likelihood_banded(xs, ys, radius).unwrap();
+        assert!((lk - lkb).abs() < 0.0001);
+    }
+    #[test]
+    fn likelihood_banded_test() {
+        let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(4280);
+        let single = GPHMM::<Full>::default();
+        let single_cond = GPHMM::<Cond>::default();
+        let three = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let three_cond = GPHMM::<Cond>::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let prof = crate::gen_seq::PROFILE;
+        let radius = 30;
+        for _ in 0..20 {
+            let xs = crate::gen_seq::generate_seq(&mut rng, 200);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+            likelihood_banded_check(&single, &xs, &ys, radius);
+            likelihood_banded_check(&single_cond, &xs, &ys, radius);
+            likelihood_banded_check(&three, &xs, &ys, radius);
+            likelihood_banded_check(&three_cond, &xs, &ys, radius);
+        }
+    }
+    fn back_likelihood_check<T: HMMType>(model: &GPHMM<T>, xs: &[u8], ys: &[u8], radius: usize) {
+        let (xs, ys) = (PadSeq::new(xs), PadSeq::new(ys));
+        let (dp, factors) = model.backward(&xs, &ys);
+        let (_, _, centers) = model.forward_banded(&xs, &ys, radius).unwrap();
+        let (dp_b, factors_b) = model.backward_banded(&xs, &ys, radius, &centers);
+        // What's important is the order of each row, and the actual likelihood.
+        factors_b
+            .iter()
+            .zip(factors.iter())
+            .for_each(|(x, y)| assert!((x - y).abs() < 0.001));
+        let lk: f64 = model
+            .initial_distribution
+            .iter()
+            .enumerate()
+            .map(|(s, init)| init * dp[(0, 0, s as isize)])
+            .sum();
+        let lk_b: f64 = model
+            .initial_distribution
+            .iter()
+            .enumerate()
+            .map(|(s, init)| init * dp_b[(0, radius as isize - centers[0], s as isize)])
+            .sum();
+        let factor_b: f64 = factors_b.iter().map(log).sum();
+        let factor: f64 = factors.iter().map(log).sum();
+        assert!((lk + factor - lk_b - factor_b).abs() < 0.001);
+    }
+    #[test]
+    fn backward_banded_test() {
+        let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(4280);
+        let single = GPHMM::<Full>::default();
+        let single_cond = GPHMM::<Cond>::default();
+        let three = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let three_cond = GPHMM::<Cond>::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let prof = crate::gen_seq::PROFILE;
+        let radius = 30;
+        for _ in 0..20 {
+            let xs = crate::gen_seq::generate_seq(&mut rng, 200);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+            back_likelihood_check(&single, &xs, &ys, radius);
+            back_likelihood_check(&single_cond, &xs, &ys, radius);
+            back_likelihood_check(&three, &xs, &ys, radius);
+            back_likelihood_check(&three_cond, &xs, &ys, radius);
+        }
+    }
+    fn profile_lk_check<T: HMMType>(model: &GPHMM<T>, xs: &[u8], ys: &[u8], radius: usize) {
+        let lk = model.likelihood(&xs, &ys);
+        let (xs, ys) = (PadSeq::new(xs), PadSeq::new(ys));
+        let profile = ProfileBanded::new(model, &xs, &ys, radius).unwrap();
+        let lkp = profile.lk();
+        assert!((lk - lkp).abs() < 0.001);
+    }
+    #[test]
+    fn profile_lk_banded_test() {
+        let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(4280);
+        let single = GPHMM::<Full>::default();
+        let single_cond = GPHMM::<Cond>::default();
+        let three = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let three_cond = GPHMM::<Cond>::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let prof = crate::gen_seq::PROFILE;
+        let radius = 30;
+        for _ in 0..20 {
+            let xs = crate::gen_seq::generate_seq(&mut rng, 200);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+            profile_lk_check(&single, &xs, &ys, radius);
+            profile_lk_check(&single_cond, &xs, &ys, radius);
+            profile_lk_check(&three, &xs, &ys, radius);
+            profile_lk_check(&three_cond, &xs, &ys, radius);
+        }
+    }
+    fn profile_mutation_banded_check<T: HMMType>(
+        model: &GPHMM<T>,
+        xs: &[u8],
+        ys: &[u8],
+        radius: usize,
+    ) {
+        let (xs, ys) = (PadSeq::new(xs), PadSeq::new(ys));
+        let profile = ProfileBanded::new(model, &xs, &ys, radius).unwrap();
+        let mut xs = xs.clone();
+        let len = xs.len();
+        for pos in 0..len {
+            let original = xs[pos as isize];
+            for base in b"ACGT".iter().map(padseq::convert_to_twobit) {
+                let lkp = profile.with_mutation(pos, base);
+                xs[pos as isize] = base;
+                let lk = model.likelihood_banded_inner(&xs, &ys, radius).unwrap();
+                assert!((lk - lkp).abs() < 0.001);
+                xs[pos as isize] = original;
+            }
+        }
+    }
+    #[test]
+    fn profile_mutation_banded_test() {
+        let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(4280);
+        let single = GPHMM::<Full>::default();
+        let single_cond = GPHMM::<Cond>::default();
+        let three = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let three_cond = GPHMM::<Cond>::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let prof = crate::gen_seq::PROFILE;
+        let radius = 30;
+        for _ in 0..20 {
+            let xs = crate::gen_seq::generate_seq(&mut rng, 200);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+            profile_mutation_banded_check(&single, &xs, &ys, radius);
+            profile_mutation_banded_check(&single_cond, &xs, &ys, radius);
+            profile_mutation_banded_check(&three, &xs, &ys, radius);
+            profile_mutation_banded_check(&three_cond, &xs, &ys, radius);
+        }
+    }
+    fn profile_insertion_banded_check<T: HMMType>(
+        model: &GPHMM<T>,
+        xs: &[u8],
+        ys: &[u8],
+        radius: usize,
+    ) {
+        let (xs, ys) = (PadSeq::new(xs), PadSeq::new(ys));
+        let profile = ProfileBanded::new(model, &xs, &ys, radius).unwrap();
+        let mut xs = xs.clone();
+        let len = xs.len();
+        for pos in 0..len {
+            for base in b"ACGT".iter().map(padseq::convert_to_twobit) {
+                let lkp = profile.with_insertion(pos, base);
+                xs.insert(pos as isize, base);
+                let lk = model.likelihood_banded_inner(&xs, &ys, radius).unwrap();
+                assert!((lk - lkp).abs() < 0.001);
+                xs.remove(pos as isize);
+            }
+        }
+    }
+    #[test]
+    fn profile_insertion_banded_test() {
+        let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(4280);
+        let single = GPHMM::<Full>::default();
+        let single_cond = GPHMM::<Cond>::default();
+        let three = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let three_cond = GPHMM::<Cond>::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let prof = crate::gen_seq::PROFILE;
+        let radius = 30;
+        for _ in 0..20 {
+            let xs = crate::gen_seq::generate_seq(&mut rng, 200);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+            profile_insertion_banded_check(&single, &xs, &ys, radius);
+            profile_insertion_banded_check(&single_cond, &xs, &ys, radius);
+            profile_insertion_banded_check(&three, &xs, &ys, radius);
+            profile_insertion_banded_check(&three_cond, &xs, &ys, radius);
+        }
+    }
+    fn profile_deletion_banded_check<T: HMMType>(
+        model: &GPHMM<T>,
+        xs: &[u8],
+        ys: &[u8],
+        radius: usize,
+    ) {
+        let (xs, ys) = (PadSeq::new(xs), PadSeq::new(ys));
+        let profile = ProfileBanded::new(model, &xs, &ys, radius).unwrap();
+        let mut xs = xs.clone();
+        let len = xs.len();
+        for pos in 0..len {
+            let original = xs[pos as isize];
+            let lkp = profile.with_deletion(pos);
+            xs.remove(pos as isize);
+            let lk = model.likelihood_banded_inner(&xs, &ys, radius).unwrap();
+            assert!((lk - lkp).abs() < 0.001);
+            xs.insert(pos as isize, original);
+        }
+    }
+    #[test]
+    fn profile_deletion_banded_test() {
+        let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(4280);
+        let single = GPHMM::<Full>::default();
+        let single_cond = GPHMM::<Cond>::default();
+        let three = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let three_cond = GPHMM::<Cond>::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let prof = crate::gen_seq::PROFILE;
+        let radius = 30;
+        for _ in 0..20 {
+            let xs = crate::gen_seq::generate_seq(&mut rng, 200);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+            profile_deletion_banded_check(&single, &xs, &ys, radius);
+            profile_deletion_banded_check(&single_cond, &xs, &ys, radius);
+            profile_deletion_banded_check(&three, &xs, &ys, radius);
+            profile_deletion_banded_check(&three_cond, &xs, &ys, radius);
+        }
+    }
+    fn correction_banded_check<T: HMMType>(
+        model: &GPHMM<T>,
+        draft: &[u8],
+        queries: &[Vec<u8>],
+        radius: usize,
+        answer: &[u8],
+    ) {
+        let correct = model.correct_until_convergence(&draft, queries);
+        let correct_b = model
+            .correct_until_convergence_banded(&draft, queries, radius)
+            .unwrap();
+        let dist = crate::bialignment::edit_dist(&correct, &answer);
+        let dist_b = crate::bialignment::edit_dist(&correct, &answer);
+        assert!(dist_b <= dist);
+    }
+    #[test]
+    fn profile_correction_banded_test() {
+        let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(4280);
+        let single = GPHMM::<Full>::default();
+        let single_cond = GPHMM::<Cond>::default();
+        let three = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let three_cond = GPHMM::<Cond>::new_three_state(0.8, 0.2, 0.3, 0.9);
+        let prof = crate::gen_seq::PROFILE;
+        let radius = 30;
+        let coverage = 30;
+        for _ in 0..20 {
+            let xs = crate::gen_seq::generate_seq(&mut rng, 200);
+            let seqs: Vec<_> = (0..coverage)
+                .map(|_| crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof))
+                .collect();
+            let draft = crate::ternary_consensus(&seqs, 23, 3, 20);
+            correction_banded_check(&single, &draft, &seqs, radius, &xs);
+            correction_banded_check(&single_cond, &draft, &seqs, radius, &xs);
+            correction_banded_check(&three, &draft, &seqs, radius, &xs);
+            correction_banded_check(&three_cond, &draft, &seqs, radius, &xs);
         }
     }
 }
