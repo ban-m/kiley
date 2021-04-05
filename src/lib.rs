@@ -8,10 +8,242 @@ pub mod trialignment;
 pub use bialignment::polish_until_converge_banded;
 pub mod hmm;
 mod padseq;
+use hmm::generalized_pair_hidden_markov_model::{Cond, HMMType, GPHMM};
 use rand::seq::*;
 use rand::Rng;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256StarStar;
+#[derive(Debug, Clone)]
+pub struct PolishConfig<M: HMMType> {
+    radius: usize,
+    phmm: GPHMM<M>,
+    chunk_size: usize,
+    max_coverage: usize,
+}
+impl PolishConfig<Cond> {
+    pub fn new(radius: usize, chunk_size: usize, max_coverage: usize) -> Self {
+        let phmm = GPHMM::<Cond>::new_three_state(0.9, 0.05, 0.05, 0.9);
+        Self {
+            radius,
+            phmm,
+            chunk_size,
+            max_coverage,
+        }
+    }
+}
+
+use fasta::FASTARecord;
+
+/// Only Alignment with Cigar fields would be used in the polishing stage.
+/// It is the task for caller to filter erroneous alignmnet before calling this function.
+pub fn polish(
+    template: &[FASTARecord],
+    queries: &[FASTARecord],
+    alignments: &[sam::Record],
+    config: &PolishConfig<Cond>,
+) -> Vec<FASTARecord> {
+    use std::collections::HashMap;
+    let mut chunks: HashMap<String, Vec<Vec<Vec<u8>>>> = template
+        .iter()
+        .map(|(id, seq)| {
+            let len = if seq.len() % config.chunk_size == 0 {
+                seq.len() / config.chunk_size
+            } else {
+                seq.len() / config.chunk_size + 1
+            };
+            let slots: Vec<_> = vec![vec![]; len];
+            (id.clone(), slots)
+        })
+        .collect();
+    let queries: HashMap<&str, &[u8]> = queries
+        .iter()
+        .map(|(x, y)| (x.as_str(), y.as_slice()))
+        .collect();
+    // Record alignments.
+    for aln in alignments {
+        let query = queries.get(aln.q_name());
+        let ref_slots = chunks.get_mut(aln.r_name());
+        let (query, ref_slots) = match (query, ref_slots) {
+            (Some(q), Some(r)) => (q, r),
+            _ => continue,
+        };
+        for (position, seq) in split_query(query, aln, config) {
+            ref_slots[position].push(seq);
+        }
+    }
+    // Polishing.
+    template
+        .iter()
+        .map(|(id, seq)| {
+            let chunks = chunks.get(id).unwrap();
+            let polished: Vec<_> = chunks
+                .iter()
+                .enumerate()
+                .filter_map(|(i, queries)| {
+                    // TODO: Polish chunk should not be return none.
+                    let start = i * config.chunk_size;
+                    let end = start + config.chunk_size;
+                    let draft = &seq[start..end];
+                    polish_chunk(&draft, &queries, &config)
+                })
+                .flat_map(std::convert::identity)
+                .collect();
+            (id.clone(), polished)
+        })
+        .collect()
+}
+
+// Split query into (chunk-id, aligned seq)-array.
+// If the alignment does not have CIGAR string, return empty array(NOt good).
+fn split_query<M: HMMType>(
+    query: &[u8],
+    aln: &sam::Record,
+    config: &PolishConfig<M>,
+) -> Vec<(usize, Vec<u8>)> {
+    let mut cigar = aln.cigar();
+    cigar.reverse();
+    if cigar.is_empty() {
+        return vec![];
+    }
+    let query = if aln.is_forward() {
+        query.to_vec()
+    } else {
+        revcmp(query)
+    };
+    let (mut ref_position, mut query_position) = (aln.pos(), 0);
+    let chunk_start = (ref_position / config.chunk_size + 1) * config.chunk_size;
+    let initial_chunk_id = ref_position / config.chunk_size;
+    // Seek until reached to the chunk_start.
+    while ref_position < chunk_start {
+        if let Some(op) = cigar.pop() {
+            match op {
+                sam::Op::Match(l) | sam::Op::Mismatch(l) | sam::Op::Align(l) => {
+                    ref_position += l;
+                    query_position += l;
+                }
+                sam::Op::SoftClip(l) | sam::Op::HardClip(l) => query_position += l,
+                sam::Op::Insertion(l) => query_position += l,
+                sam::Op::Deletion(l) => ref_position += l,
+                sam::Op::Skipped(_) | sam::Op::Padding(_) => {}
+            }
+            if chunk_start < ref_position {
+                use sam::Op;
+                let size = ref_position - chunk_start;
+                ref_position = chunk_start;
+                match op {
+                    sam::Op::Align(_) => cigar.push(Op::Align(size)),
+                    sam::Op::Match(_) => cigar.push(Op::Match(size)),
+                    sam::Op::Mismatch(_) => cigar.push(Op::Mismatch(size)),
+                    sam::Op::Deletion(_) => cigar.push(Op::Deletion(size)),
+                    sam::Op::Skipped(_)
+                    | sam::Op::Insertion(_)
+                    | sam::Op::SoftClip(_)
+                    | sam::Op::HardClip(_)
+                    | sam::Op::Padding(_) => unreachable!(),
+                }
+            }
+            if chunk_start == ref_position {
+                break;
+            }
+        } else {
+            return vec![];
+        }
+    }
+    assert_eq!(ref_position, chunk_start);
+    let chunks = seq_into_subchunks(&query[query_position..], config.chunk_size, cigar);
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(i, sx)| (i + initial_chunk_id, sx))
+        .collect()
+}
+
+// Cigar is reversed. So, by poping the lemente, we can read the alignment.
+fn seq_into_subchunks(query: &[u8], len: usize, mut cigar: Vec<sam::Op>) -> Vec<Vec<u8>> {
+    use sam::Op;
+    let (mut q_pos, mut r_pos) = (0, 0);
+    let mut target = len;
+    let mut chunk_position = vec![0];
+    while let Some(op) = cigar.pop() {
+        match op {
+            sam::Op::Align(l) | sam::Op::Match(l) | sam::Op::Mismatch(l) => {
+                q_pos += l;
+                r_pos += l;
+                if target < r_pos {
+                    let size = r_pos - target;
+                    r_pos -= size;
+                    q_pos -= size;
+                    match op {
+                        Op::Align(_) => cigar.push(Op::Align(size)),
+                        Op::Match(_) => cigar.push(Op::Match(size)),
+                        Op::Mismatch(_) => cigar.push(Op::Mismatch(size)),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            sam::Op::Insertion(l) | sam::Op::SoftClip(l) | sam::Op::HardClip(l) => q_pos += l,
+            sam::Op::Deletion(l) => {
+                r_pos += l;
+                if target < r_pos {
+                    let size = r_pos - target;
+                    r_pos -= size;
+                    cigar.push(Op::Deletion(size));
+                }
+            }
+            sam::Op::Skipped(_) => {}
+            sam::Op::Padding(_) => {}
+        }
+        if target == r_pos {
+            chunk_position.push(q_pos);
+            target += len;
+        }
+    }
+    chunk_position
+        .windows(2)
+        .map(|w| query[w[0]..w[1]].to_vec())
+        .collect()
+}
+
+fn revcmp(xs: &[u8]) -> Vec<u8> {
+    xs.iter()
+        .map(padseq::convert_to_twobit)
+        .map(|x| b"TGCA"[x as usize])
+        .rev()
+        .collect()
+}
+
+// Polish chunk.
+// TODO:This function should not fail.
+fn polish_chunk<T: std::borrow::Borrow<[u8]>>(
+    draft: &[u8],
+    queries: &[T],
+    config: &PolishConfig<Cond>,
+) -> Option<Vec<u8>> {
+    let queries: Vec<&[u8]> = queries.iter().map(|x| x.borrow()).collect();
+    let mut draft = draft.to_vec();
+    let mut phmm = config.phmm.clone();
+    let mut lk: f64 = queries.iter().map(|q| phmm.likelihood(&draft, q)).sum();
+    loop {
+        eprintln!("{}", String::from_utf8_lossy(&draft));
+        let new_cons = loop {
+            let new_phmm = phmm.fit(&draft, &queries);
+            let new_lk: f64 = queries.iter().map(|q| new_phmm.likelihood(&draft, q)).sum();
+            eprintln!("LK:{:.4}, {:.4}", lk, new_lk);
+            if new_lk - lk < 0.1f64 {
+                eprintln!("Break");
+                break phmm.correct_until_convergence(&draft, &queries);
+            } else {
+                lk = new_lk;
+                phmm = new_phmm;
+            }
+        };
+        if draft == new_cons {
+            break Some(draft);
+        } else {
+            draft = new_cons;
+        }
+    }
+}
 
 /// Take consensus and polish it. It consists of three step.
 /// 1: Make consensus by ternaly alignments.
@@ -27,7 +259,8 @@ pub fn consensus<T: std::borrow::Borrow<[u8]>>(
 ) -> Option<Vec<u8>> {
     let consensus = ternary_consensus(seqs, seed, repnum, radius);
     let consensus = polish_by_pileup(&consensus, seqs, radius);
-    bialignment::polish_until_converge_banded(&consensus, &seqs, radius)
+    let config = PolishConfig::new(radius, 0, seqs.len());
+    polish_chunk(&consensus, &seqs, &config)
 }
 
 /// Almost the same as `consensus`, but it automatically scale the radius

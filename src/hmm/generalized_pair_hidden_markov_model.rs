@@ -11,10 +11,10 @@
 /// This model generates alignment, not a pair of sequence. This distinction is very vague, but
 /// one should be careful when using pair-HMM.
 /// For example,
-/// ```
+///
 /// AAA-AGT-T
 /// AA-CCGTGT
-/// ```
+///
 /// is an alignment between a pair of sequence `AAAAGTT` and `AACCGTGT`. Of course, there are other alignment for these two sequence.
 /// So, there is possibly many alignment for a pair of sequence.
 /// Currently, this function is for DNA alignment with no anbiguous bases such as N. In other words,
@@ -871,7 +871,9 @@ impl<M: HMMType> GPHMM<M> {
                 }
             }
             // Update centers.
-            let next_center = if max_j < radius { center } else { center + 2 };
+            //let next_center = if max_j < radius { center } else { center + 2 };
+            // TODO: Which is better?
+            let next_center = (ys.len() * i / xs.len()) as isize;
             centers.push(next_center);
         }
         // Debugging...
@@ -1370,7 +1372,8 @@ impl<M: HMMType> GPHMM<M> {
                 })
                 .max_by(|x, y| (x.0).partial_cmp(&(y.0)).unwrap())
                 .unwrap();
-            let next_center = if max_j < radius { center } else { center + 2 };
+            // let next_center = if max_j < radius { center } else { center + 2 };
+            let next_center = (i * ys.len() / xs.len()) as isize;
             centers.push(next_center);
         }
         let m = ys.len() as isize - centers[xs.len()] + radius;
