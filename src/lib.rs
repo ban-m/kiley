@@ -1,6 +1,8 @@
 #![feature(is_sorted)]
 pub mod bialignment;
+pub mod fasta;
 pub mod gen_seq;
+pub mod sam;
 pub mod trialignment;
 // use poa_hmm::POA;
 pub use bialignment::polish_until_converge_banded;
