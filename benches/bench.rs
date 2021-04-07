@@ -15,7 +15,7 @@ fn naive_aln(b: &mut test::Bencher) {
         let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
         let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
         let zs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
-        kiley::alignment::naive::alignment(&xs, &ys, &zs)
+        kiley::trialignment::naive::alignment(&xs, &ys, &zs)
     });
 }
 
@@ -28,7 +28,7 @@ fn banded_aln(b: &mut test::Bencher) {
         let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
         let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
         let zs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
-        kiley::alignment::banded::alignment_u32(&xs, &ys, &zs, 10)
+        kiley::trialignment::banded::alignment_u32(&xs, &ys, &zs, 10)
     });
 }
 
@@ -40,7 +40,7 @@ fn edit_dist_ops(b: &mut test::Bencher) {
         let template = kiley::gen_seq::generate_seq(&mut rng, 2_000);
         let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
         let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
-        kiley::alignment::bialignment::edit_dist_slow_ops(&xs, &ys)
+        kiley::bialignment::edit_dist_slow_ops(&xs, &ys)
     });
 }
 
@@ -53,7 +53,22 @@ fn edit_dist_banded_ops(b: &mut test::Bencher) {
         let template = kiley::gen_seq::generate_seq(&mut rng, 2_000);
         let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
         let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
-        kiley::alignment::bialignment::edit_dist_banded(&xs, &ys, band)
+        kiley::bialignment::edit_dist_banded(&xs, &ys, band)
+    });
+}
+
+#[bench]
+fn gphmm_banded_ops(b: &mut test::Bencher) {
+    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+    let prof = &kiley::gen_seq::PROFILE;
+    let band = 20;
+    use kiley::gphmm::*;
+    let phmm = GPHMM::<Cond>::new_three_state(0.9, 0.05, 0.05, 0.9);
+    b.iter(|| {
+        let template = kiley::gen_seq::generate_seq(&mut rng, 2_000);
+        let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        phmm.likelihood_banded(&xs, &ys, band)
     });
 }
 
@@ -65,7 +80,7 @@ fn edit_dist_naive(b: &mut test::Bencher) {
         let template = kiley::gen_seq::generate_seq(&mut rng, 2_000);
         let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
         let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
-        kiley::alignment::bialignment::edit_dist_slow(&xs, &ys)
+        kiley::bialignment::edit_dist_slow(&xs, &ys)
     });
 }
 
@@ -77,7 +92,7 @@ fn edit_dist(b: &mut test::Bencher) {
         let template = kiley::gen_seq::generate_seq(&mut rng, 2_000);
         let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
         let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
-        kiley::alignment::bialignment::edit_dist(&xs, &ys)
+        kiley::bialignment::edit_dist(&xs, &ys)
     });
 }
 

@@ -1,18 +1,22 @@
 #![feature(is_sorted)]
+#[macro_use]
+extern crate log;
 pub mod bialignment;
 pub mod fasta;
 pub mod gen_seq;
-pub mod sam;
-pub mod trialignment;
-// use poa_hmm::POA;
-pub use bialignment::polish_until_converge_banded;
 pub mod hmm;
 mod padseq;
-use hmm::generalized_pair_hidden_markov_model::{Cond, HMMType, GPHMM};
+pub mod sam;
+pub mod trialignment;
+pub use bialignment::polish_until_converge_banded;
+pub mod gphmm;
+use gphmm::{Cond, HMMType, GPHMM};
 use rand::seq::*;
 use rand::Rng;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256StarStar;
+use rayon::prelude::*;
+
 #[derive(Debug, Clone)]
 pub struct PolishConfig<M: HMMType> {
     radius: usize,
@@ -23,6 +27,19 @@ pub struct PolishConfig<M: HMMType> {
 impl PolishConfig<Cond> {
     pub fn new(radius: usize, chunk_size: usize, max_coverage: usize) -> Self {
         let phmm = GPHMM::<Cond>::new_three_state(0.9, 0.05, 0.05, 0.9);
+        Self {
+            radius,
+            phmm,
+            chunk_size,
+            max_coverage,
+        }
+    }
+    pub fn with_model(
+        radius: usize,
+        chunk_size: usize,
+        max_coverage: usize,
+        phmm: GPHMM<Cond>,
+    ) -> Self {
         Self {
             radius,
             phmm,
@@ -55,9 +72,9 @@ pub fn polish(
             (id.clone(), slots)
         })
         .collect();
-    let queries: HashMap<&str, &[u8]> = queries
+    let queries: HashMap<String, _> = queries
         .iter()
-        .map(|(x, y)| (x.as_str(), y.as_slice()))
+        .map(|(x, y)| (x.to_string(), y.as_slice()))
         .collect();
     // Record alignments.
     for aln in alignments {
@@ -67,7 +84,8 @@ pub fn polish(
             (Some(q), Some(r)) => (q, r),
             _ => continue,
         };
-        for (position, seq) in split_query(query, aln, config) {
+        let split_read = split_query(query, aln, config);
+        for (position, seq) in split_read {
             ref_slots[position].push(seq);
         }
     }
@@ -77,13 +95,17 @@ pub fn polish(
         .map(|(id, seq)| {
             let chunks = chunks.get(id).unwrap();
             let polished: Vec<_> = chunks
-                .iter()
+                .par_iter()
                 .enumerate()
+                .take(10)
                 .filter_map(|(i, queries)| {
-                    // TODO: Polish chunk should not be return none.
                     let start = i * config.chunk_size;
                     let end = start + config.chunk_size;
                     let draft = &seq[start..end];
+                    if queries.len() < 5 {
+                        // return Some(draft.to_vec());
+                        return None;
+                    }
                     polish_chunk(&draft, &queries, &config)
                 })
                 .flat_map(std::convert::identity)
@@ -112,7 +134,7 @@ fn split_query<M: HMMType>(
     };
     let (mut ref_position, mut query_position) = (aln.pos(), 0);
     let chunk_start = (ref_position / config.chunk_size + 1) * config.chunk_size;
-    let initial_chunk_id = ref_position / config.chunk_size;
+    let initial_chunk_id = ref_position / config.chunk_size + 1;
     // Seek until reached to the chunk_start.
     while ref_position < chunk_start {
         if let Some(op) = cigar.pop() {
@@ -131,9 +153,18 @@ fn split_query<M: HMMType>(
                 let size = ref_position - chunk_start;
                 ref_position = chunk_start;
                 match op {
-                    sam::Op::Align(_) => cigar.push(Op::Align(size)),
-                    sam::Op::Match(_) => cigar.push(Op::Match(size)),
-                    sam::Op::Mismatch(_) => cigar.push(Op::Mismatch(size)),
+                    sam::Op::Align(_) => {
+                        cigar.push(Op::Align(size));
+                        query_position -= size;
+                    }
+                    sam::Op::Match(_) => {
+                        cigar.push(Op::Match(size));
+                        query_position -= size;
+                    }
+                    sam::Op::Mismatch(_) => {
+                        cigar.push(Op::Mismatch(size));
+                        query_position -= size;
+                    }
                     sam::Op::Deletion(_) => cigar.push(Op::Deletion(size)),
                     sam::Op::Skipped(_)
                     | sam::Op::Insertion(_)
@@ -212,6 +243,48 @@ fn revcmp(xs: &[u8]) -> Vec<u8> {
         .collect()
 }
 
+pub fn fit_model<T: std::borrow::Borrow<[u8]>>(
+    draft: &[u8],
+    queries: &[T],
+    config: &PolishConfig<Cond>,
+) -> GPHMM<Cond> {
+    use padseq::PadSeq;
+    let mut draft = PadSeq::new(draft);
+    let queries: Vec<_> = queries.iter().map(|x| PadSeq::new(x.borrow())).collect();
+    let mut phmm = config.phmm.clone();
+    let get_lk = |model: &GPHMM<Cond>, draft: &PadSeq| -> f64 {
+        queries
+            .iter()
+            .filter_map(|q| model.likelihood_banded_inner(draft, q, config.radius))
+            .sum()
+    };
+    let mut lk = get_lk(&phmm, &draft);
+    loop {
+        let new_cons = loop {
+            let start = std::time::Instant::now();
+            let new_phmm = phmm.fit_banded_inner(&draft, &queries, config.radius);
+            let fit = std::time::Instant::now();
+            let new_lk = get_lk(&new_phmm, &draft);
+            debug!("FIT\t{}", (fit - start).as_millis());
+            debug!("{:.3}->{:.3}", lk, new_lk);
+            if new_lk - lk < 0.1f64 {
+                debug!("Break");
+                break phmm
+                    .correction_until_convergence_banded_inner(&draft, &queries, config.radius)
+                    .unwrap();
+            } else {
+                lk = new_lk;
+                phmm = new_phmm;
+            }
+        };
+        if draft == new_cons {
+            break phmm;
+        } else {
+            draft = new_cons;
+        }
+    }
+}
+
 // Polish chunk.
 // TODO:This function should not fail.
 fn polish_chunk<T: std::borrow::Borrow<[u8]>>(
@@ -219,26 +292,39 @@ fn polish_chunk<T: std::borrow::Borrow<[u8]>>(
     queries: &[T],
     config: &PolishConfig<Cond>,
 ) -> Option<Vec<u8>> {
-    let queries: Vec<&[u8]> = queries.iter().map(|x| x.borrow()).collect();
-    let mut draft = draft.to_vec();
+    use padseq::PadSeq;
+    let mut draft = PadSeq::new(draft);
+    let queries: Vec<_> = queries.iter().map(|x| PadSeq::new(x.borrow())).collect();
     let mut phmm = config.phmm.clone();
-    let mut lk: f64 = queries.iter().map(|q| phmm.likelihood(&draft, q)).sum();
+    let get_lk = |model: &GPHMM<Cond>, draft: &PadSeq| -> f64 {
+        queries
+            .iter()
+            .filter_map(|q| model.likelihood_banded_inner(draft, q, config.radius))
+            .sum()
+    };
+    let mut lk = get_lk(&phmm, &draft);
     loop {
-        eprintln!("{}", String::from_utf8_lossy(&draft));
         let new_cons = loop {
-            let new_phmm = phmm.fit(&draft, &queries);
-            let new_lk: f64 = queries.iter().map(|q| new_phmm.likelihood(&draft, q)).sum();
-            eprintln!("LK:{:.4}, {:.4}", lk, new_lk);
+            let start = std::time::Instant::now();
+            let new_phmm = phmm.fit_banded_inner(&draft, &queries, config.radius);
+            let fit = std::time::Instant::now();
+            let new_lk = get_lk(&new_phmm, &draft);
+            debug!("FIT\t{}", (fit - start).as_millis());
+            debug!("{:.3}->{:.3}", lk, new_lk);
             if new_lk - lk < 0.1f64 {
-                eprintln!("Break");
-                break phmm.correct_until_convergence(&draft, &queries);
+                debug!("Break");
+                break phmm
+                    .correction_until_convergence_banded_inner(&draft, &queries, config.radius)
+                    .unwrap();
             } else {
                 lk = new_lk;
                 phmm = new_phmm;
             }
         };
         if draft == new_cons {
-            break Some(draft);
+            debug!("Polished");
+            debug!("ModelDiff:{:?}", config.phmm.dist(&phmm));
+            break Some(draft.into());
         } else {
             draft = new_cons;
         }
@@ -257,10 +343,22 @@ pub fn consensus<T: std::borrow::Borrow<[u8]>>(
     repnum: usize,
     radius: usize,
 ) -> Option<Vec<u8>> {
+    use std::time::Instant;
+    let start = Instant::now();
     let consensus = ternary_consensus(seqs, seed, repnum, radius);
+    let ternary = Instant::now();
     let consensus = polish_by_pileup(&consensus, seqs, radius);
+    let correct = Instant::now();
     let config = PolishConfig::new(radius, 0, seqs.len());
-    polish_chunk(&consensus, &seqs, &config)
+    let consensus = polish_chunk(&consensus, &seqs, &config);
+    let polish = Instant::now();
+    eprintln!(
+        "{}\t{}\t{}",
+        (ternary - start).as_millis(),
+        (correct - ternary).as_millis(),
+        (polish - correct).as_millis()
+    );
+    consensus
 }
 
 /// Almost the same as `consensus`, but it automatically scale the radius
@@ -518,7 +616,6 @@ pub fn polish_by_pileup<T: std::borrow::Borrow<[u8]>>(
 mod test {
     use super::gen_seq;
     use super::*;
-    use rayon::prelude::*;
     #[test]
     fn super_long_multi_consensus_rand() {
         let bases = b"ACTG";

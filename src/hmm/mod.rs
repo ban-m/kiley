@@ -1,5 +1,4 @@
 //! An tiny implementation of pair hidden Markov models.
-pub mod generalized_pair_hidden_markov_model;
 use crate::padseq;
 use rand::Rng;
 /// A pair hidden Markov model.
@@ -36,6 +35,7 @@ pub struct PairHiddenMarkovModel {
 }
 
 /// Shorthand for PairHiddenMarkovModel.
+#[allow(clippy::upper_case_acronyms)]
 pub type PHMM = PairHiddenMarkovModel;
 
 // Samll value.
@@ -126,6 +126,7 @@ impl PHMM {
     ///   quit_prob,
     /// );
     /// ```
+    #[allow(clippy::wrong_self_convention)]
     pub fn as_reversible(
         mat: f64,
         gap_ext: f64,
@@ -271,10 +272,10 @@ impl PHMM {
             let (mut max, mut max_pos) = (0f64, end);
             for pos in start..end {
                 let u = pos + center - radius;
-                let (i, j) = (u, k - u);
                 let prev_mat = pos as isize + matdiff;
                 let prev_gap = pos as isize + gapdiff;
-                let (x, y) = (xs[i - 1], ys[j - 1]);
+                // let (i, j) = (u, k - u);
+                let (x, y) = (xs[u - 1], ys[k - u - 1]);
                 let mat = self.mat_emit[(x << 3 | y) as usize]
                     * (dp.get(k - 2, prev_mat - 1, State::Mat) * self.mat_ext
                         + dp.get(k - 2, prev_mat - 1, State::Del) * self.mat_from_del
@@ -453,16 +454,16 @@ impl PHMM {
             };
             for pos in start..end {
                 let u = pos + center - radius;
-                let (i, j) = (u, k - u);
+                // let (i, j) = (u, k - u);
                 // Previous, prev-previous position.
                 let u_mat = pos as isize + matdiff + 1;
                 let u_gap = pos as isize + gapdiff;
-                let (x, y) = (xs[i], ys[j]);
+                let (x, y) = (xs[u], ys[k - u]);
                 let ins = self.ins_open
-                    * self.ins_emit[ys[j] as usize]
+                    * self.ins_emit[ys[k - u] as usize]
                     * dp.get(k + 1, u_gap, State::Ins);
                 let del = self.del_open
-                    * self.del_emit[xs[i] as usize]
+                    * self.del_emit[xs[u] as usize]
                     * dp.get(k + 1, u_gap + 1, State::Del);
                 let mat = self.mat_ext
                     * self.mat_emit[(x << 3 | y) as usize]

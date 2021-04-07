@@ -14,6 +14,7 @@ rand_xoshiro = "*"
 log = "0.4.14"
 bytecount = "*"
 env_logger = "*"
+rayon = "*"
 
 [dev-dependencies]
-rayon = "1.3.1"
+rayon = "*"

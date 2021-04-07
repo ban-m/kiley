@@ -16,7 +16,7 @@ fn subcommand_polish() -> App<'static, 'static> {
             Arg::with_name("contigs")
                 .long("contigs")
                 .short("c")
-                .value_name("CONTIGS")
+                .value_name("FASTA")
                 .takes_value(true)
                 .required(true)
                 .help("Draft contigs. FASTA format."),
@@ -25,7 +25,7 @@ fn subcommand_polish() -> App<'static, 'static> {
             Arg::with_name("reads")
                 .long("reads")
                 .short("r")
-                .value_name("READS")
+                .value_name("FASTA")
                 .takes_value(true)
                 .required(true)
                 .help("Raw reads. FASTA format."),
@@ -33,6 +33,7 @@ fn subcommand_polish() -> App<'static, 'static> {
         .arg(
             Arg::with_name("alignments")
                 .long("alignments")
+                .value_name("SAM")
                 .short("a")
                 .takes_value(true)
                 .required(true)
@@ -42,7 +43,7 @@ fn subcommand_polish() -> App<'static, 'static> {
             Arg::with_name("radius")
                 .long("radius")
                 .takes_value(true)
-                .default_value(&"100")
+                .default_value(&"200")
                 .help("Band width. Increase for erroneos reads."),
         )
         .arg(
@@ -102,13 +103,6 @@ fn subcommand_consensus() -> App<'static, 'static> {
                 .default_value(&"32389")
                 .help("Seed"),
         )
-        // .arg(
-        //     Arg::with_name("subchunk_size")
-        //         .long("subchunk_size")
-        //         .takes_value(true)
-        //         .default_value(&"5")
-        //         .help("Size of a subchunk"),
-        // )
         .arg(
             Arg::with_name("repeat_num")
                 .long("repeat_num")
@@ -168,10 +162,6 @@ fn consensus(matches: &clap::ArgMatches) -> std::io::Result<()> {
         .value_of("seed")
         .and_then(|e| e.parse().ok())
         .unwrap();
-    // let _subchunk_size: usize = matches
-    //     .value_of("subchunk_size")
-    //     .and_then(|e| e.parse().ok())
-    //     .unwrap();
     let repeat_num: usize = matches
         .value_of("repeat_num")
         .and_then(|e| e.parse().ok())

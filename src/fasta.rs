@@ -2,10 +2,11 @@
 use std::io::{BufRead, BufReader};
 use std::io::{BufWriter, Write};
 pub type FASTARecord = (String, Vec<u8>);
+pub type FASTQRecord = (String, Vec<u8>, Vec<u8>);
 /// Write records into the writer
 pub fn write_fasta<W: Write>(
     wtr: &mut BufWriter<W>,
-    records: &[(String, Vec<u8>)],
+    records: &[FASTARecord],
 ) -> std::io::Result<()> {
     for (id, seq) in records {
         writeln!(wtr, ">{}\n{}", id, String::from_utf8_lossy(seq))?;
@@ -16,7 +17,7 @@ pub fn write_fasta<W: Write>(
 /// Write records into the writer.
 pub fn write_fastq<W: Write>(
     wtr: &mut BufWriter<W>,
-    records: &[(String, Vec<u8>, Vec<u8>)],
+    records: &[FASTQRecord],
 ) -> std::io::Result<()> {
     for (id, seq, qual) in records {
         let seq = String::from_utf8_lossy(seq);
@@ -31,7 +32,7 @@ pub fn write_fastq<W: Write>(
 /// If the record is mulformed, return empty vector.
 pub fn read_fasta<P: AsRef<std::path::Path>>(
     file: &Option<P>,
-) -> std::io::Result<Vec<(String, Vec<u8>)>> {
+) -> std::io::Result<Vec<FASTARecord>> {
     let stdin = std::io::stdin();
     let mut reader: Box<dyn BufRead> = match file {
         Some(file) => std::fs::File::open(file)
@@ -48,7 +49,7 @@ pub fn read_fasta<P: AsRef<std::path::Path>>(
 }
 
 // TODO: Maybe we can parallelize this function.
-fn parse_fasta(contents: &[u8]) -> Vec<(String, Vec<u8>)> {
+fn parse_fasta(contents: &[u8]) -> Vec<FASTARecord> {
     let mut contents = contents.split(|&x| x == b'>');
     if let Some(first) = contents.next() {
         assert!(first.is_empty())
@@ -56,7 +57,7 @@ fn parse_fasta(contents: &[u8]) -> Vec<(String, Vec<u8>)> {
     contents
         .filter_map(|record| {
             let mut record = record.splitn(2, |&x| x == b'\n');
-            let id = record.next()?;
+            let id = record.next()?.split(|&x| x == b' ').next()?;
             let contents = record.next()?;
             let contents: Vec<_> = contents.iter().filter(|&&x| x != b'\n').copied().collect();
             Some((String::from_utf8_lossy(id).to_string(), contents))
@@ -68,7 +69,7 @@ fn parse_fasta(contents: &[u8]) -> Vec<(String, Vec<u8>)> {
 /// If the record is mulformed, return empty vector.
 pub fn read_fastq<P: AsRef<std::path::Path>>(
     file: &Option<P>,
-) -> std::io::Result<Vec<(String, Vec<u8>, Vec<u8>)>> {
+) -> std::io::Result<Vec<FASTQRecord>> {
     let stdin = std::io::stdin();
     let mut reader: Box<dyn BufRead> = match file {
         Some(file) => std::fs::File::open(file)
@@ -84,10 +85,10 @@ pub fn read_fastq<P: AsRef<std::path::Path>>(
     Ok(parse_fastq(&contents))
 }
 
-fn parse_fastq(contents: &[u8]) -> Vec<(String, Vec<u8>, Vec<u8>)> {
+fn parse_fastq(contents: &[u8]) -> Vec<FASTQRecord> {
     let mut contents = contents.split(|&x| x == b'\n');
     let parse = || -> Option<(String, Vec<u8>, Vec<u8>)> {
-        let id = contents.next()?;
+        let id = contents.next()?.split(|&x| x == b' ').next()?;
         let seq = contents.next()?.to_vec();
         let _id2 = contents.next()?;
         let qual = contents.next()?.to_vec();
