@@ -275,6 +275,9 @@ impl<M: HMMType> GPHMM<M> {
             _mode: std::marker::PhantomData,
         }
     }
+    pub fn states(&self) -> usize {
+        self.states
+    }
     /// Frobenius norm, or element-wise-square-sum.
     /// Return None if the two model have different number of states.
     pub fn dist(&self, other: &Self) -> Option<f64> {

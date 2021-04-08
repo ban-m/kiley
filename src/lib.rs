@@ -24,6 +24,7 @@ pub struct PolishConfig<M: HMMType> {
     chunk_size: usize,
     max_coverage: usize,
 }
+
 impl PolishConfig<Cond> {
     pub fn new(radius: usize, chunk_size: usize, max_coverage: usize) -> Self {
         let phmm = GPHMM::<Cond>::new_three_state(0.9, 0.05, 0.05, 0.9);
@@ -89,6 +90,28 @@ pub fn polish(
             ref_slots[position].push(seq);
         }
     }
+    debug!("Record alignemnts.");
+    // Model fitting.
+    let training: Vec<(&[u8], &[Vec<u8>])> = {
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(config.radius as u64);
+        let mut training = vec![];
+        for _ in 0..10 {
+            let (id, seq) = template.choose(&mut rng).unwrap();
+            let chunks = chunks.get(id).unwrap();
+            let i = rng.gen_range(0..chunks.len());
+            let queries = chunks[i].as_slice();
+            if 5 < queries.len() {
+                let start = i * config.chunk_size;
+                let end = start + config.chunk_size;
+                let draft: &[u8] = &seq[start..end];
+                training.push((draft, queries));
+            }
+        }
+        training
+    };
+    debug!("Fit Model...");
+    let model = fit_model_from_multiple(&training, &config);
+    debug!("Fit Model:{}", model);
     // Polishing.
     template
         .iter()
@@ -103,10 +126,9 @@ pub fn polish(
                     let end = start + config.chunk_size;
                     let draft = &seq[start..end];
                     if queries.len() < 5 {
-                        // return Some(draft.to_vec());
-                        return None;
+                        return Some(draft.to_vec());
                     }
-                    polish_chunk(&draft, &queries, &config)
+                    model.correct_until_convergence_banded(&draft, &queries, config.radius)
                 })
                 .flat_map(std::convert::identity)
                 .collect();
@@ -241,6 +263,86 @@ fn revcmp(xs: &[u8]) -> Vec<u8> {
         .map(|x| b"TGCA"[x as usize])
         .rev()
         .collect()
+}
+
+pub fn fit_model_from_multiple(
+    training: &[(&[u8], &[Vec<u8>])],
+    config: &PolishConfig<Cond>,
+) -> GPHMM<Cond> {
+    use padseq::PadSeq;
+    let (mut drafts, queries): (Vec<_>, Vec<_>) = training
+        .iter()
+        .map(|&(x, ys)| {
+            let x = PadSeq::new(x);
+            let ys: Vec<_> = ys.iter().map(|y| PadSeq::new(y.as_slice())).collect();
+            (x, ys)
+        })
+        .unzip();
+    let mut phmm = config.phmm.clone();
+    let get_lk = |model: &GPHMM<Cond>, drafts: &[PadSeq]| -> f64 {
+        queries
+            .iter()
+            .zip(drafts.iter())
+            .map(|(qs, d)| {
+                qs.iter()
+                    .filter_map(|q| model.likelihood_banded_inner(d, q, config.radius))
+                    .sum::<f64>()
+            })
+            .sum()
+    };
+    let mut lk = get_lk(&phmm, &drafts);
+    loop {
+        let new_drafts = loop {
+            let new_phmm = fit_multiple_inner(&phmm, &drafts, &queries, config);
+            let new_lk = get_lk(&new_phmm, &drafts);
+            debug!("{:.3}->{:.3}", lk, new_lk);
+            if new_lk - lk < 0.1f64 {
+                let new_drafts = drafts
+                    .iter()
+                    .zip(queries.iter())
+                    .map(|(d, qs)| {
+                        phmm.correction_until_convergence_banded_inner(d, qs, config.radius)
+                            .unwrap()
+                    })
+                    .collect();
+                break new_drafts;
+            } else {
+                lk = new_lk;
+                phmm = new_phmm;
+            }
+        };
+        if drafts == new_drafts {
+            break phmm;
+        } else {
+            drafts = new_drafts;
+        }
+    }
+}
+
+fn fit_multiple_inner(
+    model: &GPHMM<Cond>,
+    drafts: &[padseq::PadSeq],
+    queries: &[Vec<padseq::PadSeq>],
+    config: &PolishConfig<Cond>,
+) -> GPHMM<Cond> {
+    use gphmm::banded::ProfileBanded;
+    let radius = config.radius as isize;
+    let mut profiles = vec![];
+    for (qs, d) in queries.iter().zip(drafts) {
+        profiles.extend(
+            qs.iter()
+                .filter_map(|q| ProfileBanded::new(model, d, q, radius)),
+        );
+    }
+    let initial_distribution = model.estimate_initial_distribution_banded(&profiles);
+    let transition_matrix = model.estimate_transition_prob_banded(&profiles);
+    let observation_matrix = model.estimate_observation_prob_banded(&profiles);
+    GPHMM::from_raw_elements(
+        model.states(),
+        transition_matrix,
+        initial_distribution,
+        observation_matrix,
+    )
 }
 
 pub fn fit_model<T: std::borrow::Borrow<[u8]>>(

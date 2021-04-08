@@ -42,7 +42,7 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
             _mode: std::marker::PhantomData,
         }
     }
-    fn estimate_observation_prob_banded(&self, profiles: &[ProfileBanded<Cond>]) -> Vec<f64> {
+    pub fn estimate_observation_prob_banded(&self, profiles: &[ProfileBanded<Cond>]) -> Vec<f64> {
         let mut buffer = vec![0f64; ((self.states - 1) << 6) + 8 * 8];
         for prob in profiles.iter().map(|prf| prf.observation_probability()) {
             buffer.iter_mut().zip(prob).for_each(|(x, y)| *x += y);
@@ -440,18 +440,12 @@ impl<M: HMMType> GPHMM<M> {
     ) -> Option<PadSeq> {
         let mut template = template.clone();
         let mut start_position = 0;
-        let mut start = std::time::Instant::now();
         while let Some((seq, next)) =
             self.correction_inner_banded(&template, &queries, radius, start_position)
         {
-            let end = std::time::Instant::now();
-            debug!("CORRECT\t{}", (end - start).as_millis());
-            start = end;
             template = seq;
             start_position = next;
         }
-        let end = std::time::Instant::now();
-        debug!("POLISH\t{}", (end - start).as_millis());
         Some(template)
     }
     pub fn correction_inner_banded(
@@ -462,12 +456,12 @@ impl<M: HMMType> GPHMM<M> {
         _start_position: usize,
     ) -> Option<(PadSeq, usize)> {
         let radius = radius as isize;
-        let start = std::time::Instant::now();
+        // let start = std::time::Instant::now();
         let profiles: Vec<_> = queries
             .iter()
             .filter_map(|q| ProfileBanded::new(self, &template, q, radius))
             .collect();
-        let prof = std::time::Instant::now();
+        // let prof = std::time::Instant::now();
         if profiles.is_empty() {
             return None;
         }
@@ -481,22 +475,24 @@ impl<M: HMMType> GPHMM<M> {
                 x
             })
             .unwrap();
-        let summarized = std::time::Instant::now();
-        debug!(
-            "PS\t{}\t{}",
-            (prof - start).as_millis(),
-            (summarized - prof).as_millis()
-        );
+        // let summarized = std::time::Instant::now();
+        // debug!(
+        //     "PS\t{}\t{}",
+        //     (prof - start).as_millis(),
+        //     (summarized - prof).as_millis()
+        // );
         profile_with_diff
             .chunks_exact(9)
             .enumerate()
-            .find_map(|(pos, with_diff)| {
+            .filter_map(|(pos, with_diff)| {
                 // diff = [A,C,G,T,A,C,G,T,-], first four element is for mutation,
                 // second four element is for insertion.
                 with_diff
                     .iter()
                     .enumerate()
-                    .find(|(_, &lk)| total_lk + diff < lk)
+                    .filter(|&(_, &lk)| total_lk + diff < lk)
+                    .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
+                    // .find(|(_, &lk)| total_lk + diff < lk)
                     .map(|(op, lk)| {
                         let (op, base) = (op / 4, op % 4);
                         let op = [Op::Match, Op::Ins, Op::Del][op];
@@ -504,6 +500,7 @@ impl<M: HMMType> GPHMM<M> {
                         (pos, op, base as u8, lk)
                     })
             })
+            .max_by(|x, y| (x.3).partial_cmp(&(y.3)).unwrap())
             .map(|(pos, op, base, _lk)| {
                 let mut template = template.clone();
                 match op {
@@ -518,7 +515,7 @@ impl<M: HMMType> GPHMM<M> {
                 (template, pos + 1)
             })
     }
-    fn estimate_initial_distribution_banded(&self, profiles: &[ProfileBanded<M>]) -> Vec<f64> {
+    pub fn estimate_initial_distribution_banded(&self, profiles: &[ProfileBanded<M>]) -> Vec<f64> {
         let mut buffer = vec![0f64; self.states];
         for init in profiles.iter().map(|prf| prf.initial_distribution()) {
             buffer.iter_mut().zip(init).for_each(|(x, y)| *x += y);
@@ -527,7 +524,7 @@ impl<M: HMMType> GPHMM<M> {
         buffer.iter_mut().for_each(|x| *x /= sum);
         buffer
     }
-    fn estimate_transition_prob_banded(&self, profiles: &[ProfileBanded<M>]) -> Vec<f64> {
+    pub fn estimate_transition_prob_banded(&self, profiles: &[ProfileBanded<M>]) -> Vec<f64> {
         let states = self.states;
         // [from * states + to] = Pr(from->to)
         // Because it is easier to normalize.
@@ -551,7 +548,7 @@ impl<M: HMMType> GPHMM<M> {
 }
 
 #[derive(Debug, Clone)]
-struct ProfileBanded<'a, 'b, 'c, T: HMMType> {
+pub struct ProfileBanded<'a, 'b, 'c, T: HMMType> {
     template: &'a PadSeq,
     query: &'b PadSeq,
     model: &'c GPHMM<T>,
@@ -564,7 +561,7 @@ struct ProfileBanded<'a, 'b, 'c, T: HMMType> {
 }
 
 impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
-    fn new(
+    pub fn new(
         model: &'c GPHMM<T>,
         template: &'a PadSeq,
         query: &'b PadSeq,
@@ -587,7 +584,7 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
             radius,
         })
     }
-    fn lk(&self) -> f64 {
+    pub fn lk(&self) -> f64 {
         let n = self.template.len();
         let m = self.query.len() as isize - self.centers[n] + self.radius;
         let states = self.model.states as isize;
@@ -728,7 +725,7 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
     }
     // 9-element window.
     // Position->[A,C,G,T,A,C,G,T,-]
-    fn to_modification_table(&self) -> Vec<f64> {
+    pub fn to_modification_table(&self) -> Vec<f64> {
         let (forward_acc, backward_acc) = self.accumlate_factors();
         let states = self.model.states;
         let mut lks = vec![EP; 9 * (self.template.len() + 1)];
@@ -837,7 +834,7 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
             .for_each(|x| *x = x.ln() + forward_acc[pos] + backward_acc[pos]);
         lks
     }
-    fn initial_distribution(&self) -> Vec<f64> {
+    pub fn initial_distribution(&self) -> Vec<f64> {
         let mut probs: Vec<_> = (0..self.model.states as isize)
             .map(|s| {
                 // We should multiply the scaling factors,
@@ -852,7 +849,7 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
     // Return [from * states + to] = Pr{from->to},
     // because it is much easy to normalize.
     // TODO: This code just sucks. If requries a lot of memory, right?
-    fn transition_probability(&self) -> Vec<f64> {
+    pub fn transition_probability(&self) -> Vec<f64> {
         let states = self.model.states;
         // Log probability.
         let (forward_acc, backward_acc) = self.accumlate_factors();
@@ -862,14 +859,14 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
             let forward_factor: f64 = forward_acc[i + 1];
             let backward1: f64 = backward_acc[i + 1];
             let backward2: f64 = backward_acc[i];
+            let i = i as isize;
             for j in get_range(self.radius, self.query.len() as isize, center) {
                 let j_orig = j + center - self.radius;
                 let y = self.query[j_orig];
-                let i = i as isize;
                 let j_next = j + center - next;
                 for from in 0..states {
+                    let forward = log(&self.forward[(i, j, from as isize)]) + forward_factor;
                     for to in 0..states {
-                        let forward = log(&self.forward[(i, j, from as isize)]) + forward_factor;
                         let transition = log(&self.model.transition(from, to));
                         let backward_match = self.model.observe(from, x, y)
                             * self.backward[(i + 1, j_next + 1, to as isize)];
@@ -916,7 +913,7 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
 
 impl<'a, 'b, 'c> ProfileBanded<'a, 'b, 'c, Cond> {
     // [state << 6 | x | y] = Pr{(x,y)|state}
-    fn observation_probability(&self) -> Vec<f64> {
+    pub fn observation_probability(&self) -> Vec<f64> {
         // This is log_probabilities.
         let states = self.model.states;
         let (forward_acc, backward_acc) = self.accumlate_factors();

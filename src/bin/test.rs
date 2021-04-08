@@ -6,8 +6,8 @@ fn main() -> std::io::Result<()> {
     let coverage: usize = 20;
     let error_rate: f64 = 0.15;
     let prof = gen_seq::PROFILE.norm().mul(error_rate);
-    let len: usize = 500;
-    let radius = 100;
+    let len: usize = 2000;
+    let radius = 50;
     let model = {
         let mut rng: rand_xoshiro::Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(320);
         let template: Vec<_> = gen_seq::generate_seq(&mut rng, len);
@@ -41,7 +41,6 @@ fn main() -> std::io::Result<()> {
                     len, seed, coverage, error_rate, time, dist,
                 );
             }
-            //     0
             // })
             // .collect();
             // Old
