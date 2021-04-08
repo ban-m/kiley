@@ -88,7 +88,7 @@ impl<T: HMMType> std::fmt::Display for GPHMM<T> {
         for from in 0..self.states {
             let probs: Vec<_> = (0..self.states)
                 .map(|to| self.transition(from, to))
-                .map(|x| format!("{:.2}", x))
+                .map(|x| format!("{:.3}", x))
                 .collect();
             writeln!(f, "{}", probs.join("\t"))?;
         }
@@ -1264,15 +1264,16 @@ impl<'a, 'b, 'c, T: HMMType> Profile<'a, 'b, 'c, T> {
     fn transition_probability(&self) -> Vec<f64> {
         let states = self.model.states;
         // Log probability.
-        let mut probs: Vec<_> = vec![vec![]; self.model.states.pow(2)];
-        for (i, &x) in self.template.iter().enumerate() {
-            let forward_factor: f64 = self.forward_factor.iter().map(log).take(i + 1).sum();
-            let backward1: f64 = self.backward_factor.iter().map(log).skip(i + 1).sum();
-            let backward2: f64 = self.backward_factor.iter().map(log).skip(i).sum();
-            for (j, &y) in self.query.iter().enumerate() {
-                let (i, j) = (i as isize, j as isize);
-                for from in 0..states {
-                    for to in 0..states {
+        let mut probs: Vec<_> = vec![0f64; self.model.states.pow(2)];
+        for from in 0..states {
+            for to in 0..states {
+                let mut log_probs = vec![];
+                for (i, &x) in self.template.iter().enumerate() {
+                    let forward_factor: f64 = self.forward_factor.iter().map(log).take(i + 1).sum();
+                    let backward1: f64 = self.backward_factor.iter().map(log).skip(i + 1).sum();
+                    let backward2: f64 = self.backward_factor.iter().map(log).skip(i).sum();
+                    for (j, &y) in self.query.iter().enumerate() {
+                        let (i, j) = (i as isize, j as isize);
                         let forward = log(&self.forward[(i, j, from as isize)]) + forward_factor;
                         let transition = log(&self.model.transition(from, to));
                         let backward_match = self.model.observe(from, x, y)
@@ -1286,25 +1287,21 @@ impl<'a, 'b, 'c, T: HMMType> Profile<'a, 'b, 'c, T> {
                             log(&backward_del) + backward1,
                             log(&backward_ins) + backward2,
                         ];
-                        probs[from * states + to].push(forward + transition + logsumexp(&backward));
+                        log_probs.push(forward + transition + logsumexp(&backward));
                     }
                 }
+                probs[from * states + to] = logsumexp(&log_probs);
             }
         }
         // Normalizing.
+        // These are log-probability.
+        probs.chunks_mut(states).for_each(|sums| {
+            let sum = logsumexp(&sums);
+            // This is normal value.
+            sums.iter_mut().for_each(|x| *x = (*x - sum).exp());
+            assert!((1f64 - sums.iter().sum::<f64>()) < 0.001);
+        });
         probs
-            .chunks_mut(states)
-            .flat_map(|row| {
-                // These are log-probability.
-                let mut sums: Vec<_> = row.iter().map(|xs| logsumexp(&xs)).collect();
-                // This is also log.
-                let sum = logsumexp(&sums);
-                // This is normal value.
-                sums.iter_mut().for_each(|x| *x = (*x - sum).exp());
-                assert!((1f64 - sums.iter().sum::<f64>()) < 0.001);
-                sums
-            })
-            .collect()
     }
 }
 impl<'a, 'b, 'c> Profile<'a, 'b, 'c, Full> {

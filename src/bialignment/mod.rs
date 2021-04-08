@@ -677,13 +677,20 @@ fn edit_dist_banded_dp_post(xs: &PadSeq, ys: &PadSeq, radius: usize, centers: &[
 
 pub fn polish_until_converge_banded<T: std::borrow::Borrow<[u8]>>(
     template: &[u8],
-    xs: &[T],
+    reads: &[T],
     radius: usize,
 ) -> Option<Vec<u8>> {
-    let xs: Vec<_> = xs.iter().map(|x| PadSeq::new(x.borrow())).collect();
+    let orig_len = reads.len();
     let mut polished = PadSeq::new(template);
     let mut start_position = 0;
-    let mut total_edit_dist = UPPER_BOUND;
+    let (mut total_edit_dist, mut xs) = (0, vec![]);
+    for x in reads.iter().map(|x| x.borrow()) {
+        if let Some((dist, _)) = edit_dist_banded(&template, x, radius) {
+            total_edit_dist += dist;
+            xs.push(PadSeq::new(x));
+        }
+    }
+    debug!("SEQ\t{}\t{}", orig_len, xs.len());
     while let Some((imp, pos, dist)) = polish_by_flip_banded(&polished, &xs, start_position, radius)
     {
         start_position = pos;

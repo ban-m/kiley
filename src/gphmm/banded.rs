@@ -282,6 +282,10 @@ impl<M: HMMType> GPHMM<M> {
             dp[(0, radius, s as isize)] = x;
         }
         for j in radius + 1..2 * radius + 1 {
+            let j_orig = j - radius - 1;
+            if !(0..ys.len() as isize).contains(&j_orig) {
+                continue;
+            }
             let y = ys[j - radius - 1];
             for s in 0..self.states {
                 let trans: f64 = (0..self.states)
@@ -475,12 +479,6 @@ impl<M: HMMType> GPHMM<M> {
                 x
             })
             .unwrap();
-        // let summarized = std::time::Instant::now();
-        // debug!(
-        //     "PS\t{}\t{}",
-        //     (prof - start).as_millis(),
-        //     (summarized - prof).as_millis()
-        // );
         profile_with_diff
             .chunks_exact(9)
             .enumerate()
@@ -492,16 +490,15 @@ impl<M: HMMType> GPHMM<M> {
                     .enumerate()
                     .filter(|&(_, &lk)| total_lk + diff < lk)
                     .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
-                    // .find(|(_, &lk)| total_lk + diff < lk)
                     .map(|(op, lk)| {
                         let (op, base) = (op / 4, op % 4);
                         let op = [Op::Match, Op::Ins, Op::Del][op];
-                        debug!("LK\t{:.3}->{:.3}", total_lk, lk);
                         (pos, op, base as u8, lk)
                     })
             })
             .max_by(|x, y| (x.3).partial_cmp(&(y.3)).unwrap())
-            .map(|(pos, op, base, _lk)| {
+            .map(|(pos, op, base, lk)| {
+                debug!("LK\t{:.3}->{:.3}", total_lk, lk);
                 let mut template = template.clone();
                 match op {
                     Op::Match => template[pos as isize] = base,
@@ -853,55 +850,53 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
         let states = self.model.states;
         // Log probability.
         let (forward_acc, backward_acc) = self.accumlate_factors();
-        let mut probs: Vec<_> = vec![vec![]; self.model.states.pow(2)];
-        for (i, &x) in self.template.iter().enumerate() {
-            let (center, next) = (self.centers[i], self.centers[i + 1]);
-            let forward_factor: f64 = forward_acc[i + 1];
-            let backward1: f64 = backward_acc[i + 1];
-            let backward2: f64 = backward_acc[i];
-            let i = i as isize;
-            for j in get_range(self.radius, self.query.len() as isize, center) {
-                let j_orig = j + center - self.radius;
-                let y = self.query[j_orig];
-                let j_next = j + center - next;
-                for from in 0..states {
-                    let forward = log(&self.forward[(i, j, from as isize)]) + forward_factor;
-                    for to in 0..states {
-                        let transition = log(&self.model.transition(from, to));
+        let mut probs: Vec<_> = vec![0f64; self.model.states.pow(2)];
+        for from in 0..states {
+            for to in 0..states {
+                let transition = log(&self.model.transition(from, to));
+                let mut lks = vec![];
+                for (i, &x) in self.template.iter().enumerate() {
+                    let (center, next) = (self.centers[i], self.centers[i + 1]);
+                    let forward_factor: f64 = forward_acc[i + 1];
+                    let backward1: f64 = backward_acc[i + 1];
+                    let backward2: f64 = backward_acc[i];
+                    let i = i as isize;
+                    for j in get_range(self.radius, self.query.len() as isize, center) {
+                        let j_orig = j + center - self.radius;
+                        let y = self.query[j_orig];
+                        let j_next = j + center - next;
+                        let forward = log(&self.forward[(i, j, from as isize)]) + forward_factor;
                         let backward_match = self.model.observe(from, x, y)
                             * self.backward[(i + 1, j_next + 1, to as isize)];
                         let backward_del = self.model.observe(from, x, GAP)
                             * self.backward[(i + 1, j_next, to as isize)];
                         let backward_ins = self.model.observe(from, GAP, y)
                             * self.backward[(i, j + 1, to as isize)];
-                        let backward = [
-                            log(&backward_match) + backward1,
-                            log(&backward_del) + backward1,
-                            log(&backward_ins) + backward2,
-                        ];
-                        probs[from * states + to].push(forward + transition + logsumexp(&backward));
+                        let backward = backward_match
+                            + backward_del
+                            + backward_ins * (backward2 - backward1).exp();
+                        let backward = backward.ln() + backward1;
+                        if EP < forward + transition + backward {
+                            lks.push(forward + transition + backward);
+                        }
                     }
                 }
+                probs[from * states + to] = logsumexp(&lks);
             }
         }
         // Normalizing.
+        // These are log-probability.
+        probs.chunks_mut(states).for_each(|sums| {
+            let sum = logsumexp(&sums);
+            // This is normal value.
+            if EP < sum {
+                sums.iter_mut().for_each(|x| *x = (*x - sum).exp());
+                assert!((1f64 - sums.iter().sum::<f64>()) < 0.001);
+            } else {
+                sums.iter_mut().for_each(|x| *x = 0f64);
+            }
+        });
         probs
-            .chunks_mut(states)
-            .flat_map(|row| {
-                // These are log-probability.
-                let mut sums: Vec<_> = row.iter().map(|xs| logsumexp(&xs)).collect();
-                // This is also log.
-                let sum = logsumexp(&sums);
-                // This is normal value.
-                if EP < sum {
-                    sums.iter_mut().for_each(|x| *x = (*x - sum).exp());
-                    assert!((1f64 - sums.iter().sum::<f64>()) < 0.001);
-                } else {
-                    sums.iter_mut().for_each(|x| *x = 0f64);
-                }
-                sums
-            })
-            .collect()
     }
 }
 

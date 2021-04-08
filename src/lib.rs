@@ -27,7 +27,7 @@ pub struct PolishConfig<M: HMMType> {
 
 impl PolishConfig<Cond> {
     pub fn new(radius: usize, chunk_size: usize, max_coverage: usize) -> Self {
-        let phmm = GPHMM::<Cond>::new_three_state(0.9, 0.05, 0.05, 0.9);
+        let phmm = GPHMM::<Cond>::new_three_state(0.9, 0.05, 0.1, 0.95);
         Self {
             radius,
             phmm,
@@ -73,19 +73,24 @@ pub fn polish(
             (id.clone(), slots)
         })
         .collect();
+    let reflen: HashMap<String, usize> = template
+        .iter()
+        .map(|(id, seq)| (id.clone(), seq.len()))
+        .collect();
     let queries: HashMap<String, _> = queries
         .iter()
         .map(|(x, y)| (x.to_string(), y.as_slice()))
         .collect();
     // Record alignments.
-    for aln in alignments {
+    for aln in alignments.iter().filter(|a| 0 < a.pos()) {
         let query = queries.get(aln.q_name());
         let ref_slots = chunks.get_mut(aln.r_name());
         let (query, ref_slots) = match (query, ref_slots) {
             (Some(q), Some(r)) => (q, r),
             _ => continue,
         };
-        let split_read = split_query(query, aln, config);
+        let reflen = *reflen.get(aln.r_name()).unwrap();
+        let split_read = split_query(query, aln, reflen, config);
         for (position, seq) in split_read {
             ref_slots[position].push(seq);
         }
@@ -93,16 +98,16 @@ pub fn polish(
     debug!("Record alignemnts.");
     // Model fitting.
     let training: Vec<(&[u8], &[Vec<u8>])> = {
-        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(config.radius as u64);
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(config.chunk_size as u64);
         let mut training = vec![];
-        for _ in 0..10 {
+        for _ in 0..5 {
             let (id, seq) = template.choose(&mut rng).unwrap();
             let chunks = chunks.get(id).unwrap();
             let i = rng.gen_range(0..chunks.len());
             let queries = chunks[i].as_slice();
             if 5 < queries.len() {
                 let start = i * config.chunk_size;
-                let end = start + config.chunk_size;
+                let end = (start + config.chunk_size).min(seq.len());
                 let draft: &[u8] = &seq[start..end];
                 training.push((draft, queries));
             }
@@ -117,18 +122,24 @@ pub fn polish(
         .iter()
         .map(|(id, seq)| {
             let chunks = chunks.get(id).unwrap();
+            debug!("CHUNKS\t{}", chunks.len());
             let polished: Vec<_> = chunks
                 .par_iter()
                 .enumerate()
-                .take(10)
                 .filter_map(|(i, queries)| {
                     let start = i * config.chunk_size;
-                    let end = start + config.chunk_size;
+                    let end = (start + config.chunk_size).min(seq.len());
                     let draft = &seq[start..end];
                     if queries.len() < 5 {
                         return Some(draft.to_vec());
                     }
-                    model.correct_until_convergence_banded(&draft, &queries, config.radius)
+                    debug!("POLISH\tSTART\t{}\t{}\t{}", i, queries.len(), draft.len());
+                    let start = std::time::Instant::now();
+                    let cons =
+                        model.correct_until_convergence_banded(&draft, &queries, config.radius);
+                    let end = std::time::Instant::now();
+                    debug!("POLISH\tEND\t{}\t{}", i, (end - start).as_millis());
+                    cons
                 })
                 .flat_map(std::convert::identity)
                 .collect();
@@ -142,6 +153,7 @@ pub fn polish(
 fn split_query<M: HMMType>(
     query: &[u8],
     aln: &sam::Record,
+    reflen: usize,
     config: &PolishConfig<M>,
 ) -> Vec<(usize, Vec<u8>)> {
     let mut cigar = aln.cigar();
@@ -154,9 +166,21 @@ fn split_query<M: HMMType>(
     } else {
         revcmp(query)
     };
-    let (mut ref_position, mut query_position) = (aln.pos(), 0);
-    let chunk_start = (ref_position / config.chunk_size + 1) * config.chunk_size;
-    let initial_chunk_id = ref_position / config.chunk_size + 1;
+    let (mut ref_position, mut query_position) = (aln.pos() - 1, 0);
+    let initial_chunk_id = if ref_position % config.chunk_size == 0 {
+        ref_position / config.chunk_size
+    } else {
+        ref_position / config.chunk_size + 1
+    };
+    let chunk_start = initial_chunk_id * config.chunk_size;
+    // Seek by first clippings.
+    match cigar.last().unwrap() {
+        sam::Op::SoftClip(l) | sam::Op::HardClip(l) => {
+            query_position += l;
+            cigar.pop();
+        }
+        _ => {}
+    }
     // Seek until reached to the chunk_start.
     while ref_position < chunk_start {
         if let Some(op) = cigar.pop() {
@@ -203,7 +227,8 @@ fn split_query<M: HMMType>(
         }
     }
     assert_eq!(ref_position, chunk_start);
-    let chunks = seq_into_subchunks(&query[query_position..], config.chunk_size, cigar);
+    let query = &query[query_position..];
+    let chunks = seq_into_subchunks(query, config.chunk_size, cigar, reflen - ref_position);
     chunks
         .into_iter()
         .enumerate()
@@ -212,7 +237,12 @@ fn split_query<M: HMMType>(
 }
 
 // Cigar is reversed. So, by poping the lemente, we can read the alignment.
-fn seq_into_subchunks(query: &[u8], len: usize, mut cigar: Vec<sam::Op>) -> Vec<Vec<u8>> {
+fn seq_into_subchunks(
+    query: &[u8],
+    len: usize,
+    mut cigar: Vec<sam::Op>,
+    reflen: usize,
+) -> Vec<Vec<u8>> {
     use sam::Op;
     let (mut q_pos, mut r_pos) = (0, 0);
     let mut target = len;
@@ -249,6 +279,10 @@ fn seq_into_subchunks(query: &[u8], len: usize, mut cigar: Vec<sam::Op>) -> Vec<
         if target == r_pos {
             chunk_position.push(q_pos);
             target += len;
+        } else if reflen == r_pos {
+            chunk_position.push(q_pos);
+            // We should break here, as there would be some junk trailing clips.
+            break;
         }
     }
     chunk_position
@@ -281,8 +315,8 @@ pub fn fit_model_from_multiple(
     let mut phmm = config.phmm.clone();
     let get_lk = |model: &GPHMM<Cond>, drafts: &[PadSeq]| -> f64 {
         queries
-            .iter()
-            .zip(drafts.iter())
+            .par_iter()
+            .zip(drafts.par_iter())
             .map(|(qs, d)| {
                 qs.iter()
                     .filter_map(|q| model.likelihood_banded_inner(d, q, config.radius))
@@ -290,7 +324,9 @@ pub fn fit_model_from_multiple(
             })
             .sum()
     };
+    debug!("Start fitting model.");
     let mut lk = get_lk(&phmm, &drafts);
+    debug!("Initial LK:{:.3}", lk);
     loop {
         let new_drafts = loop {
             let new_phmm = fit_multiple_inner(&phmm, &drafts, &queries, config);
@@ -298,10 +334,11 @@ pub fn fit_model_from_multiple(
             debug!("{:.3}->{:.3}", lk, new_lk);
             if new_lk - lk < 0.1f64 {
                 let new_drafts = drafts
-                    .iter()
-                    .zip(queries.iter())
+                    .par_iter()
+                    .zip(queries.par_iter())
                     .map(|(d, qs)| {
-                        phmm.correction_until_convergence_banded_inner(d, qs, config.radius)
+                        new_phmm
+                            .correction_until_convergence_banded_inner(d, qs, config.radius)
                             .unwrap()
                     })
                     .collect();
@@ -327,21 +364,25 @@ fn fit_multiple_inner(
 ) -> GPHMM<Cond> {
     use gphmm::banded::ProfileBanded;
     let radius = config.radius as isize;
-    let mut profiles = vec![];
-    for (qs, d) in queries.iter().zip(drafts) {
-        profiles.extend(
+    let profiles: Vec<_> = queries
+        .par_iter()
+        .zip(drafts.par_iter())
+        .flat_map(|(qs, d)| {
             qs.iter()
-                .filter_map(|q| ProfileBanded::new(model, d, q, radius)),
-        );
-    }
+                .filter_map(|q| ProfileBanded::new(model, d, q, radius))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    debug!("Profiled {} alignments.", profiles.len());
     let initial_distribution = model.estimate_initial_distribution_banded(&profiles);
     let transition_matrix = model.estimate_transition_prob_banded(&profiles);
     let observation_matrix = model.estimate_observation_prob_banded(&profiles);
+    debug!("Re-estimated parameters.");
     GPHMM::from_raw_elements(
         model.states(),
         transition_matrix,
-        initial_distribution,
         observation_matrix,
+        initial_distribution,
     )
 }
 

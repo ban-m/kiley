@@ -43,7 +43,7 @@ fn subcommand_polish() -> App<'static, 'static> {
             Arg::with_name("radius")
                 .long("radius")
                 .takes_value(true)
-                .default_value(&"200")
+                .default_value(&"100")
                 .help("Band width. Increase for erroneos reads."),
         )
         .arg(
@@ -66,6 +66,14 @@ fn subcommand_polish() -> App<'static, 'static> {
                 .takes_value(true)
                 .default_value(&"32389")
                 .help("Seed"),
+        )
+        .arg(
+            Arg::with_name("threads")
+                .long("threads")
+                .short("t")
+                .takes_value(true)
+                .default_value("1")
+                .help("Number of threads"),
         )
 }
 
@@ -109,6 +117,14 @@ fn subcommand_consensus() -> App<'static, 'static> {
                 .takes_value(true)
                 .default_value(&"10")
                 .help("Repetition number."),
+        )
+        .arg(
+            Arg::with_name("threads")
+                .long("threads")
+                .short("t")
+                .takes_value(true)
+                .default_value("1")
+                .help("Number of threads"),
         )
 }
 
@@ -194,6 +210,16 @@ fn main() -> std::io::Result<()> {
             _ => "trace",
         };
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level)).init();
+        let threads: usize = sub_m
+            .value_of("threads")
+            .and_then(|x| x.parse().ok())
+            .unwrap();
+        if let Err(why) = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_global()
+        {
+            debug!("{:?} If you run `pipeline` module, this is Harmless.", why);
+        }
     }
     debug!("Start");
     match matches.subcommand() {
