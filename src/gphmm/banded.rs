@@ -56,9 +56,31 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
         }
         buffer
     }
+    pub fn par_estimate_observation_prob_banded(
+        &self,
+        profiles: &[ProfileBanded<Cond>],
+    ) -> Vec<f64> {
+        let mut buffer = profiles
+            .par_iter()
+            .map(|prf| prf.observation_probability())
+            .fold(|| vec![0f64; ((self.states - 1) << 6) + 8 * 8], Self::merge)
+            .reduce(|| vec![0f64; ((self.states - 1) << 6) + 8 * 8], Self::merge);
+        // Normalize (states << 6) | 0b_i__000 - (state << 6) | 0b_i_111.
+        for probs in buffer.chunks_mut(8) {
+            let sum: f64 = probs.iter().sum();
+            if 0.00001 < sum {
+                probs.iter_mut().for_each(|x| *x /= sum);
+            }
+        }
+        buffer
+    }
 }
 
 impl<M: HMMType> GPHMM<M> {
+    fn merge(mut acc: Vec<f64>, xs: Vec<f64>) -> Vec<f64> {
+        acc.iter_mut().zip(xs.iter()).for_each(|(a, x)| *a += x);
+        acc
+    }
     /// Banded version of `align` method. Return None if the band width is too small to
     /// fail to detect a band from (0,0) to (xs.len(),ys.len()).
     pub fn align_banded(
@@ -339,7 +361,7 @@ impl<M: HMMType> GPHMM<M> {
             let second_total = dp.total(i);
             dp.div(i, second_total);
             norm_factors.push(first_total * second_total);
-            // Find maximum position.
+            // Find maximum position? No, use naive band.
             let next_center = (i * ys.len() / xs.len()) as isize;
             centers.push(next_center);
         }
@@ -471,13 +493,18 @@ impl<M: HMMType> GPHMM<M> {
         }
         let total_lk = profiles.iter().map(|prof| prof.lk()).sum::<f64>();
         let diff = 0.001;
+        fn merge(mut xs: Vec<f64>, ys: Vec<f64>) -> Vec<f64> {
+            xs.iter_mut().zip(ys).for_each(|(x, y)| *x += y);
+            xs
+        }
+        // let profile_with_diff = profiles
+        //     .par_iter()
+        //     .map(|prf| prf.to_modification_table())
+        //     .reduce(|| vec![0f64; 9 * (template.len() + 1)], merge);
         let profile_with_diff = profiles
             .iter()
             .map(|prf| prf.to_modification_table())
-            .reduce(|mut x, y| {
-                x.iter_mut().zip(y).for_each(|(x, y)| *x += y);
-                x
-            })
+            .reduce(merge)
             .unwrap();
         profile_with_diff
             .chunks_exact(9)
@@ -521,6 +548,19 @@ impl<M: HMMType> GPHMM<M> {
         buffer.iter_mut().for_each(|x| *x /= sum);
         buffer
     }
+    pub fn par_estimate_initial_distribution_banded(
+        &self,
+        profiles: &[ProfileBanded<M>],
+    ) -> Vec<f64> {
+        let mut buffer = profiles
+            .par_iter()
+            .map(|prf| prf.initial_distribution())
+            .fold(|| vec![0f64; self.states], Self::merge)
+            .reduce(|| vec![0f64; self.states], Self::merge);
+        let sum: f64 = buffer.iter().sum();
+        buffer.iter_mut().for_each(|x| *x /= sum);
+        buffer
+    }
     pub fn estimate_transition_prob_banded(&self, profiles: &[ProfileBanded<M>]) -> Vec<f64> {
         let states = self.states;
         // [from * states + to] = Pr(from->to)
@@ -529,6 +569,28 @@ impl<M: HMMType> GPHMM<M> {
         for prob in profiles.iter().map(|prf| prf.transition_probability()) {
             buffer.iter_mut().zip(prob).for_each(|(x, y)| *x += y);
         }
+        // Normalize.
+        for row in buffer.chunks_mut(states) {
+            let sum: f64 = row.iter().sum();
+            row.iter_mut().for_each(|x| *x /= sum);
+        }
+        // Transpose. [to * states + from] = Pr{from->to}.
+        (0..states * states)
+            .map(|idx| {
+                let (to, from) = (idx / states, idx % states);
+                buffer[from * states + to]
+            })
+            .collect()
+    }
+    pub fn par_estimate_transition_prob_banded(&self, profiles: &[ProfileBanded<M>]) -> Vec<f64> {
+        let states = self.states;
+        // [from * states + to] = Pr(from->to)
+        // Because it is easier to normalize.
+        let mut buffer = profiles
+            .par_iter()
+            .map(|prf| prf.transition_probability())
+            .fold(|| vec![0f64; states * states], Self::merge)
+            .reduce(|| vec![0f64; states * states], Self::merge);
         // Normalize.
         for row in buffer.chunks_mut(states) {
             let sum: f64 = row.iter().sum();

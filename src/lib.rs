@@ -22,30 +22,44 @@ pub struct PolishConfig<M: HMMType> {
     radius: usize,
     phmm: GPHMM<M>,
     chunk_size: usize,
+    overlap: usize,
     max_coverage: usize,
+    seed: u64,
 }
 
 impl PolishConfig<Cond> {
-    pub fn new(radius: usize, chunk_size: usize, max_coverage: usize) -> Self {
-        let phmm = GPHMM::<Cond>::new_three_state(0.9, 0.05, 0.1, 0.95);
+    pub fn new(
+        radius: usize,
+        chunk_size: usize,
+        max_coverage: usize,
+        overlap: usize,
+        seed: u64,
+    ) -> Self {
+        let phmm = GPHMM::<Cond>::new_three_state(0.9, 0.05, 0.1, 0.98);
         Self {
             radius,
             phmm,
             chunk_size,
             max_coverage,
+            seed,
+            overlap,
         }
     }
     pub fn with_model(
         radius: usize,
         chunk_size: usize,
         max_coverage: usize,
+        seed: u64,
+        overlap: usize,
         phmm: GPHMM<Cond>,
     ) -> Self {
         Self {
             radius,
             phmm,
             chunk_size,
+            overlap,
             max_coverage,
+            seed,
         }
     }
 }
@@ -60,14 +74,115 @@ pub fn polish(
     alignments: &[sam::Record],
     config: &PolishConfig<Cond>,
 ) -> Vec<FASTARecord> {
-    use std::collections::HashMap;
+    let chunks = register_all_alignments(template, queries, alignments, config);
+    debug!("Record alignemnts.");
+    // Model fitting.
+    let training: Vec<(&[u8], &[Vec<u8>])> = {
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(config.seed as u64);
+        let mut training = vec![];
+        for _ in 0..5 {
+            let (id, seq) = template.choose(&mut rng).unwrap();
+            let chunks = chunks.get(id).unwrap();
+            let i = rng.gen_range(0..chunks.len());
+            let queries = chunks[i].as_slice();
+            if 5 < queries.len() {
+                let start = i * (config.chunk_size - config.overlap);
+                let end = (start + config.chunk_size).min(seq.len());
+                let draft: &[u8] = &seq[start..end];
+                training.push((draft, queries));
+            }
+        }
+        training
+    };
+    debug!("Fit Model...");
+    let model = fit_model_from_multiple(&training, &config);
+    debug!("Fit Model:{}", model);
+    // Polishing.
+    template
+        .iter()
+        .map(|(id, seq)| {
+            let chunks = chunks.get(id).unwrap();
+            debug!("CHUNKS\t{}", chunks.len());
+            let polished: Vec<_> = chunks
+                .par_iter()
+                .enumerate()
+                .filter_map(|(i, queries)| {
+                    let start = i * (config.chunk_size - config.overlap);
+                    let end = (start + config.chunk_size).min(seq.len());
+                    let draft = &seq[start..end];
+                    if queries.len() < 5 {
+                        return Some(draft.to_vec());
+                    }
+                    debug!("POLISH\tSTART\t{}\t{}\t{}", i, queries.len(), draft.len());
+                    let start = std::time::Instant::now();
+                    let cons =
+                        model.correct_until_convergence_banded(&draft, &queries, config.radius);
+                    let end = std::time::Instant::now();
+                    debug!("POLISH\tEND\t{}\t{}", i, (end - start).as_millis());
+                    cons
+                })
+                .fold(Vec::new, |cons: Vec<u8>, chunk: Vec<u8>| {
+                    merge(cons, chunk, config.overlap)
+                })
+                .reduce(Vec::new, |cons: Vec<u8>, chunk: Vec<u8>| {
+                    merge(cons, chunk, config.overlap)
+                });
+            (id.clone(), polished)
+        })
+        .collect()
+}
+
+pub fn polish_by<F>(
+    template: &[FASTARecord],
+    queries: &[FASTARecord],
+    alignments: &[sam::Record],
+    consensus: F,
+    config: &PolishConfig<Cond>,
+) -> Vec<FASTARecord>
+where
+    F: Fn(&[u8], &[Vec<u8>]) -> Option<Vec<u8>>,
+{
+    let chunks = register_all_alignments(template, queries, alignments, config);
+    debug!("Record alignemnts.");
+    template
+        .iter()
+        .map(|(id, seq)| {
+            let chunks = chunks.get(id).unwrap();
+            let polished: Vec<_> = chunks
+                .iter()
+                .enumerate()
+                .filter_map(|(i, queries)| {
+                    let start = i * (config.chunk_size - config.overlap);
+                    let end = (start + config.chunk_size).min(seq.len());
+                    let draft = &seq[start..end];
+                    if queries.len() < 5 {
+                        return Some(draft.to_vec());
+                    }
+                    consensus(&draft, &queries)
+                })
+                .fold(Vec::new(), |cons: Vec<u8>, chunk: Vec<u8>| {
+                    merge(cons, chunk, config.overlap)
+                });
+            (id.clone(), polished)
+        })
+        .collect()
+}
+
+use std::collections::HashMap;
+fn register_all_alignments(
+    template: &[FASTARecord],
+    queries: &[FASTARecord],
+    alignments: &[sam::Record],
+    config: &PolishConfig<Cond>,
+) -> HashMap<String, Vec<Vec<Vec<u8>>>> {
     let mut chunks: HashMap<String, Vec<Vec<Vec<u8>>>> = template
         .iter()
         .map(|(id, seq)| {
-            let len = if seq.len() % config.chunk_size == 0 {
-                seq.len() / config.chunk_size
+            let break_len = config.chunk_size - config.overlap;
+            let len = if seq.len() % break_len == 0 {
+                seq.len() / break_len
             } else {
-                seq.len() / config.chunk_size + 1
+                seq.len() / break_len + 1
             };
             let slots: Vec<_> = vec![vec![]; len];
             (id.clone(), slots)
@@ -95,57 +210,101 @@ pub fn polish(
             ref_slots[position].push(seq);
         }
     }
-    debug!("Record alignemnts.");
-    // Model fitting.
-    let training: Vec<(&[u8], &[Vec<u8>])> = {
-        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(config.chunk_size as u64);
-        let mut training = vec![];
-        for _ in 0..5 {
-            let (id, seq) = template.choose(&mut rng).unwrap();
-            let chunks = chunks.get(id).unwrap();
-            let i = rng.gen_range(0..chunks.len());
-            let queries = chunks[i].as_slice();
-            if 5 < queries.len() {
-                let start = i * config.chunk_size;
-                let end = (start + config.chunk_size).min(seq.len());
-                let draft: &[u8] = &seq[start..end];
-                training.push((draft, queries));
+    chunks
+}
+
+fn merge(mut cons: Vec<u8>, mut chunk: Vec<u8>, overlap: usize) -> Vec<u8> {
+    if cons.is_empty() {
+        chunk
+    } else {
+        let split_len = 2 * overlap;
+        let cons_trailing = cons.split_off(cons.len() - split_len);
+        let chunk_trailing = chunk.split_off(split_len);
+        let merged_seq = merge_seq(&cons_trailing, &chunk);
+        cons.extend(merged_seq);
+        cons.extend(chunk_trailing);
+        cons
+    }
+}
+
+//Marge two sequence. For each error, we choose the above sequcne if we are in the first half, vise varsa.
+fn merge_seq(above: &[u8], below: &[u8]) -> Vec<u8> {
+    let (_, ops) = overlap_aln(above, below);
+    let (mut a_pos, mut b_pos) = (0, 0);
+    let mut seq = vec![];
+    for op in ops {
+        match op {
+            EditOp::Del => {
+                if a_pos == 0 || a_pos < above.len() / 2 {
+                    seq.push(above[a_pos]);
+                }
+                a_pos += 1;
+            }
+            EditOp::Ins => {
+                if a_pos == above.len() || above.len() / 2 < a_pos {
+                    seq.push(below[b_pos]);
+                }
+                b_pos += 1;
+            }
+            EditOp::Match => {
+                if a_pos < above.len() / 2 {
+                    seq.push(above[a_pos]);
+                } else {
+                    seq.push(below[b_pos]);
+                }
+                a_pos += 1;
+                b_pos += 1;
             }
         }
-        training
-    };
-    debug!("Fit Model...");
-    let model = fit_model_from_multiple(&training, &config);
-    debug!("Fit Model:{}", model);
-    // Polishing.
-    template
-        .iter()
-        .map(|(id, seq)| {
-            let chunks = chunks.get(id).unwrap();
-            debug!("CHUNKS\t{}", chunks.len());
-            let polished: Vec<_> = chunks
-                .par_iter()
-                .enumerate()
-                .filter_map(|(i, queries)| {
-                    let start = i * config.chunk_size;
-                    let end = (start + config.chunk_size).min(seq.len());
-                    let draft = &seq[start..end];
-                    if queries.len() < 5 {
-                        return Some(draft.to_vec());
-                    }
-                    debug!("POLISH\tSTART\t{}\t{}\t{}", i, queries.len(), draft.len());
-                    let start = std::time::Instant::now();
-                    let cons =
-                        model.correct_until_convergence_banded(&draft, &queries, config.radius);
-                    let end = std::time::Instant::now();
-                    debug!("POLISH\tEND\t{}\t{}", i, (end - start).as_millis());
-                    cons
-                })
-                .flat_map(std::convert::identity)
-                .collect();
-            (id.clone(), polished)
-        })
-        .collect()
+    }
+    assert_eq!(a_pos, above.len());
+    assert_eq!(b_pos, below.len());
+    seq
+}
+
+fn overlap_aln(xs: &[u8], ys: &[u8]) -> (i32, Vec<EditOp>) {
+    let mut dp = vec![vec![0; ys.len() + 1]; xs.len() + 1];
+    for (i, x) in xs.iter().enumerate().map(|(i, &x)| (i + 1, x)) {
+        for (j, y) in ys.iter().enumerate().map(|(j, &y)| (j + 1, y)) {
+            let mat = if x == y { 1 } else { -1 };
+            dp[i][j] = (dp[i - 1][j - 1] + mat)
+                .max(dp[i - 1][j] - 1)
+                .max(dp[i][j - 1] - 1);
+        }
+    }
+    let (score, (mut i, mut j)) = (1..ys.len() + 1)
+        .map(|j| (xs.len(), j))
+        .map(|(i, j)| (dp[i][j], (i, j)))
+        .max_by_key(|x| x.0)
+        .unwrap();
+    let mut ops: Vec<_> = std::iter::repeat(EditOp::Ins).take(ys.len() - j).collect();
+    while 0 < i && 0 < j {
+        let mat = if xs[i - 1] == ys[j - 1] { 1 } else { -1 };
+        if dp[i][j] == dp[i - 1][j - 1] + mat {
+            ops.push(EditOp::Match);
+            i -= 1;
+            j -= 1;
+        } else if dp[i][j] == dp[i - 1][j] - 1 {
+            ops.push(EditOp::Del);
+            i -= 1;
+        } else if dp[i][j] == dp[i][j - 1] - 1 {
+            ops.push(EditOp::Ins);
+            j -= 1;
+        } else {
+            unreachable!()
+        }
+    }
+    ops.extend(std::iter::repeat(EditOp::Del).take(i));
+    ops.extend(std::iter::repeat(EditOp::Ins).take(j));
+    ops.reverse();
+    (score, ops)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditOp {
+    Match,
+    Ins,
+    Del,
 }
 
 // Split query into (chunk-id, aligned seq)-array.
@@ -156,9 +315,21 @@ fn split_query<M: HMMType>(
     reflen: usize,
     config: &PolishConfig<M>,
 ) -> Vec<(usize, Vec<u8>)> {
-    let mut cigar = aln.cigar();
-    cigar.reverse();
-    if cigar.is_empty() {
+    // 0->match, 1-> ins, 2->del
+    let cigar = aln.cigar();
+    let mut ops: Vec<_> = cigar
+        .iter()
+        .rev()
+        .flat_map(|&op| match op {
+            sam::Op::Align(l) | sam::Op::Match(l) | sam::Op::Mismatch(l) => vec![EditOp::Match; l],
+            sam::Op::HardClip(l) | sam::Op::SoftClip(l) | sam::Op::Insertion(l) => {
+                vec![EditOp::Ins; l]
+            }
+            sam::Op::Deletion(l) => vec![EditOp::Del; l],
+            _ => unreachable!(),
+        })
+        .collect();
+    if ops.is_empty() {
         return vec![];
     }
     let query = if aln.is_forward() {
@@ -167,60 +338,28 @@ fn split_query<M: HMMType>(
         revcmp(query)
     };
     let (mut ref_position, mut query_position) = (aln.pos() - 1, 0);
-    let initial_chunk_id = if ref_position % config.chunk_size == 0 {
-        ref_position / config.chunk_size
+    let break_len = config.chunk_size - config.overlap;
+    let initial_chunk_id = if ref_position % break_len == 0 {
+        ref_position / break_len
     } else {
-        ref_position / config.chunk_size + 1
+        ref_position / break_len + 1
     };
-    let chunk_start = initial_chunk_id * config.chunk_size;
+    let chunk_start = initial_chunk_id * break_len;
     // Seek by first clippings.
-    match cigar.last().unwrap() {
-        sam::Op::SoftClip(l) | sam::Op::HardClip(l) => {
-            query_position += l;
-            cigar.pop();
-        }
-        _ => {}
+    while ops.last() == Some(&EditOp::Ins) {
+        query_position += 1;
+        ops.pop();
     }
     // Seek until reached to the chunk_start.
     while ref_position < chunk_start {
-        if let Some(op) = cigar.pop() {
+        if let Some(op) = ops.pop() {
             match op {
-                sam::Op::Match(l) | sam::Op::Mismatch(l) | sam::Op::Align(l) => {
-                    ref_position += l;
-                    query_position += l;
+                EditOp::Match => {
+                    ref_position += 1;
+                    query_position += 1;
                 }
-                sam::Op::SoftClip(l) | sam::Op::HardClip(l) => query_position += l,
-                sam::Op::Insertion(l) => query_position += l,
-                sam::Op::Deletion(l) => ref_position += l,
-                sam::Op::Skipped(_) | sam::Op::Padding(_) => {}
-            }
-            if chunk_start < ref_position {
-                use sam::Op;
-                let size = ref_position - chunk_start;
-                ref_position = chunk_start;
-                match op {
-                    sam::Op::Align(_) => {
-                        cigar.push(Op::Align(size));
-                        query_position -= size;
-                    }
-                    sam::Op::Match(_) => {
-                        cigar.push(Op::Match(size));
-                        query_position -= size;
-                    }
-                    sam::Op::Mismatch(_) => {
-                        cigar.push(Op::Mismatch(size));
-                        query_position -= size;
-                    }
-                    sam::Op::Deletion(_) => cigar.push(Op::Deletion(size)),
-                    sam::Op::Skipped(_)
-                    | sam::Op::Insertion(_)
-                    | sam::Op::SoftClip(_)
-                    | sam::Op::HardClip(_)
-                    | sam::Op::Padding(_) => unreachable!(),
-                }
-            }
-            if chunk_start == ref_position {
-                break;
+                EditOp::Ins => query_position += 1,
+                EditOp::Del => ref_position += 1,
             }
         } else {
             return vec![];
@@ -228,7 +367,7 @@ fn split_query<M: HMMType>(
     }
     assert_eq!(ref_position, chunk_start);
     let query = &query[query_position..];
-    let chunks = seq_into_subchunks(query, config.chunk_size, cigar, reflen - ref_position);
+    let chunks = seq_into_subchunks(query, config, ops, reflen - ref_position);
     chunks
         .into_iter()
         .enumerate()
@@ -237,57 +376,57 @@ fn split_query<M: HMMType>(
 }
 
 // Cigar is reversed. So, by poping the lemente, we can read the alignment.
-fn seq_into_subchunks(
+fn seq_into_subchunks<M: HMMType>(
     query: &[u8],
-    len: usize,
-    mut cigar: Vec<sam::Op>,
+    config: &PolishConfig<M>,
+    mut ops: Vec<EditOp>,
     reflen: usize,
 ) -> Vec<Vec<u8>> {
-    use sam::Op;
+    let break_len = config.chunk_size - config.overlap;
     let (mut q_pos, mut r_pos) = (0, 0);
-    let mut target = len;
-    let mut chunk_position = vec![0];
-    while let Some(op) = cigar.pop() {
+    let mut target = (1..).flat_map(|i| {
+        let start = i * break_len;
+        vec![start, start + config.overlap]
+    });
+    let mut current_target = target.next().unwrap();
+    // Reference position, query position.
+    let mut chunk_position: Vec<(usize, usize)> = vec![(0, 0)];
+    while let Some(op) = ops.pop() {
         match op {
-            sam::Op::Align(l) | sam::Op::Match(l) | sam::Op::Mismatch(l) => {
-                q_pos += l;
-                r_pos += l;
-                if target < r_pos {
-                    let size = r_pos - target;
-                    r_pos -= size;
-                    q_pos -= size;
-                    match op {
-                        Op::Align(_) => cigar.push(Op::Align(size)),
-                        Op::Match(_) => cigar.push(Op::Match(size)),
-                        Op::Mismatch(_) => cigar.push(Op::Mismatch(size)),
-                        _ => unreachable!(),
-                    }
-                }
+            EditOp::Match => {
+                q_pos += 1;
+                r_pos += 1;
             }
-            sam::Op::Insertion(l) | sam::Op::SoftClip(l) | sam::Op::HardClip(l) => q_pos += l,
-            sam::Op::Deletion(l) => {
-                r_pos += l;
-                if target < r_pos {
-                    let size = r_pos - target;
-                    r_pos -= size;
-                    cigar.push(Op::Deletion(size));
-                }
-            }
-            sam::Op::Skipped(_) => {}
-            sam::Op::Padding(_) => {}
+            EditOp::Ins => q_pos += 1,
+            EditOp::Del => r_pos += 1,
         }
-        if target == r_pos {
-            chunk_position.push(q_pos);
-            target += len;
+        if current_target == r_pos {
+            chunk_position.push((current_target, q_pos));
+            current_target = target.next().unwrap();
         } else if reflen == r_pos {
-            chunk_position.push(q_pos);
+            chunk_position.push((reflen, q_pos));
             // We should break here, as there would be some junk trailing clips.
             break;
         }
     }
+    if chunk_position.len() < 2 {
+        return vec![];
+    }
     chunk_position
-        .windows(2)
-        .map(|w| query[w[0]..w[1]].to_vec())
+        .iter()
+        .enumerate()
+        .filter(|(_, (r_pos, _))| r_pos % break_len == 0)
+        .filter_map(|(idx, &(ref_start, start_pos))| {
+            // If this chunk is at the end of the contig, and this alignment comsumes all the reference,
+            if reflen <= ref_start + config.chunk_size && r_pos == reflen {
+                Some(query[start_pos..q_pos].to_vec())
+            } else {
+                chunk_position[idx..]
+                    .iter()
+                    .find(|&&(r_pos, _)| r_pos == ref_start + config.chunk_size)
+                    .map(|&(_, end_pos)| query[start_pos..end_pos].to_vec())
+            }
+        })
         .collect()
 }
 
@@ -374,9 +513,19 @@ fn fit_multiple_inner(
         })
         .collect();
     debug!("Profiled {} alignments.", profiles.len());
-    let initial_distribution = model.estimate_initial_distribution_banded(&profiles);
-    let transition_matrix = model.estimate_transition_prob_banded(&profiles);
-    let observation_matrix = model.estimate_observation_prob_banded(&profiles);
+    let start = std::time::Instant::now();
+    let initial_distribution = model.par_estimate_initial_distribution_banded(&profiles);
+    let init = std::time::Instant::now();
+    let transition_matrix = model.par_estimate_transition_prob_banded(&profiles);
+    let trans = std::time::Instant::now();
+    let observation_matrix = model.par_estimate_observation_prob_banded(&profiles);
+    let obs = std::time::Instant::now();
+    debug!(
+        "ESTIM\t{}\t{}\t{}",
+        (init - start).as_millis(),
+        (trans - init).as_millis(),
+        (obs - trans).as_millis()
+    );
     debug!("Re-estimated parameters.");
     GPHMM::from_raw_elements(
         model.states(),
@@ -448,14 +597,12 @@ fn polish_chunk<T: std::borrow::Borrow<[u8]>>(
     let mut lk = get_lk(&phmm, &draft);
     loop {
         let new_cons = loop {
-            let start = std::time::Instant::now();
             let new_phmm = phmm.fit_banded_inner(&draft, &queries, config.radius);
-            let fit = std::time::Instant::now();
             let new_lk = get_lk(&new_phmm, &draft);
-            debug!("FIT\t{}", (fit - start).as_millis());
-            debug!("{:.3}->{:.3}", lk, new_lk);
+            // debug!("FIT\t{}", (fit - start).as_millis());
+            // debug!("{:.3}->{:.3}", lk, new_lk);
             if new_lk - lk < 0.1f64 {
-                debug!("Break");
+                // debug!("Break");
                 break phmm
                     .correction_until_convergence_banded_inner(&draft, &queries, config.radius)
                     .unwrap();
@@ -486,21 +633,10 @@ pub fn consensus<T: std::borrow::Borrow<[u8]>>(
     repnum: usize,
     radius: usize,
 ) -> Option<Vec<u8>> {
-    use std::time::Instant;
-    let start = Instant::now();
     let consensus = ternary_consensus(seqs, seed, repnum, radius);
-    let ternary = Instant::now();
     let consensus = polish_by_pileup(&consensus, seqs, radius);
-    let correct = Instant::now();
-    let config = PolishConfig::new(radius, 0, seqs.len());
+    let config = PolishConfig::new(radius, 0, seqs.len(), 0, 0);
     let consensus = polish_chunk(&consensus, &seqs, &config);
-    let polish = Instant::now();
-    eprintln!(
-        "{}\t{}\t{}",
-        (ternary - start).as_millis(),
-        (correct - ternary).as_millis(),
-        (polish - correct).as_millis()
-    );
     consensus
 }
 

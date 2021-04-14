@@ -42,7 +42,7 @@ pub struct GeneralizedPairHiddenMarkovModel<T: HMMType> {
 
 pub mod banded;
 use crate::hmm::Op;
-
+use rayon::prelude::*;
 // TODO: remove `if` statements as many as possible.
 // - let j_orig = foo(); if !(0..ys.len() as isize).contains(j_orig){ --- } should be removed, removed.
 fn get_range(radius: isize, ylen: isize, center: isize) -> std::ops::Range<isize> {
@@ -60,7 +60,7 @@ fn get_range(radius: isize, ylen: isize, center: isize) -> std::ops::Range<isize
 }
 
 /// Please Do not implement this trait by your own program.
-pub trait HMMType: Clone {}
+pub trait HMMType: Clone + std::marker::Send + std::marker::Sync {}
 
 /// This is a marker type associated with Generalized Pair Hidden Markov Model.
 /// If you want to use full, unconditional model, please tag GPHMM with this type, like

@@ -43,7 +43,7 @@ fn main() -> std::io::Result<()> {
     // Kiley
     {
         println!("{}", model);
-        let config = kiley::PolishConfig::with_model(radius, 0, 1, model);
+        let config = kiley::PolishConfig::with_model(radius, 0, 1, 0, 0, model);
         let model = kiley::fit_model(&template, &seqs, &config);
         println!("{}", model);
         let start = std::time::Instant::now();

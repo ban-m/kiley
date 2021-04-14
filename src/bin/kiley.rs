@@ -50,8 +50,15 @@ fn subcommand_polish() -> App<'static, 'static> {
             Arg::with_name("chunk_size")
                 .long("chunk_size")
                 .takes_value(true)
-                .default_value(&"2000")
+                .default_value(&"2025")
                 .help("Length to polish at once. Increase for better QV."),
+        )
+        .arg(
+            Arg::with_name("overlap")
+                .long("overlap)")
+                .takes_value(true)
+                .default_value("25")
+                .help("The length of overlapping of consective chunks."),
         )
         .arg(
             Arg::with_name("max_coverage")
@@ -154,11 +161,15 @@ fn polish(matches: &clap::ArgMatches) -> std::io::Result<()> {
         .value_of("max_coverage")
         .and_then(|e| e.parse().ok())
         .unwrap();
-    let _seed: u64 = matches
+    let overlap: usize = matches
+        .value_of("overlap")
+        .and_then(|e| e.parse().ok())
+        .unwrap();
+    let seed: u64 = matches
         .value_of("seed")
         .and_then(|e| e.parse().ok())
         .unwrap();
-    let config = kiley::PolishConfig::new(radius, chunk_size, max_coverage);
+    let config = kiley::PolishConfig::new(radius, chunk_size, max_coverage, overlap, seed);
     let result = kiley::polish(&contigs, &reads, &alignments, &config);
     let stdout = std::io::stdout();
     let mut wtr = std::io::BufWriter::new(stdout.lock());

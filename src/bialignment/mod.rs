@@ -17,6 +17,37 @@ impl Op {
     }
 }
 
+pub fn recover(xs: &[u8], ys: &[u8], ops: &[Op]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let (mut i, mut j) = (0, 0);
+    let (mut xr, mut opr, mut yr) = (vec![], vec![], vec![]);
+    for op in ops {
+        match op {
+            Op::Del => {
+                xr.push(xs[i]);
+                opr.push(b' ');
+                yr.push(b' ');
+                i += 1;
+            }
+            Op::Ins => {
+                xr.push(b' ');
+                opr.push(b' ');
+                yr.push(ys[j]);
+                j += 1;
+            }
+            Op::Mat => {
+                xr.push(xs[i]);
+                yr.push(ys[j]);
+                opr.push(if xs[i] == ys[j] { b'|' } else { b'X' });
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    assert_eq!(i, xs.len());
+    assert_eq!(j, ys.len());
+    (xr, opr, yr)
+}
+
 const fn match_mat() -> [u32; 64] {
     let mut scores = [1_000_000_000; 64];
     let mut x = 0;
@@ -384,6 +415,20 @@ impl DPTable {
     // }
 }
 
+impl std::ops::Index<(isize, isize)> for DPTable {
+    type Output = u32;
+    fn index(&self, (i, j): (isize, isize)) -> &Self::Output {
+        let loc = self.get_location(i, j);
+        &self.data[loc]
+    }
+}
+impl std::ops::IndexMut<(isize, isize)> for DPTable {
+    fn index_mut(&mut self, (i, j): (isize, isize)) -> &mut Self::Output {
+        let loc = self.get_location(i, j);
+        &mut self.data[loc]
+    }
+}
+
 fn edit_dist_banded_dp_pre(xs: &PadSeq, ys: &PadSeq, radius: usize) -> (Vec<isize>, DPTable) {
     let ub = UPPER_BOUND;
     let mut dp = DPTable::new(xs.len() + ys.len() + 1, 2 * radius + 1, ub);
@@ -430,7 +475,82 @@ fn edit_dist_banded_dp_pre(xs: &PadSeq, ys: &PadSeq, radius: usize) -> (Vec<isiz
     (centers, dp)
 }
 
+fn get_modification_table(xs: &PadSeq, ys: &PadSeq, radius: usize) -> (u32, Vec<u32>) {
+    let (centers, pre) = naive_banded_dp_pre(xs, ys, radius);
+    let post = naive_banded_dp_post(xs, ys, radius, &centers);
+    let radius = radius as isize;
+    let dist = post[(0, radius)];
+    use crate::padseq;
+    let mut dists = vec![UPPER_BOUND; 9 * (xs.len() + 1)];
+    for (pos, slots) in dists.chunks_exact_mut(9).enumerate().take(xs.len()) {
+        let pre_row = pre.get_row(pos as isize);
+        slots.iter_mut().for_each(|x| *x = 0);
+        let center = centers[pos];
+        let next = centers[pos + 1];
+        // Mutation for 4 slots, insertion for 4 slots, deletion for the last slot.
+        for base in b"ACGT".iter().map(padseq::convert_to_twobit) {
+            let mut min_mat = UPPER_BOUND;
+            let mut min_ins = UPPER_BOUND;
+            let mut prev_mat = UPPER_BOUND;
+            let mut prev_ins = UPPER_BOUND;
+            let matmat = &MATMAT[(base << 3) as usize..(base << 3 | 0b111) as usize];
+            for j in get_range(radius, ys.len() as isize, center) {
+                let j_orig = j + center - radius;
+                let y = ys[j_orig];
+                let pre = pre_row[j as usize];
+                // Match
+                let next_j = j + center - next;
+                let mat_pen = matmat[y as usize];
+                let mat = post.get(pos as isize + 1, next_j + 1) + mat_pen;
+                let del = post.get(pos as isize + 1, next_j) + 1;
+                let current = mat.min(del).min(prev_mat + 1);
+                min_mat = min_mat.min(current + pre);
+                prev_mat = current;
+                // Ins
+                let mat = post.get(pos as isize, j + 1) + mat_pen;
+                let del = post.get(pos as isize, j) + 1;
+                let current = mat.min(del).min(prev_ins + 1);
+                min_ins = min_ins.min(current + pre);
+                prev_ins = current;
+            }
+            slots[base as usize] = min_mat;
+            slots[4 + base as usize] = min_ins;
+        }
+        // Deletion.
+        slots[8] = get_range(radius, ys.len() as isize, center)
+            .map(|j| pre_row[j as usize] + post.get(pos as isize + 1, j + center - next))
+            .min()
+            .unwrap_or(UPPER_BOUND)
+    }
+    // The last insertion.
+    if let Some((pos, slots)) = dists.chunks_exact_mut(9).enumerate().last() {
+        let pre_row = pre.get_row(pos as isize);
+        let center = centers[pos];
+        // Mutation for 4 slots, insertion for 4 slots, deletion for the last slot.
+        for base in b"ACGT".iter().map(padseq::convert_to_twobit) {
+            let mut min_ins = UPPER_BOUND;
+            let mut prev_ins = UPPER_BOUND;
+            let matmat = &MATMAT[(base << 3) as usize..(base << 3 | 0b111) as usize];
+            for j in get_range(radius, ys.len() as isize, center) {
+                let j_orig = j + center - radius;
+                let y = ys[j_orig];
+                let pre = pre_row[j as usize];
+                let mat_pen = matmat[y as usize];
+                // Ins
+                let mat = post.get(pos as isize, j + 1) + mat_pen;
+                let del = post.get(pos as isize, j) + 1;
+                let current = mat.min(del).min(prev_ins + 1);
+                min_ins = min_ins.min(current + pre);
+                prev_ins = current;
+            }
+            slots[4 + base as usize] = min_ins;
+        }
+    }
+    (dist, dists)
+}
+
 // Return edit distance by modifying the `postion`-th position of the `xs` inot `base`.
+#[allow(dead_code)]
 fn edit_dist_banded_with_mutation(
     ys: &PadSeq,
     pre_dp: &DPTable,
@@ -469,6 +589,7 @@ fn edit_dist_banded_with_mutation(
         .unwrap_or(UPPER_BOUND)
 }
 
+#[allow(dead_code)]
 fn edit_dist_banded_with_insertion(
     ys: &PadSeq,
     pre_dp: &DPTable,
@@ -505,6 +626,7 @@ fn edit_dist_banded_with_insertion(
         .unwrap_or(UPPER_BOUND)
 }
 
+#[allow(dead_code)]
 fn edit_dist_banded_with_deletion(
     pre_dp: &DPTable,
     post_dp: &DPTable,
@@ -524,6 +646,7 @@ fn edit_dist_banded_with_deletion(
 
 // Convert diagonl DP into usual orthogonal DP.
 // O(L*K*logK)
+#[allow(dead_code)]
 fn convert_diagonal_to_orthogonal(
     xs: &PadSeq,
     ys: &PadSeq,
@@ -625,6 +748,7 @@ fn convert_diagonal_to_orthogonal(
 // }
 
 // return "Post" DP.
+#[allow(dead_code)]
 fn edit_dist_banded_dp_post(xs: &PadSeq, ys: &PadSeq, radius: usize, centers: &[isize]) -> DPTable {
     let ub = UPPER_BOUND;
     let mut dp = DPTable::new(xs.len() + ys.len() + 1, 2 * radius + 1, ub);
@@ -680,7 +804,6 @@ pub fn polish_until_converge_banded<T: std::borrow::Borrow<[u8]>>(
     reads: &[T],
     radius: usize,
 ) -> Option<Vec<u8>> {
-    let orig_len = reads.len();
     let mut polished = PadSeq::new(template);
     let mut start_position = 0;
     let (mut total_edit_dist, mut xs) = (0, vec![]);
@@ -690,7 +813,6 @@ pub fn polish_until_converge_banded<T: std::borrow::Borrow<[u8]>>(
             xs.push(PadSeq::new(x));
         }
     }
-    debug!("SEQ\t{}\t{}", orig_len, xs.len());
     while let Some((imp, pos, dist)) = polish_by_flip_banded(&polished, &xs, start_position, radius)
     {
         start_position = pos;
@@ -813,6 +935,71 @@ pub fn polish_until_converge_banded<T: std::borrow::Borrow<[u8]>>(
 //     }
 // }
 
+fn get_range(radius: isize, ylen: isize, center: isize) -> std::ops::Range<isize> {
+    let start = radius - center;
+    let end = ylen + radius - center;
+    start.max(0)..(end.min(2 * radius) + 1)
+}
+
+fn naive_banded_dp_pre(xs: &PadSeq, ys: &PadSeq, radius: usize) -> (Vec<isize>, DPTable) {
+    let mut dp = DPTable::new(xs.len() + 1, 2 * radius + 1, UPPER_BOUND);
+    // The location where the radius-th element is in the original DP table.
+    // In other words, if you want to convert the j-th element in the banded DP table into the original coordinate,
+    // j + centers[i] - radius would be oK.
+    // Inverse convertion is the sam, j_orig + radius - centers[i] would be OK.
+    let mut centers = vec![0, 0];
+    // Initialize.
+    let radius = radius as isize;
+    dp[(0, radius)] = 0;
+    for j in radius + 1..2 * radius + 1 {
+        let j_orig = j - radius - 1;
+        if !(0..ys.len() as isize).contains(&j_orig) {
+            continue;
+        }
+        dp[(0, j)] = (j - radius) as u32;
+    }
+    for (i, &x) in xs.iter().enumerate().map(|(pos, x)| (pos + 1, x)) {
+        assert_eq!(centers.len(), i + 1);
+        let (center, prev) = (centers[i], centers[i - 1]);
+        for j in get_range(radius, ys.len() as isize, center) {
+            let j_orig = j + center - radius;
+            let y = ys[j_orig - 1];
+            let prev_j = j + center - prev;
+            let i = i as isize;
+            dp[(i, j)] = (dp[(i, j - 1)] + 1)
+                .min(dp[(i - 1, prev_j)] + 1)
+                .min(dp[(i - 1, prev_j - 1)] + (x != y) as u32);
+        }
+        centers.push((i * ys.len() / xs.len()) as isize);
+    }
+    (centers, dp)
+}
+
+fn naive_banded_dp_post(xs: &PadSeq, ys: &PadSeq, radius: usize, centers: &[isize]) -> DPTable {
+    let mut dp = DPTable::new(xs.len() + 1, 2 * radius + 1, UPPER_BOUND);
+    // Fill the last element.
+    let radius = radius as isize;
+    let (xslen, yslen) = (xs.len() as isize, ys.len() as isize);
+    dp[(xslen, yslen - centers[xs.len()] + radius)] = 0;
+    for j in get_range(radius, yslen, centers[xs.len()]).rev() {
+        let j_orig = j + centers[xs.len()] - radius;
+        dp[(xslen, j)] = (yslen - j_orig) as u32;
+    }
+    for (i, &x) in xs.iter().enumerate().rev() {
+        let (center, next) = (centers[i], centers[i + 1]);
+        for j in get_range(radius, yslen, centers[i]).rev() {
+            let j_orig = j + centers[i] - radius;
+            let j_next = j + center - next;
+            let y = ys[j_orig];
+            let i = i as isize;
+            dp[(i, j)] = (dp[(i + 1, j_next + 1)] + (x != y) as u32)
+                .min(dp[(i + 1, j_next)] + 1)
+                .min(dp[(i, j + 1)] + 1);
+        }
+    }
+    dp
+}
+
 /// Find if there is a sequence x such that
 /// the edit distance from x to template is 1,
 /// and the sum of edit distance from x to queries is
@@ -820,101 +1007,143 @@ pub fn polish_until_converge_banded<T: std::borrow::Borrow<[u8]>>(
 pub fn polish_by_flip_banded<T: std::borrow::Borrow<PadSeq>>(
     template: &PadSeq,
     queries: &[T],
-    start_position: usize,
+    _start_position: usize,
     radius: usize,
 ) -> Option<(PadSeq, usize, u32)> {
     let mut current_edit_distance = 0;
-    let dps: Vec<_> = queries
+    let profile_with_diff = queries
         .iter()
-        .filter_map(|query| {
-            let q = query.borrow();
-            let (centers, pre_dp) = edit_dist_banded_dp_pre(template, q, radius);
-            let post_dp = edit_dist_banded_dp_post(template, q, radius, &centers);
-            let radius = radius as isize;
-            let lk = {
-                let k = (template.len() + q.len()) as isize;
-                let u = template.len() as isize;
-                let u_in_dp = u - centers[k as usize] + radius as isize;
-                pre_dp.get_check(k, u_in_dp)?
-            };
-            current_edit_distance += lk;
-            let (pre_dp, post_dp, ranges) =
-                convert_diagonal_to_orthogonal(&template, q, &pre_dp, &post_dp, &centers, radius);
-            Some((q, ranges, pre_dp, post_dp))
+        .map(|query| {
+            let (dist, prf) = get_modification_table(&template, query.borrow(), radius);
+            current_edit_distance += dist;
+            prf
         })
-        .collect();
-    let mut improved = template.clone();
-    use crate::padseq;
-    for pos in 0..template.len() {
-        let pos = ((start_position + pos) % template.len()) as isize;
-        let deletion = dps
-            .iter()
-            .map(|(_, ranges, pre, post)| edit_dist_banded_with_deletion(pre, post, ranges, pos))
-            .sum::<u32>();
-        let (mutation, mut_base) = b"ACGT"
-            .iter()
-            .map(padseq::convert_to_twobit)
-            .map(|base| {
-                let edit_dist = dps
-                    .iter()
-                    .map(|(x, ranges, pre, post)| {
-                        edit_dist_banded_with_mutation(x, pre, post, ranges, pos, base)
-                    })
-                    .sum::<u32>();
-                (edit_dist, base)
-            })
-            .min_by_key(|x| x.0)
-            .unwrap();
-        let (insertion, ins_base) = b"ACGT"
-            .iter()
-            .map(padseq::convert_to_twobit)
-            .map(|base| {
-                let edit_dist = dps
-                    .iter()
-                    .map(|(x, ranges, pre, post)| {
-                        edit_dist_banded_with_insertion(x, pre, post, ranges, pos, base)
-                    })
-                    .sum::<u32>();
-                (edit_dist, base)
-            })
-            .min_by_key(|x| x.0)
-            .unwrap();
-        let minimum = deletion.min(insertion).min(mutation);
-        if minimum < current_edit_distance {
-            if minimum == insertion {
-                improved.insert(pos, ins_base);
-            } else if minimum == deletion {
-                improved.remove(pos);
-            } else {
-                assert_eq!(minimum, mutation);
-                improved[pos] = mut_base;
-            }
-            return Some((improved, pos as usize, minimum));
-        }
-    }
-    let pos = template.len() as isize;
-    let insertion = b"ACGT"
-        .iter()
-        .map(padseq::convert_to_twobit)
-        .filter_map(|base| {
-            let edit_dist = dps
+        .reduce(|mut x, y| {
+            x.iter_mut().zip(y).for_each(|(x, y)| *x += y);
+            x
+        })
+        .unwrap();
+    profile_with_diff
+        .chunks_exact(9)
+        .enumerate()
+        .find_map(|(pos, with_diff)| {
+            // diff = [A,C,G,T,A,C,G,T,-], first four element is for mutation,
+            // second four element is for insertion.
+            with_diff
                 .iter()
-                .map(|(x, ranges, pre, post)| {
-                    edit_dist_banded_with_insertion(x, pre, post, ranges, pos, base)
+                .enumerate()
+                .filter(|&(_, &dist)| dist < current_edit_distance)
+                .min_by_key(|x| x.1)
+                .map(|(op, dist)| {
+                    let (op, base) = (op / 4, op % 4);
+                    let op = [Op::Mat, Op::Ins, Op::Del][op];
+                    (pos, op, base as u8, dist)
                 })
-                .sum::<u32>();
-            if edit_dist < current_edit_distance {
-                Some((edit_dist, base))
-            } else {
-                None
-            }
         })
-        .min_by_key(|x| x.0);
-    if let Some((dist, base)) = insertion {
-        improved.insert(pos, base);
-        return Some((improved, pos as usize, dist));
-    }
-    None
+        .map(|(pos, op, base, &dist)| {
+            let mut template = template.clone();
+            match op {
+                Op::Mat => template[pos as isize] = base,
+                Op::Del => {
+                    template.remove(pos as isize);
+                }
+                Op::Ins => {
+                    template.insert(pos as isize, base);
+                }
+            }
+            (template, pos + 1, dist)
+        })
+    // let dps: Vec<_> = queries
+    //     .iter()
+    //     .filter_map(|query| {
+    //         let q = query.borrow();
+    //         let (centers, pre_dp) = edit_dist_banded_dp_pre(template, q, radius);
+    //         let post_dp = edit_dist_banded_dp_post(template, q, radius, &centers);
+    //         let radius = radius as isize;
+    //         let lk = {
+    //             let k = (template.len() + q.len()) as isize;
+    //             let u = template.len() as isize;
+    //             let u_in_dp = u - centers[k as usize] + radius as isize;
+    //             pre_dp.get_check(k, u_in_dp)?
+    //         };
+    //         current_edit_distance += lk;
+    //         let (pre_dp, post_dp, ranges) =
+    //             convert_diagonal_to_orthogonal(&template, q, &pre_dp, &post_dp, &centers, radius);
+    //         Some((q, ranges, pre_dp, post_dp))
+    //     })
+    //     .collect();
+    // use crate::padseq;
+    // let mut improved = template.clone();
+    // for pos in 0..template.len() {
+    //     let pos = ((start_position + pos) % template.len()) as isize;
+    //     let deletion = dps
+    //         .iter()
+    //         .map(|(_, ranges, pre, post)| edit_dist_banded_with_deletion(pre, post, ranges, pos))
+    //         .sum::<u32>();
+    //     let (mutation, mut_base) = b"ACGT"
+    //         .iter()
+    //         .map(padseq::convert_to_twobit)
+    //         .map(|base| {
+    //             let edit_dist = dps
+    //                 .iter()
+    //                 .map(|(x, ranges, pre, post)| {
+    //                     edit_dist_banded_with_mutation(x, pre, post, ranges, pos, base)
+    //                 })
+    //                 .sum::<u32>();
+    //             (edit_dist, base)
+    //         })
+    //         .min_by_key(|x| x.0)
+    //         .unwrap();
+    //     let (insertion, ins_base) = b"ACGT"
+    //         .iter()
+    //         .map(padseq::convert_to_twobit)
+    //         .map(|base| {
+    //             let edit_dist = dps
+    //                 .iter()
+    //                 .map(|(x, ranges, pre, post)| {
+    //                     edit_dist_banded_with_insertion(x, pre, post, ranges, pos, base)
+    //                 })
+    //                 .sum::<u32>();
+    //             (edit_dist, base)
+    //         })
+    //         .min_by_key(|x| x.0)
+    //         .unwrap();
+    //     let minimum = deletion.min(insertion).min(mutation);
+    //     if minimum < current_edit_distance {
+    //         if minimum == insertion {
+    //             improved.insert(pos, ins_base);
+    //         } else if minimum == deletion {
+    //             improved.remove(pos);
+    //         } else {
+    //             assert_eq!(minimum, mutation);
+    //             improved[pos] = mut_base;
+    //         }
+    //         return Some((improved, pos as usize, minimum));
+    //     }
+    // }
+    // let pos = template.len() as isize;
+    // let insertion = b"ACGT"
+    //     .iter()
+    //     .map(padseq::convert_to_twobit)
+    //     .filter_map(|base| {
+    //         let edit_dist = dps
+    //             .iter()
+    //             .map(|(x, ranges, pre, post)| {
+    //                 edit_dist_banded_with_insertion(x, pre, post, ranges, pos, base)
+    //             })
+    //             .sum::<u32>();
+    //         if edit_dist < current_edit_distance {
+    //             Some((edit_dist, base))
+    //         } else {
+    //             None
+    //         }
+    //     })
+    //     .min_by_key(|x| x.0);
+    // if let Some((dist, base)) = insertion {
+    //     improved.insert(pos, base);
+    //     return Some((improved, pos as usize, dist));
+    // }
+    // None
 }
 
 pub fn edit_dist_banded(xs: &[u8], ys: &[u8], radius: usize) -> Option<(u32, Vec<Op>)> {
@@ -1268,6 +1497,63 @@ mod test {
                 let exact_dist = edit_dist(&xs, &ys);
                 assert_eq!(dist, exact_dist);
             }
+        }
+    }
+    #[test]
+    fn edit_dist_modification_check() {
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+        let prof = crate::gen_seq::PROFILE;
+        for _ in 0..50 {
+            let xslen = rng.gen::<usize>() % 1000 + 50;
+            let xs = crate::gen_seq::generate_seq(&mut rng, xslen);
+            let mut xs_mut = xs.clone();
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+            let ys_normal = ys.clone();
+            let (xs, ys) = (PadSeq::new(xs.as_slice()), PadSeq::new(ys.as_slice()));
+            let (_, profiles) = get_modification_table(&xs, &ys, 50);
+            for (pos, diffs) in profiles.chunks_exact(9).enumerate().take(xs.len()) {
+                let original = xs_mut[pos];
+                for &base in b"ACGT" {
+                    xs_mut[pos] = base;
+                    let exact_dist = edit_dist(&xs_mut, &ys_normal);
+                    let dist = diffs[crate::padseq::convert_to_twobit(&base) as usize];
+                    assert_eq!(dist, exact_dist);
+                    xs_mut[pos] = original;
+                }
+                for &base in b"ACGT" {
+                    xs_mut.insert(pos, base);
+                    let exact_dist = edit_dist(&xs_mut, &ys_normal);
+                    let dist = diffs[crate::padseq::convert_to_twobit(&base) as usize + 4];
+                    assert_eq!(dist, exact_dist);
+                    xs_mut.remove(pos);
+                }
+                xs_mut.remove(pos);
+                let exact_dist = edit_dist(&xs_mut, &ys_normal);
+                let dist = diffs[8];
+                assert_eq!(dist, exact_dist);
+                xs_mut.insert(pos, original);
+            }
+        }
+    }
+    #[test]
+    fn banded_naive_check() {
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+        let prof = crate::gen_seq::PROFILE;
+        for _ in 0..50 {
+            let xslen = rng.gen::<usize>() % 1000 + 50;
+            let xs = crate::gen_seq::generate_seq(&mut rng, xslen);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+            let exact_dist = edit_dist(&xs, &ys);
+            let (xs, ys) = (PadSeq::new(xs.as_slice()), PadSeq::new(ys.as_slice()));
+            let radius = 50;
+            let (centers, dp) = naive_banded_dp_pre(&xs, &ys, radius);
+            let (xslen, yslen) = (xs.len() as isize, ys.len() as isize);
+            let j = yslen - centers[xs.len()] + radius as isize;
+            let dist = dp[(xslen, j)];
+            assert_eq!(dist, exact_dist, "{:?}", dp.get_row(xslen));
+            let dp = naive_banded_dp_post(&xs, &ys, radius, &centers);
+            let dist = dp[(0, radius as isize)];
+            assert_eq!(dist, exact_dist, "{:?}", dp.get_row(0 as isize));
         }
     }
     // #[test]
