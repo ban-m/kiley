@@ -5,7 +5,7 @@ pub mod bialignment;
 pub mod fasta;
 pub mod gen_seq;
 pub mod hmm;
-mod padseq;
+pub mod padseq;
 pub mod sam;
 pub mod trialignment;
 pub use bialignment::polish_until_converge_banded;
@@ -599,10 +599,8 @@ fn polish_chunk<T: std::borrow::Borrow<[u8]>>(
         let new_cons = loop {
             let new_phmm = phmm.fit_banded_inner(&draft, &queries, config.radius);
             let new_lk = get_lk(&new_phmm, &draft);
-            // debug!("FIT\t{}", (fit - start).as_millis());
-            // debug!("{:.3}->{:.3}", lk, new_lk);
+            debug!("LK\t{:.3}", new_lk);
             if new_lk - lk < 0.1f64 {
-                // debug!("Break");
                 break phmm
                     .correction_until_convergence_banded_inner(&draft, &queries, config.radius)
                     .unwrap();
@@ -633,10 +631,20 @@ pub fn consensus<T: std::borrow::Borrow<[u8]>>(
     repnum: usize,
     radius: usize,
 ) -> Option<Vec<u8>> {
+    let start = std::time::Instant::now();
     let consensus = ternary_consensus(seqs, seed, repnum, radius);
+    let ternary = std::time::Instant::now();
     let consensus = polish_by_pileup(&consensus, seqs, radius);
+    let pileup = std::time::Instant::now();
     let config = PolishConfig::new(radius, 0, seqs.len(), 0, 0);
     let consensus = polish_chunk(&consensus, &seqs, &config);
+    let end = std::time::Instant::now();
+    debug!(
+        "{}\t{}\t{}",
+        (ternary - start).as_secs(),
+        (pileup - ternary).as_secs(),
+        (end - pileup).as_secs()
+    );
     consensus
 }
 

@@ -497,10 +497,6 @@ impl<M: HMMType> GPHMM<M> {
             xs.iter_mut().zip(ys).for_each(|(x, y)| *x += y);
             xs
         }
-        // let profile_with_diff = profiles
-        //     .par_iter()
-        //     .map(|prf| prf.to_modification_table())
-        //     .reduce(|| vec![0f64; 9 * (template.len() + 1)], merge);
         let profile_with_diff = profiles
             .iter()
             .map(|prf| prf.to_modification_table())
@@ -907,8 +903,8 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
     }
     // Return [from * states + to] = Pr{from->to},
     // because it is much easy to normalize.
-    // TODO: This code just sucks. If requries a lot of memory, right?
     pub fn transition_probability(&self) -> Vec<f64> {
+        let start = std::time::Instant::now();
         let states = self.model.states;
         // Log probability.
         let (forward_acc, backward_acc) = self.accumlate_factors();
@@ -946,6 +942,7 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
                 probs[from * states + to] = logsumexp(&lks);
             }
         }
+        let recorded = std::time::Instant::now();
         // Normalizing.
         // These are log-probability.
         probs.chunks_mut(states).for_each(|sums| {
@@ -958,6 +955,12 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
                 sums.iter_mut().for_each(|x| *x = 0f64);
             }
         });
+        let normed = std::time::Instant::now();
+        debug!(
+            "{}\t{}",
+            (recorded - start).as_millis(),
+            (normed - recorded).as_millis()
+        );
         probs
     }
 }

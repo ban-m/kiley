@@ -475,7 +475,7 @@ fn edit_dist_banded_dp_pre(xs: &PadSeq, ys: &PadSeq, radius: usize) -> (Vec<isiz
     (centers, dp)
 }
 
-fn get_modification_table(xs: &PadSeq, ys: &PadSeq, radius: usize) -> (u32, Vec<u32>) {
+pub fn get_modification_table(xs: &PadSeq, ys: &PadSeq, radius: usize) -> (u32, Vec<u32>) {
     let (centers, pre) = naive_banded_dp_pre(xs, ys, radius);
     let post = naive_banded_dp_post(xs, ys, radius, &centers);
     let radius = radius as isize;
