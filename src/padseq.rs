@@ -30,6 +30,7 @@ pub struct PadSeq(Vec<u8>);
 // Leading and trailing sequnce size. Filled with NULL.
 impl PadSeq {
     const OFFSET: usize = 3;
+    /// The input should be "ACGT"-alphabet.
     pub fn new<T: std::borrow::Borrow<[u8]>>(xs: T) -> Self {
         let seq: Vec<_> = std::iter::repeat(NULL)
             .take(Self::OFFSET)
@@ -38,8 +39,18 @@ impl PadSeq {
             .collect();
         PadSeq(seq)
     }
+    /// The input should be a string on "ACGT"-alphabet.
     pub fn from(mut xs: Vec<u8>) -> Self {
         xs.iter_mut().for_each(|x| *x = convert_to_twobit(x));
+        xs.extend(std::iter::repeat(NULL).take(Self::OFFSET));
+        xs.reverse();
+        xs.extend(std::iter::repeat(NULL).take(Self::OFFSET));
+        xs.reverse();
+        PadSeq(xs)
+    }
+    /// Create from 2-bit encoded sequence.
+    pub fn from_raw_parts(mut xs: Vec<u8>) -> Self {
+        assert!(xs.iter().all(|&x| x < 6));
         xs.extend(std::iter::repeat(NULL).take(Self::OFFSET));
         xs.reverse();
         xs.extend(std::iter::repeat(NULL).take(Self::OFFSET));
@@ -62,7 +73,7 @@ impl PadSeq {
         self.0
             .insert((index + Self::OFFSET as isize) as usize, base)
     }
-    /// Return [start..end)
+    /// Return [start..end). The content is 2bit-encoded bases.
     pub fn get_range(&self, start: isize, end: isize) -> &[u8] {
         let start = (start + Self::OFFSET as isize) as usize;
         let end = (end + Self::OFFSET as isize) as usize;

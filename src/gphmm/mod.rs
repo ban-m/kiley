@@ -29,7 +29,7 @@ pub struct GeneralizedPairHiddenMarkovModel<T: HMMType> {
     states: usize,
     // Transition between each states.
     // This is transposed matrix of transition matrix. So,
-    // by accessing to * self.states + from, we can get the transition probability from `from` to `to`.
+    // by accessing from * self.states + to, we can get the transition probability from `from` to `to`.
     transition_matrix: Vec<f64>,
     // obseration on a state for a alignment operation.
     // By accessing [states << 6 | x << 3 | y], we can get the obvervasion probability Pr{(x,y)|x}
@@ -131,6 +131,7 @@ struct DPTable {
     column: usize,
     row: usize,
     states: usize,
+    column_size: usize,
     data: Vec<f64>,
 }
 
@@ -139,7 +140,9 @@ impl DPTable {
     // If you access invalid index such as -1 or [column][row][states], it would return default value..
     fn new(row: usize, column: usize, states: usize, default: f64) -> Self {
         let len = (row + 2 * OFFSET) * (column + 2 * OFFSET) * states;
+        let column_size = states * (column + 2 * OFFSET);
         Self {
+            column_size,
             column,
             row,
             states,
@@ -147,52 +150,52 @@ impl DPTable {
         }
     }
     // Maybe I can move these implementations to std::slice::SliceIndex.
-    fn get(&self, i: isize, j: isize, s: isize) -> Option<&f64> {
+    fn get(&self, i: isize, j: isize, s: usize) -> Option<&f64> {
         let index = self.get_index(i, j, s);
-        if 0 <= index {
-            self.data.get(index as usize)
-        } else {
-            None
-        }
+        assert!(index < self.data.len());
+        self.data.get(index)
     }
-    fn get_index(&self, i: isize, j: isize, s: isize) -> isize {
-        let column_size = (self.states * (self.column + 2 * OFFSET)) as isize;
-        let column_pos = (j + OFFSET as isize) * self.states as isize;
-        column_size * (i + OFFSET as isize) + column_pos + s
+    fn get_index(&self, i: isize, j: isize, s: usize) -> usize {
+        let column_pos = (j + OFFSET as isize) as usize * self.states;
+        let row_number = (i + OFFSET as isize) as usize;
+        self.column_size * row_number + column_pos + s
     }
-    fn get_mut(&mut self, i: isize, j: isize, s: isize) -> Option<&mut f64> {
+    fn get_mut(&mut self, i: isize, j: isize, s: usize) -> Option<&mut f64> {
         let index = self.get_index(i, j, s);
-        if 0 <= index {
-            self.data.get_mut(index as usize)
-        } else {
-            None
-        }
+        assert!(index < self.data.len());
+        self.data.get_mut(index)
     }
     // Sum dp[i][j][s] over j and s.
     fn total(&self, i: usize) -> f64 {
-        let start = self.get_index(i as isize, 0, 0) as usize;
+        let start = self.get_index(i as isize, 0, 0);
         let length = self.column * self.states;
-        let range = start..start + length;
-        self.data[range].iter().sum::<f64>()
+        self.data.iter().skip(start).take(length).sum()
     }
     // Divide dp[i] by `by`
     fn div(&mut self, i: usize, by: f64) {
-        let start = self.get_index(i as isize, 0, 0) as usize;
+        let start = self.get_index(i as isize, 0, 0);
         let length = self.column * self.states;
-        let range = start..start + length;
-        self.data[range].iter_mut().for_each(|x| *x /= by);
+        self.data[start..start + length]
+            .iter_mut()
+            .for_each(|x| *x /= by);
+    }
+    // Return cells in (i,j) location. The length of the returned vector
+    // is `state`.
+    fn get_cells(&self, i: isize, j: isize) -> &[f64] {
+        let start = self.get_index(i, j, 0);
+        &self.data[start..start + self.states]
     }
 }
 
-impl std::ops::Index<(isize, isize, isize)> for DPTable {
+impl std::ops::Index<(isize, isize, usize)> for DPTable {
     type Output = f64;
-    fn index(&self, (i, j, s): (isize, isize, isize)) -> &Self::Output {
+    fn index(&self, (i, j, s): (isize, isize, usize)) -> &Self::Output {
         self.get(i, j, s).unwrap()
     }
 }
 
-impl std::ops::IndexMut<(isize, isize, isize)> for DPTable {
-    fn index_mut(&mut self, (i, j, s): (isize, isize, isize)) -> &mut Self::Output {
+impl std::ops::IndexMut<(isize, isize, usize)> for DPTable {
+    fn index_mut(&mut self, (i, j, s): (isize, isize, usize)) -> &mut Self::Output {
         self.get_mut(i, j, s).unwrap()
     }
 }
@@ -341,16 +344,14 @@ impl GPHMM<FullHiddenMarkovModel> {
                 }
             }
         }
-        let mut transposed_transition = vec![0f64; states * states];
-        for from in 0..states {
-            for to in 0..states {
-                // This is transposed!
-                transposed_transition[to * states + from] = transition_matrix[from][to];
-            }
-        }
+        let transition_matrix: Vec<_> = transition_matrix
+            .iter()
+            .flat_map(std::convert::identity)
+            .copied()
+            .collect();
         Self {
             states,
-            transition_matrix: transposed_transition,
+            transition_matrix,
             observation_matrix,
             initial_distribution: initial_distribution.to_vec(),
             _mode: std::marker::PhantomData,
@@ -469,16 +470,14 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
                 }
             }
         }
-        let mut transposed_transition = vec![0f64; states * states];
-        for from in 0..states {
-            for to in 0..states {
-                // This is transposed!
-                transposed_transition[to * states + from] = transition_matrix[from][to];
-            }
-        }
+        let transition_matrix: Vec<_> = transition_matrix
+            .iter()
+            .flat_map(std::convert::identity)
+            .copied()
+            .collect();
         Self {
             states,
-            transition_matrix: transposed_transition,
+            transition_matrix,
             observation_matrix,
             initial_distribution: initial_distribution.to_vec(),
             _mode: std::marker::PhantomData,
@@ -578,9 +577,11 @@ impl<M: HMMType> GPHMM<M> {
     // hidden Markov model.
     /// get transition probability from `from` to `to`
     pub fn transition(&self, from: usize, to: usize) -> f64 {
-        let (from, to) = (from as usize, to as usize);
-        // Caution: This ordering might be un-intuitive.
-        self.transition_matrix[to * self.states + from]
+        self.transition_matrix[from * self.states + to]
+    }
+    /// Return transition probialities from `from`.
+    pub fn transitions(&self, from: usize) -> &[f64] {
+        &self.transition_matrix[from * self.states..(from + 1) * self.states]
     }
     // Convert transition matrix into log-transition matrix.
     // To obtain Pr(t->s), index by [t][s]
@@ -625,15 +626,15 @@ impl<M: HMMType> GPHMM<M> {
         let log_transit = self.get_log_transition();
         let log_observe = self.get_log_observation();
         for s in 0..self.states {
-            dp[(0, 0, s as isize)] = log(&self.initial_distribution[s]);
+            dp[(0, 0, s)] = log(&self.initial_distribution[s]);
         }
         // Initial values.
         for (i, &x) in xs.iter().enumerate().map(|(pos, x)| (pos + 1, x)) {
             let i = i as isize;
             for s in 0..self.states {
-                dp[(i, 0, s as isize)] = (0..self.states)
+                dp[(i, 0, s)] = (0..self.states)
                     .map(|t| {
-                        dp[(i - 1, 0, t as isize)]
+                        dp[(i - 1, 0, t)]
                             + log_transit[t][s]
                             + log_observe[s][(x << 3 | GAP) as usize]
                     })
@@ -644,9 +645,9 @@ impl<M: HMMType> GPHMM<M> {
         for (j, &y) in ys.iter().enumerate().map(|(pos, y)| (pos + 1, y)) {
             let j = j as isize;
             for s in 0..self.states {
-                dp[(0, j, s as isize)] = (0..self.states)
+                dp[(0, j, s)] = (0..self.states)
                     .map(|t| {
-                        dp[(0, j - 1, t as isize)]
+                        dp[(0, j - 1, t)]
                             + log_transit[t][s]
                             + log_observe[s][(GAP << 3 | y) as usize]
                     })
@@ -658,16 +659,16 @@ impl<M: HMMType> GPHMM<M> {
         for (i, &x) in xs.iter().enumerate().map(|(pos, x)| (pos + 1, x)) {
             for (j, &y) in ys.iter().enumerate().map(|(pos, y)| (pos + 1, y)) {
                 for s in 0..self.states {
-                    let (i, j, s) = (i as isize, j as isize, s as isize);
+                    let (i, j, s) = (i as isize, j as isize, s);
                     let max_path = (0..self.states)
                         .map(|t| {
-                            let mat = dp[(i - 1, j - 1, t as isize)]
+                            let mat = dp[(i - 1, j - 1, t)]
                                 + log_transit[t as usize][s as usize]
                                 + log_observe[s as usize][(x << 3 | y) as usize];
-                            let del = dp[(i - 1, j, t as isize)]
+                            let del = dp[(i - 1, j, t)]
                                 + log_transit[t as usize][s as usize]
                                 + log_observe[s as usize][(x << 3 | GAP) as usize];
-                            let ins = dp[(i, j - 1, t as isize)]
+                            let ins = dp[(i, j - 1, t)]
                                 + log_transit[t as usize][s as usize]
                                 + log_observe[s as usize][(GAP << 3 | y) as usize];
                             mat.max(del).max(ins)
@@ -680,7 +681,7 @@ impl<M: HMMType> GPHMM<M> {
         }
         let (mut i, mut j) = (xs.len() as isize, ys.len() as isize);
         let (max_lk, mut state) = (0..self.states)
-            .map(|s| (dp[(i, j, s as isize)], s as isize))
+            .map(|s| (dp[(i, j, s)], s))
             .max_by(|x, y| (x.0).partial_cmp(&(y.0)).unwrap())
             .unwrap();
         // Trace back.
@@ -691,21 +692,21 @@ impl<M: HMMType> GPHMM<M> {
             let (x, y) = (xs[i - 1], ys[j - 1]);
             let (op, new_state) = (0..self.states)
                 .find_map(|t| {
-                    let mat = dp[(i - 1, j - 1, t as isize)]
+                    let mat = dp[(i - 1, j - 1, t)]
                         + log_transit[t][state as usize]
                         + log_observe[state as usize][(x << 3 | y) as usize];
-                    let del = dp[(i - 1, j, t as isize)]
+                    let del = dp[(i - 1, j, t)]
                         + log_transit[t][state as usize]
                         + log_observe[state as usize][(x << 3 | GAP) as usize];
-                    let ins = dp[(i, j - 1, t as isize)]
+                    let ins = dp[(i, j - 1, t)]
                         + log_transit[t][state as usize]
                         + log_observe[state as usize][(GAP << 3 | y) as usize];
                     if (current - mat).abs() < 0.00001 {
-                        Some((Op::Match, t as isize))
+                        Some((Op::Match, t))
                     } else if (current - del).abs() < 0.0001 {
-                        Some((Op::Del, t as isize))
+                        Some((Op::Del, t))
                     } else if (current - ins).abs() < 0.0001 {
-                        Some((Op::Ins, t as isize))
+                        Some((Op::Ins, t))
                     } else {
                         None
                     }
@@ -728,10 +729,10 @@ impl<M: HMMType> GPHMM<M> {
             let x = xs[i - 1];
             let new_state = (0..self.states)
                 .find_map(|t| {
-                    let del = dp[(i - 1, j, t as isize)]
+                    let del = dp[(i - 1, j, t)]
                         + log_transit[t][state as usize]
                         + log_observe[state as usize][(x << 3 | GAP) as usize];
-                    ((current - del) < 0.000001).then(|| t as isize)
+                    ((current - del) < 0.000001).then(|| t)
                 })
                 .unwrap();
             state = new_state;
@@ -744,10 +745,10 @@ impl<M: HMMType> GPHMM<M> {
             let y = ys[j - 1];
             let new_state = (0..self.states)
                 .find_map(|t| {
-                    let ins = dp[(i, j - 1, t as isize)]
+                    let ins = dp[(i, j - 1, t)]
                         + log_transit[t][state as usize]
                         + log_observe[state as usize][(GAP << 3 | y) as usize];
-                    ((current - ins).abs() < 0.00001).then(|| t as isize)
+                    ((current - ins).abs() < 0.00001).then(|| t)
                 })
                 .unwrap();
             state = new_state;
@@ -763,7 +764,7 @@ impl<M: HMMType> GPHMM<M> {
     pub fn likelihood_naive(&self, xs: &[u8], ys: &[u8]) -> f64 {
         let dp = self.forward_naive(xs, ys);
         let (n, m) = (xs.len() as isize, ys.len() as isize);
-        let lks: Vec<_> = (0..self.states).map(|s| dp[(n, m, s as isize)]).collect();
+        let lks: Vec<_> = (0..self.states).map(|s| dp[(n, m, s)]).collect();
         logsumexp(&lks)
     }
     fn forward_naive(&self, xs: &[u8], ys: &[u8]) -> DPTable {
@@ -772,19 +773,19 @@ impl<M: HMMType> GPHMM<M> {
         let log_transit = self.get_log_transition();
         let log_observe = self.get_log_observation();
         for s in 0..self.states {
-            dp[(0, 0, s as isize)] = log(&self.initial_distribution[s]);
+            dp[(0, 0, s)] = log(&self.initial_distribution[s]);
         }
         for (i, &x) in xs.iter().enumerate().map(|(pos, x)| (pos + 1, x)) {
             let i = i as isize;
             for s in 0..self.states {
                 let lks: Vec<_> = (0..self.states)
                     .map(|t| {
-                        dp[(i - 1, 0, t as isize)]
+                        dp[(i - 1, 0, t)]
                             + log_transit[t][s]
                             + log_observe[s][(x << 3 | GAP) as usize]
                     })
                     .collect();
-                dp[(i, 0, s as isize)] = logsumexp(&lks);
+                dp[(i, 0, s)] = logsumexp(&lks);
             }
         }
         for (j, &y) in ys.iter().enumerate().map(|(pos, y)| (pos + 1, y)) {
@@ -792,26 +793,26 @@ impl<M: HMMType> GPHMM<M> {
             for s in 0..self.states {
                 let lks: Vec<_> = (0..self.states)
                     .map(|t| {
-                        dp[(0, j - 1, t as isize)]
+                        dp[(0, j - 1, t)]
                             + log_transit[t][s]
                             + log_observe[s][(GAP << 3 | y) as usize]
                     })
                     .collect();
-                dp[(0, j, s as isize)] = logsumexp(&lks);
+                dp[(0, j, s)] = logsumexp(&lks);
             }
         }
         // Fill DP cells.
         for (i, &x) in xs.iter().enumerate().map(|(pos, x)| (pos + 1, x)) {
             for (j, &y) in ys.iter().enumerate().map(|(pos, y)| (pos + 1, y)) {
                 for s in 0..self.states {
-                    let (i, j, s) = (i as isize, j as isize, s as isize);
+                    let (i, j, s) = (i as isize, j as isize, s);
                     let lks: Vec<_> = (0..self.states)
                         .map(|t| {
-                            let mat = dp[(i - 1, j - 1, t as isize)]
+                            let mat = dp[(i - 1, j - 1, t)]
                                 + log_observe[s as usize][(x << 3 | y) as usize];
-                            let del = dp[(i - 1, j, t as isize)]
+                            let del = dp[(i - 1, j, t)]
                                 + log_observe[s as usize][(x << 3 | GAP) as usize];
-                            let ins = dp[(i, j - 1, t as isize)]
+                            let ins = dp[(i, j - 1, t)]
                                 + log_observe[s as usize][(GAP << 3 | y) as usize];
                             logsumexp(&[mat, del, ins]) + log_transit[t as usize][s as usize]
                         })
@@ -832,7 +833,7 @@ impl<M: HMMType> GPHMM<M> {
         let (dp, alphas) = self.forward(xs, ys);
         let normalized_factor = alphas.iter().map(|x| x.ln()).sum::<f64>();
         let (n, m) = (xs.len() as isize, ys.len() as isize);
-        let lk: f64 = (0..self.states).map(|s| dp[(n, m, s as isize)]).sum();
+        let lk: f64 = (0..self.states).map(|s| dp[(n, m, s)]).sum();
         lk.ln() + normalized_factor
     }
     // Forward algorithm.
@@ -843,14 +844,14 @@ impl<M: HMMType> GPHMM<M> {
         let mut norm_factors = vec![];
         // Initialize.
         for (s, &x) in self.initial_distribution.iter().enumerate() {
-            dp[(0, 0, s as isize)] = x;
+            dp[(0, 0, s)] = x;
         }
         for (j, &y) in ys.iter().enumerate().map(|(pos, y)| (pos as isize + 1, y)) {
             for s in 0..self.states {
                 let trans: f64 = (0..self.states)
-                    .map(|t| dp[(0, j - 1, t as isize)] * self.transition(t, s))
+                    .map(|t| dp[(0, j - 1, t)] * self.transition(t, s))
                     .sum();
-                dp[(0, j, s as isize)] += trans * self.observe(s, GAP, y);
+                dp[(0, j, s)] += trans * self.observe(s, GAP, y);
             }
         }
         let total = dp.total(0);
@@ -860,18 +861,18 @@ impl<M: HMMType> GPHMM<M> {
         for (i, &x) in xs.iter().enumerate().map(|(pos, x)| (pos + 1, x)) {
             // Deletion transition from above.
             for s in 0..self.states {
-                dp[(i as isize, 0, s as isize)] = (0..self.states)
-                    .map(|t| dp[(i as isize - 1, 0, t as isize)] * self.transition(t, s))
+                dp[(i as isize, 0, s)] = (0..self.states)
+                    .map(|t| dp[(i as isize - 1, 0, t)] * self.transition(t, s))
                     .sum::<f64>()
                     * self.observe(s, x, GAP);
             }
             // Deletion and Match transitions.
             for (j, &y) in ys.iter().enumerate().map(|(pos, y)| (pos + 1, y)) {
                 for s in 0..self.states {
-                    dp[(i as isize, j as isize, s as isize)] = (0..self.states)
+                    dp[(i as isize, j as isize, s)] = (0..self.states)
                         .map(|t| {
-                            let mat = dp[(i as isize - 1, j as isize - 1, t as isize)];
-                            let del = dp[(i as isize - 1, j as isize, t as isize)];
+                            let mat = dp[(i as isize - 1, j as isize - 1, t)];
+                            let del = dp[(i as isize - 1, j as isize, t)];
                             (mat * self.observe(s, x, y) + del * self.observe(s, x, GAP))
                                 * self.transition(t, s)
                         })
@@ -883,10 +884,10 @@ impl<M: HMMType> GPHMM<M> {
             // Insertion transitions
             for (j, &y) in ys.iter().enumerate().map(|(pos, y)| (pos + 1, y)) {
                 for s in 0..self.states {
-                    dp[(i as isize, j as isize, s as isize)] += (0..self.states)
+                    dp[(i as isize, j as isize, s)] += (0..self.states)
                         .map(|t| {
                             //second_buffer[j - 1][t]
-                            dp[(i as isize, j as isize - 1, t as isize)]
+                            dp[(i as isize, j as isize - 1, t)]
                                 * self.transition(t, s)
                                 * self.observe(s, GAP, y)
                         })
@@ -907,7 +908,7 @@ impl<M: HMMType> GPHMM<M> {
         let log_transit = self.get_log_transition();
         let log_observe = self.get_log_observation();
         // Initialization.
-        for s in 0..self.states as isize {
+        for s in 0..self.states {
             dp[(xs.len() as isize, ys.len() as isize, s)] = 0f64;
         }
         for (i, &x) in xs.iter().enumerate().rev() {
@@ -916,10 +917,10 @@ impl<M: HMMType> GPHMM<M> {
                     .map(|t| {
                         log_transit[s][t]
                             + log_observe[t][(x << 3 | GAP) as usize]
-                            + dp[(i as isize + 1, ys.len() as isize, t as isize)]
+                            + dp[(i as isize + 1, ys.len() as isize, t)]
                     })
                     .collect();
-                dp[(i as isize, ys.len() as isize, s as isize)] = logsumexp(&lks);
+                dp[(i as isize, ys.len() as isize, s)] = logsumexp(&lks);
             }
         }
         for (j, &y) in ys.iter().enumerate().rev() {
@@ -928,10 +929,10 @@ impl<M: HMMType> GPHMM<M> {
                     .map(|t| {
                         log_transit[s][t]
                             + log_observe[t][(GAP << 3 | y) as usize]
-                            + dp[(xs.len() as isize, j as isize + 1, t as isize)]
+                            + dp[(xs.len() as isize, j as isize + 1, t)]
                     })
                     .collect();
-                dp[(xs.len() as isize, j as isize, s as isize)] = logsumexp(&lks);
+                dp[(xs.len() as isize, j as isize, s)] = logsumexp(&lks);
             }
         }
         // Loop.
@@ -941,16 +942,13 @@ impl<M: HMMType> GPHMM<M> {
                     let lks: Vec<_> = (0..self.states)
                         .map(|t| {
                             let (i, j) = (i as isize, j as isize);
-                            let mat = log_observe[t][(x << 3 | y) as usize]
-                                + dp[(i + 1, j + 1, t as isize)];
-                            let del = log_observe[t][(x << 3 | GAP) as usize]
-                                + dp[(i + 1, j, t as isize)];
-                            let ins = log_observe[t][(GAP << 3 | y) as usize]
-                                + dp[(i, j + 1, t as isize)];
+                            let mat = log_observe[t][(x << 3 | y) as usize] + dp[(i + 1, j + 1, t)];
+                            let del = log_observe[t][(x << 3 | GAP) as usize] + dp[(i + 1, j, t)];
+                            let ins = log_observe[t][(GAP << 3 | y) as usize] + dp[(i, j + 1, t)];
                             log_transit[s][t] + logsumexp(&[mat, del, ins])
                         })
                         .collect();
-                    dp[(i as isize, j as isize, s as isize)] = logsumexp(&lks);
+                    dp[(i as isize, j as isize, s)] = logsumexp(&lks);
                 }
             }
         }
@@ -961,7 +959,7 @@ impl<M: HMMType> GPHMM<M> {
         let mut norm_factors = vec![];
         // Initialize
         let (xslen, yslen) = (xs.len() as isize, ys.len() as isize);
-        for s in 0..self.states as isize {
+        for s in 0..self.states {
             dp[(xslen, yslen, s)] = 1f64;
         }
         let first_total = dp.total(xs.len());
@@ -969,11 +967,9 @@ impl<M: HMMType> GPHMM<M> {
         for (j, &y) in ys.iter().enumerate().rev() {
             for s in 0..self.states {
                 let j = j as isize;
-                dp[(xslen, j, s as isize)] += (0..self.states)
+                dp[(xslen, j, s)] += (0..self.states)
                     .map(|t| {
-                        self.transition(s, t)
-                            * self.observe(t, GAP, y)
-                            * dp[(xslen, j + 1, t as isize)]
+                        self.transition(s, t) * self.observe(t, GAP, y) * dp[(xslen, j + 1, t)]
                     })
                     .sum::<f64>();
             }
@@ -984,22 +980,22 @@ impl<M: HMMType> GPHMM<M> {
         for (i, &x) in xs.iter().enumerate().rev() {
             // Deletion transition to below.
             for s in 0..self.states {
-                dp[(i as isize, yslen, s as isize)] = (0..self.states)
+                dp[(i as isize, yslen, s)] = (0..self.states)
                     .map(|t| {
                         self.transition(s, t)
                             * self.observe(t, x, GAP)
-                            * dp[(i as isize + 1, yslen, t as isize)]
+                            * dp[(i as isize + 1, yslen, t)]
                     })
                     .sum::<f64>();
             }
             for (j, &y) in ys.iter().enumerate().rev() {
                 for s in 0..self.states {
                     let (i, j) = (i as isize, j as isize);
-                    dp[(i, j, s as isize)] = (0..self.states)
+                    dp[(i, j, s)] = (0..self.states)
                         .map(|t| {
                             self.transition(s, t)
-                                * (self.observe(t, x, y) * dp[(i + 1, j + 1, t as isize)]
-                                    + self.observe(t, x, GAP) * dp[(i + 1, j, t as isize)])
+                                * (self.observe(t, x, y) * dp[(i + 1, j + 1, t)]
+                                    + self.observe(t, x, GAP) * dp[(i + 1, j, t)])
                         })
                         .sum::<f64>();
                 }
@@ -1009,11 +1005,9 @@ impl<M: HMMType> GPHMM<M> {
             for (j, &y) in ys.iter().enumerate().rev() {
                 for s in 0..self.states {
                     let (i, j) = (i as isize, j as isize);
-                    dp[(i, j, s as isize)] += (0..self.states)
+                    dp[(i, j, s)] += (0..self.states)
                         .map(|t| {
-                            self.transition(s, t)
-                                * self.observe(t, GAP, y)
-                                * dp[(i, j + 1, t as isize)]
+                            self.transition(s, t) * self.observe(t, GAP, y) * dp[(i, j + 1, t)]
                         })
                         .sum::<f64>();
                 }
@@ -1114,13 +1108,14 @@ impl<M: HMMType> GPHMM<M> {
             let sum: f64 = row.iter().sum();
             row.iter_mut().for_each(|x| *x /= sum);
         }
+        buffer
         // Transpose. [to * states + from] = Pr{from->to}.
-        (0..states * states)
-            .map(|idx| {
-                let (to, from) = (idx / states, idx % states);
-                buffer[from * states + to]
-            })
-            .collect()
+        // (0..states * states)
+        //     .map(|idx| {
+        //         let (to, from) = (idx / states, idx % states);
+        //         buffer[from * states + to]
+        //     })
+        //     .collect()
     }
 }
 
@@ -1152,7 +1147,7 @@ impl<'a, 'b, 'c, T: HMMType> Profile<'a, 'b, 'c, T> {
     fn lk(&self) -> f64 {
         let n = self.forward.row as isize - 1;
         let m = self.forward.column as isize - 1;
-        let state = self.model.states as isize;
+        let state = self.model.states;
         let lk = (0..state).map(|s| self.forward[(n, m, s)]).sum::<f64>();
         lk.ln() + self.forward_factor.iter().map(log).sum::<f64>()
     }
@@ -1166,14 +1161,11 @@ impl<'a, 'b, 'c, T: HMMType> Profile<'a, 'b, 'c, T> {
                 (0..states)
                     .map(|s| {
                         let forward: f64 = (0..states)
-                            .map(|t| {
-                                self.forward[(pos, j, t as isize)] * self.model.transition(t, s)
-                            })
+                            .map(|t| self.forward[(pos, j, t)] * self.model.transition(t, s))
                             .sum();
                         let backward = self.model.observe(s, base, y)
-                            * self.backward[(pos + 1, j + 1, s as isize)]
-                            + self.model.observe(s, base, GAP)
-                                * self.backward[(pos + 1, j, s as isize)];
+                            * self.backward[(pos + 1, j + 1, s)]
+                            + self.model.observe(s, base, GAP) * self.backward[(pos + 1, j, s)];
                         forward * backward
                     })
                     .sum::<f64>()
@@ -1189,9 +1181,7 @@ impl<'a, 'b, 'c, T: HMMType> Profile<'a, 'b, 'c, T> {
         if pos + 1 == self.template.len() {
             let tlen = self.template.len() as isize;
             let qlen = self.query.len() as isize;
-            let lk: f64 = (0..states as isize)
-                .map(|s| self.forward[(tlen - 1, qlen, s)])
-                .sum();
+            let lk: f64 = (0..states).map(|s| self.forward[(tlen - 1, qlen, s)]).sum();
             let factor: f64 = self.forward_factor[..tlen as usize].iter().map(log).sum();
             return lk.ln() + factor;
         }
@@ -1203,14 +1193,11 @@ impl<'a, 'b, 'c, T: HMMType> Profile<'a, 'b, 'c, T> {
                 (0..states)
                     .map(|s| {
                         let forward: f64 = (0..states)
-                            .map(|t| {
-                                self.forward[(pos, j, t as isize)] * self.model.transition(t, s)
-                            })
+                            .map(|t| self.forward[(pos, j, t)] * self.model.transition(t, s))
                             .sum();
                         let backward = self.model.observe(s, x, y)
-                            * self.backward[(pos + 2, j + 1, s as isize)]
-                            + self.model.observe(s, x, GAP)
-                                * self.backward[(pos + 2, j, s as isize)];
+                            * self.backward[(pos + 2, j + 1, s)]
+                            + self.model.observe(s, x, GAP) * self.backward[(pos + 2, j, s)];
                         forward * backward
                     })
                     .sum::<f64>()
@@ -1229,14 +1216,11 @@ impl<'a, 'b, 'c, T: HMMType> Profile<'a, 'b, 'c, T> {
                 (0..states)
                     .map(|s| {
                         let forward: f64 = (0..states)
-                            .map(|t| {
-                                self.forward[(pos, j, t as isize)] * self.model.transition(t, s)
-                            })
+                            .map(|t| self.forward[(pos, j, t)] * self.model.transition(t, s))
                             .sum();
                         let backward = self.model.observe(s, base, y)
-                            * self.backward[(pos, j + 1, s as isize)]
-                            + self.model.observe(s, base, GAP)
-                                * self.backward[(pos, j, s as isize)];
+                            * self.backward[(pos, j + 1, s)]
+                            + self.model.observe(s, base, GAP) * self.backward[(pos, j, s)];
                         forward * backward
                     })
                     .sum::<f64>()
@@ -1247,7 +1231,7 @@ impl<'a, 'b, 'c, T: HMMType> Profile<'a, 'b, 'c, T> {
         lk.ln() + forward_factor + backward_factor
     }
     fn initial_distribution(&self) -> Vec<f64> {
-        let mut probs: Vec<_> = (0..self.model.states as isize)
+        let mut probs: Vec<_> = (0..self.model.states)
             .map(|s| {
                 // We should multiply the scaling factors,
                 // but it would be cancelled out by normalizing.
@@ -1274,14 +1258,14 @@ impl<'a, 'b, 'c, T: HMMType> Profile<'a, 'b, 'c, T> {
                     let backward2: f64 = self.backward_factor.iter().map(log).skip(i).sum();
                     for (j, &y) in self.query.iter().enumerate() {
                         let (i, j) = (i as isize, j as isize);
-                        let forward = log(&self.forward[(i, j, from as isize)]) + forward_factor;
+                        let forward = log(&self.forward[(i, j, from)]) + forward_factor;
                         let transition = log(&self.model.transition(from, to));
-                        let backward_match = self.model.observe(from, x, y)
-                            * self.backward[(i + 1, j + 1, to as isize)];
-                        let backward_del = self.model.observe(from, x, GAP)
-                            * self.backward[(i + 1, j, to as isize)];
-                        let backward_ins = self.model.observe(from, GAP, y)
-                            * self.backward[(i, j + 1, to as isize)];
+                        let backward_match =
+                            self.model.observe(from, x, y) * self.backward[(i + 1, j + 1, to)];
+                        let backward_del =
+                            self.model.observe(from, x, GAP) * self.backward[(i + 1, j, to)];
+                        let backward_ins =
+                            self.model.observe(from, GAP, y) * self.backward[(i, j + 1, to)];
                         let backward = [
                             log(&backward_match) + backward1,
                             log(&backward_del) + backward1,
@@ -1317,13 +1301,13 @@ impl<'a, 'b, 'c> Profile<'a, 'b, 'c, Full> {
             for (j, &y) in self.query.iter().enumerate() {
                 let (i, j) = (i as isize, j as isize);
                 for state in 0..self.model.states {
-                    let back_match = self.backward[(i + 1, j + 1, state as isize)];
-                    let back_del = self.backward[(i + 1, j, state as isize)];
-                    let back_ins = self.backward[(i, j + 1, state as isize)];
+                    let back_match = self.backward[(i + 1, j + 1, state)];
+                    let back_del = self.backward[(i + 1, j, state)];
+                    let back_ins = self.backward[(i, j + 1, state)];
                     let (mat, del, ins) = (0..self.model.states)
                         .map(|from| {
-                            let forward = self.forward[(i, j, from as isize)]
-                                * self.model.transition(from, state);
+                            let forward =
+                                self.forward[(i, j, from)] * self.model.transition(from, state);
                             let mat = forward * self.model.observe(state, x, y) * back_match;
                             let del = forward * self.model.observe(state, x, GAP) * back_del;
                             let ins = forward * self.model.observe(state, GAP, y) * back_ins;
@@ -1373,13 +1357,13 @@ impl<'a, 'b, 'c> Profile<'a, 'b, 'c, Cond> {
             for (j, &y) in self.query.iter().enumerate() {
                 let (i, j) = (i as isize, j as isize);
                 for state in 0..self.model.states {
-                    let back_match = self.backward[(i + 1, j + 1, state as isize)];
-                    let back_del = self.backward[(i + 1, j, state as isize)];
-                    let back_ins = self.backward[(i, j + 1, state as isize)];
+                    let back_match = self.backward[(i + 1, j + 1, state)];
+                    let back_del = self.backward[(i + 1, j, state)];
+                    let back_ins = self.backward[(i, j + 1, state)];
                     let (mat, del, ins) = (0..self.model.states)
                         .map(|from| {
-                            let forward = self.forward[(i, j, from as isize)]
-                                * self.model.transition(from, state);
+                            let forward =
+                                self.forward[(i, j, from)] * self.model.transition(from, state);
                             let mat = forward * self.model.observe(state, x, y) * back_match;
                             let del = forward * self.model.observe(state, x, GAP) * back_del;
                             let ins = forward * self.model.observe(state, GAP, y) * back_ins;
@@ -1528,8 +1512,8 @@ mod gphmm {
             for i in 0..xs.len() + 1 {
                 for j in 0..ys.len() + 1 {
                     for s in 0..phmm.states {
-                        let naive = dpn[(i as isize, j as isize, s as isize)];
-                        let scaled = log(&dps[(i as isize, j as isize, s as isize)])
+                        let naive = dpn[(i as isize, j as isize, s)];
+                        let scaled = log(&dps[(i as isize, j as isize, s)])
                             + factors[..=i].iter().map(log).sum::<f64>();
                         if -20f64 < naive || -20f64 < scaled {
                             assert!(
@@ -1561,7 +1545,7 @@ mod gphmm {
                 .initial_distribution
                 .iter()
                 .enumerate()
-                .map(|(s, init)| dp[(0, 0, s as isize)] + log(init))
+                .map(|(s, init)| dp[(0, 0, s)] + log(init))
                 .collect();
             let lkb = logsumexp(&lkbs);
             assert!((lkn - lkb).abs() < 0.01, "{},{}", lkn, lkb);
@@ -1584,7 +1568,7 @@ mod gphmm {
                 .initial_distribution
                 .iter()
                 .enumerate()
-                .map(|(s, init)| dp[(0, 0, s as isize)] * init)
+                .map(|(s, init)| dp[(0, 0, s)] * init)
                 .sum::<f64>()
                 .ln()
                 + factors.iter().map(log).sum::<f64>();
@@ -1593,8 +1577,8 @@ mod gphmm {
             for i in 0..xs.len() + 1 {
                 for j in 0..ys.len() + 1 {
                     for s in 0..phmm.states {
-                        let naive = dpn[(i as isize, j as isize, s as isize)];
-                        let scaled = log(&dp[(i as isize, j as isize, s as isize)])
+                        let naive = dpn[(i as isize, j as isize, s)];
+                        let scaled = log(&dp[(i as isize, j as isize, s)])
                             + factors[i..].iter().map(log).sum::<f64>();
                         if -10f64 < naive || -10f64 < scaled {
                             assert!(

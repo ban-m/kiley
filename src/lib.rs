@@ -6,6 +6,7 @@ pub mod fasta;
 pub mod gen_seq;
 pub mod hmm;
 pub mod padseq;
+// pub mod realigner;
 pub mod sam;
 pub mod trialignment;
 pub use bialignment::polish_until_converge_banded;
@@ -552,28 +553,15 @@ pub fn fit_model<T: std::borrow::Borrow<[u8]>>(
     };
     let mut lk = get_lk(&phmm, &draft);
     loop {
-        let new_cons = loop {
-            let start = std::time::Instant::now();
-            let new_phmm = phmm.fit_banded_inner(&draft, &queries, config.radius);
-            let fit = std::time::Instant::now();
-            let new_lk = get_lk(&new_phmm, &draft);
-            debug!("FIT\t{}", (fit - start).as_millis());
-            debug!("{:.3}->{:.3}", lk, new_lk);
-            if new_lk - lk < 0.1f64 {
-                debug!("Break");
-                break phmm
-                    .correction_until_convergence_banded_inner(&draft, &queries, config.radius)
-                    .unwrap();
-            } else {
-                lk = new_lk;
-                phmm = new_phmm;
-            }
-        };
-        if draft == new_cons {
+        let (new_phmm, new_lk) = phmm.fit_banded_inner(&draft, &queries, config.radius);
+        if new_lk - lk < 0.1f64 {
             break phmm;
-        } else {
-            draft = new_cons;
         }
+        phmm = new_phmm;
+        lk = new_lk;
+        draft = phmm
+            .correction_until_convergence_banded_inner(&draft, &queries, config.radius)
+            .unwrap();
     }
 }
 
@@ -585,38 +573,22 @@ fn polish_chunk<T: std::borrow::Borrow<[u8]>>(
     config: &PolishConfig<Cond>,
 ) -> Option<Vec<u8>> {
     use padseq::PadSeq;
-    let mut draft = PadSeq::new(draft);
     let queries: Vec<_> = queries.iter().map(|x| PadSeq::new(x.borrow())).collect();
+    let mut draft = PadSeq::new(draft);
     let mut phmm = config.phmm.clone();
-    let get_lk = |model: &GPHMM<Cond>, draft: &PadSeq| -> f64 {
-        queries
-            .iter()
-            .filter_map(|q| model.likelihood_banded_inner(draft, q, config.radius))
-            .sum()
-    };
-    let mut lk = get_lk(&phmm, &draft);
-    loop {
-        let new_cons = loop {
-            let new_phmm = phmm.fit_banded_inner(&draft, &queries, config.radius);
-            let new_lk = get_lk(&new_phmm, &draft);
-            debug!("LK\t{:.3}", new_lk);
-            if new_lk - lk < 0.1f64 {
-                break phmm
-                    .correction_until_convergence_banded_inner(&draft, &queries, config.radius)
-                    .unwrap();
-            } else {
-                lk = new_lk;
-                phmm = new_phmm;
-            }
-        };
-        if draft == new_cons {
-            debug!("Polished");
-            debug!("ModelDiff:{:?}", config.phmm.dist(&phmm));
-            break Some(draft.into());
+    let mut lk = std::f64::NEG_INFINITY;
+    while let Some(seq) = phmm.correct_banded_batch(&draft, &queries, config.radius, 15) {
+        let (new_hmm, new_lk) = phmm.fit_banded_inner(&seq, &queries, config.radius);
+        if new_lk < lk {
+            break;
         } else {
-            draft = new_cons;
+            draft = seq;
+            phmm = new_hmm;
+            lk = new_lk;
         }
     }
+    debug!("ModelDiff:{:?}", config.phmm.dist(&phmm));
+    Some(draft.into())
 }
 
 /// Take consensus and polish it. It consists of three step.
@@ -627,23 +599,44 @@ fn polish_chunk<T: std::borrow::Borrow<[u8]>>(
 /// In such case, please increase radius(recommend doubling) and try again.
 pub fn consensus<T: std::borrow::Borrow<[u8]>>(
     seqs: &[T],
-    seed: u64,
+    _seed: u64,
     repnum: usize,
     radius: usize,
 ) -> Option<Vec<u8>> {
     let start = std::time::Instant::now();
-    let consensus = ternary_consensus(seqs, seed, repnum, radius);
+    // let consensus = ternary_consensus(seqs, seed, repnum, radius);
+    let polished: Vec<_> = (0..repnum)
+        .map(|i| {
+            let seed = seqs[i % seqs.len()].borrow();
+            polish_by_pileup(&seed, seqs, radius)
+        })
+        .collect();
+    let consensus = polish_by_pileup(&polished[0], &polished, radius);
     let ternary = std::time::Instant::now();
-    let consensus = polish_by_pileup(&consensus, seqs, radius);
+    debug!("Cons:{}:{}", 1, (ternary - start).as_millis());
+    let consensus: Vec<_> = {
+        let consensus = padseq::PadSeq::new(consensus.as_slice());
+        let seqs: Vec<_> = seqs
+            .iter()
+            .map(|x| padseq::PadSeq::new(x.borrow()))
+            .collect();
+        use bialignment::{polish_by_batch_banded, polish_by_focused_banded};
+        let (mut cons, _) = polish_by_focused_banded(&consensus, &seqs, radius, 20, 25)?;
+        while let Some((improved, _)) = polish_by_batch_banded(&cons, &seqs, radius, 20) {
+            cons = improved;
+        }
+        cons.into()
+    };
     let pileup = std::time::Instant::now();
+    debug!("Cons:{}:{}", 2, (pileup - ternary).as_millis());
     let config = PolishConfig::new(radius, 0, seqs.len(), 0, 0);
     let consensus = polish_chunk(&consensus, &seqs, &config);
     let end = std::time::Instant::now();
     debug!(
         "{}\t{}\t{}",
-        (ternary - start).as_secs(),
-        (pileup - ternary).as_secs(),
-        (end - pileup).as_secs()
+        (ternary - start).as_millis(),
+        (pileup - ternary).as_millis(),
+        (end - pileup).as_millis()
     );
     consensus
 }
@@ -658,32 +651,30 @@ pub fn consensus_bounded<T: std::borrow::Borrow<[u8]>>(
     max_radius: usize,
 ) -> Option<Vec<u8>> {
     let consensus = ternary_consensus(seqs, seed, repnum, radius);
-    let consensus = polish_by_pileup(&consensus, seqs, radius);
-    let mut radius = radius;
-    loop {
-        let consensus = bialignment::polish_until_converge_banded(&consensus, &seqs, radius);
-        if consensus.is_some() {
-            break consensus;
-        } else if max_radius <= radius {
-            break None;
-        } else {
-            radius *= 2;
-            radius = radius.min(max_radius);
+    let mut consensus = polish_by_pileup(&consensus, seqs, radius);
+    for radius in (1..).map(|i| i * radius).take_while(|&r| r <= max_radius) {
+        match bialignment::polish_until_converge_banded(&consensus, &seqs, radius) {
+            Ok(res) => return Some(res),
+            Err(res) => consensus = res,
         }
     }
+    None
 }
 
+use trialignment::banded::Aligner;
 pub fn ternary_consensus<T: std::borrow::Borrow<[u8]>>(
     seqs: &[T],
     seed: u64,
     repnum: usize,
     radius: usize,
 ) -> Vec<u8> {
+    let max_len = seqs.iter().map(|x| x.borrow().len()).max().unwrap();
+    let mut aligner = Aligner::new(max_len, max_len, max_len, radius);
     let fold_num = (1..)
         .take_while(|&x| 3usize.pow(x as u32) <= seqs.len())
         .count();
     if repnum <= fold_num {
-        consensus_inner(seqs, radius)
+        consensus_inner(seqs, radius, &mut aligner)
     } else {
         let mut seqs: Vec<_> = seqs.iter().map(|x| x.borrow()).collect();
         let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
@@ -692,105 +683,26 @@ pub fn ternary_consensus<T: std::borrow::Borrow<[u8]>>(
         let ys = ternary_consensus(&seqs, rng.gen(), repnum - 1, radius);
         seqs.shuffle(&mut rng);
         let zs = ternary_consensus(&seqs, rng.gen(), repnum - 1, radius);
-        get_consensus_kiley(&xs, &ys, &zs, radius).1
+        aligner.consensus(&xs, &ys, &zs, radius).1
     }
 }
 
-fn consensus_inner<T: std::borrow::Borrow<[u8]>>(seqs: &[T], radius: usize) -> Vec<u8> {
+fn consensus_inner<T: std::borrow::Borrow<[u8]>>(
+    seqs: &[T],
+    radius: usize,
+    aligner: &mut Aligner,
+) -> Vec<u8> {
     let mut consensus: Vec<_> = seqs.iter().map(|x| x.borrow().to_vec()).collect();
     for _ in 1.. {
         consensus = consensus
             .chunks_exact(3)
-            .map(|xs| get_consensus_kiley(&xs[0], &xs[1], &xs[2], radius).1)
+            .map(|xs| aligner.consensus(&xs[0], &xs[1], &xs[2], radius).1)
             .collect();
         if consensus.len() < 3 {
             break;
         }
     }
     consensus.pop().unwrap()
-}
-
-pub fn get_consensus_kiley(xs: &[u8], ys: &[u8], zs: &[u8], rad: usize) -> (u32, Vec<u8>) {
-    let (dist, aln) = trialignment::banded::alignment(xs, ys, zs, rad);
-    (dist, correct_by_alignment(xs, ys, zs, &aln))
-}
-
-pub fn correct_by_alignment(xs: &[u8], ys: &[u8], zs: &[u8], aln: &[trialignment::Op]) -> Vec<u8> {
-    let (mut x, mut y, mut z) = (0, 0, 0);
-    let mut buffer = vec![];
-    for &op in aln {
-        match op {
-            trialignment::Op::XInsertion => {
-                x += 1;
-            }
-            trialignment::Op::YInsertion => {
-                y += 1;
-            }
-            trialignment::Op::ZInsertion => {
-                z += 1;
-            }
-            trialignment::Op::XDeletion => {
-                // '-' or ys[y], or zs[z].
-                // Actually, it is hard to determine...
-                if ys[y] == zs[z] {
-                    buffer.push(ys[y]);
-                } else {
-                    // TODO: Consider here.
-                    match buffer.len() % 3 {
-                        0 => buffer.push(ys[y]),
-                        1 => buffer.push(zs[z]),
-                        _ => {}
-                    }
-                }
-                y += 1;
-                z += 1;
-            }
-            trialignment::Op::YDeletion => {
-                if xs[x] == zs[z] {
-                    buffer.push(xs[x]);
-                } else {
-                    match buffer.len() % 3 {
-                        0 => buffer.push(xs[x]),
-                        1 => buffer.push(zs[z]),
-                        _ => {}
-                    }
-                }
-                x += 1;
-                z += 1;
-            }
-            trialignment::Op::ZDeletion => {
-                if ys[y] == xs[x] {
-                    buffer.push(ys[y]);
-                } else {
-                    match buffer.len() % 3 {
-                        0 => buffer.push(xs[x]),
-                        1 => buffer.push(ys[y]),
-                        _ => {}
-                    }
-                }
-                x += 1;
-                y += 1;
-            }
-            trialignment::Op::Match => {
-                if xs[x] == ys[y] || xs[x] == zs[z] {
-                    buffer.push(xs[x]);
-                } else if ys[y] == zs[z] {
-                    buffer.push(zs[z])
-                } else {
-                    // TODO: consider here.
-                    match buffer.len() % 3 {
-                        0 => buffer.push(xs[x]),
-                        1 => buffer.push(ys[y]),
-                        _ => buffer.push(zs[z]),
-                    }
-                }
-                x += 1;
-                y += 1;
-                z += 1;
-            }
-        }
-    }
-    buffer
 }
 
 pub fn consensus_poa<T: std::borrow::Borrow<[u8]>>(
@@ -838,51 +750,73 @@ pub fn consensus_poa<T: std::borrow::Borrow<[u8]>>(
 pub fn polish_by_pileup<T: std::borrow::Borrow<[u8]>>(
     template: &[u8],
     xs: &[T],
-    radius: usize,
+    _radius: usize,
 ) -> Vec<u8> {
     let mut matches = vec![[0; 4]; template.len()];
-    let mut insertions = vec![[0; 4]; template.len() + 1];
+    // the 0-th element is the insertion before the 0-th base.
+    // TODO: Maybe @-delemitered sequence would be much memory efficient.
+    let mut insertions = vec![vec![]; template.len() + 1];
     let mut deletions = vec![0; template.len()];
-    use bialignment::edit_dist_banded;
     use bialignment::Op;
     for x in xs.iter() {
         let x = x.borrow();
-        let (_dist, ops): (u32, Vec<Op>) = match edit_dist_banded(&template, x, radius) {
-            Some(res) => res,
-            None => continue,
-        };
+        // use bialignment::edit_dist_banded;
+        // let (_dist, ops): (u32, Vec<Op>) = match edit_dist_banded(&template, x, radius) {
+        //     Some(res) => res,
+        //     None => continue,
+        // };
+        let ops: Vec<_> = edlib_sys::global(&template, x)
+            .into_iter()
+            .map(|x| match x {
+                0 | 3 => Op::Mat,
+                1 => Op::Ins,
+                2 => Op::Del,
+                _ => unreachable!(),
+            })
+            .collect();
         let (mut i, mut j) = (0, 0);
+        let mut ins_buffer = vec![];
         for op in ops {
             match op {
                 Op::Mat => {
                     matches[i][padseq::convert_to_twobit(&x[j]) as usize] += 1;
+                    if !ins_buffer.is_empty() {
+                        insertions[i].push(ins_buffer.clone());
+                        ins_buffer.clear();
+                    }
                     i += 1;
                     j += 1;
                 }
                 Op::Del => {
+                    if !ins_buffer.is_empty() {
+                        insertions[i].push(ins_buffer.clone());
+                        ins_buffer.clear();
+                    }
                     deletions[i] += 1;
                     i += 1;
                 }
                 Op::Ins => {
-                    insertions[i][padseq::convert_to_twobit(&x[j]) as usize] += 1;
+                    ins_buffer.push(x[j]);
                     j += 1;
                 }
             }
         }
+        if !ins_buffer.is_empty() {
+            insertions[i].push(ins_buffer);
+        }
     }
     let mut template = vec![];
     for ((i, m), &d) in insertions.iter().zip(matches.iter()).zip(deletions.iter()) {
-        let insertion = i.iter().sum::<usize>();
+        let insertion = i.iter().len();
         let coverage = m.iter().sum::<usize>() + d;
         if coverage / 2 < insertion {
-            if let Some(base) = i
-                .iter()
-                .enumerate()
-                .max_by_key(|x| x.1)
-                .map(|(idx, _)| b"ACGT"[idx])
-            {
-                template.push(base);
-            }
+            let tot_ins_len: usize = i.iter().map(|x| x.len()).sum();
+            let cons = if tot_ins_len / insertion < 3 {
+                naive_consensus(i)
+            } else {
+                de_bruijn_consensus(i)
+            };
+            template.extend(cons);
         }
         if d < coverage / 2 {
             if let Some(base) = m
@@ -895,8 +829,37 @@ pub fn polish_by_pileup<T: std::borrow::Borrow<[u8]>>(
             }
         }
     }
-    // We neglect the last insertion.
     template
+}
+
+// Take a consensus from seqeunces.
+// This is very naive consensus, majority voting.
+fn naive_consensus(xs: &[Vec<u8>]) -> Vec<u8> {
+    let mut counts: HashMap<(u64, usize), u64> = HashMap::new();
+    for x in xs.iter() {
+        let len = x.len();
+        let hash = x
+            .iter()
+            .map(padseq::convert_to_twobit)
+            .fold(0, |acc, base| (acc << 2) | base as u64);
+        *counts.entry((hash, len)).or_default() += 1;
+    }
+    let (&(kmer, k), _max) = counts.iter().max_by_key(|x| x.1).unwrap();
+    (0..k)
+        .map(|idx| {
+            let base = (kmer >> (2 * (k - 1 - idx))) & 0b11;
+            b"ACGT"[base as usize]
+        })
+        .collect()
+}
+
+// Take a consensus sequence from `xs`.
+// I use a naive de Bruijn graph to do that.
+// In other words, I recorded all the 3-mers to the hash map,
+// removing all the lightwehgit edge,
+fn de_bruijn_consensus(xs: &[Vec<u8>]) -> Vec<u8> {
+    // TODO: Implement this function.
+    xs.iter().max_by_key(|x| x.len()).unwrap().to_vec()
 }
 
 #[cfg(test)]
@@ -989,7 +952,9 @@ mod test {
             let xs = gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE);
             let ys = gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE);
             let zs = gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE);
-            let (_, consensus) = get_consensus_kiley(&xs, &ys, &zs, 10);
+            let (_, consensus) =
+                trialignment::banded::Aligner::new(xs.len(), ys.len(), zs.len(), 10)
+                    .consensus(&xs, &ys, &zs, 10);
             let xdist = edit_dist(&xs, &template);
             let ydist = edit_dist(&ys, &template);
             let zdist = edit_dist(&zs, &template);

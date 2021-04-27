@@ -225,9 +225,9 @@ mod test {
             let y = crate::gen_seq::introduce_randomness(&template, &mut rng, &p);
             let z = crate::gen_seq::introduce_randomness(&template, &mut rng, &p);
             let (naive_score, _) = naive::alignment(&x, &y, &z);
-            let (banded_score, _) = banded::alignment_u32(&x, &y, &z, 20);
+            let (banded_score, _) = banded::alignment(&x, &y, &z, 20);
             assert_eq!(naive_score, banded_score);
-            let (banded_score, _) = banded::alignment_u16(&x, &y, &z, 20);
+            let (banded_score, _) = banded::alignment(&x, &y, &z, 20);
             assert_eq!(naive_score, banded_score);
         }
     }

@@ -15,6 +15,7 @@ log = "0.4.14"
 bytecount = "*"
 env_logger = "*"
 rayon = "*"
+edlib_sys = {git = "https://github.com/ban-m/edlib-sys.git", branch = "master"}
 
 [dev-dependencies]
 rayon = "*"

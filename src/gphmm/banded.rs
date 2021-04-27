@@ -5,6 +5,76 @@
 //! entire sequences of the reference and the query.
 use super::*;
 impl GPHMM<ConditionalHiddenMarkovModel> {
+    pub fn correct_banded_batch(
+        &self,
+        template: &PadSeq,
+        queries: &[PadSeq],
+        radius: usize,
+        skip_size: usize,
+    ) -> Option<PadSeq> {
+        let start = std::time::Instant::now();
+        let radius = radius as isize;
+        let profiles: Vec<_> = queries
+            .iter()
+            .filter_map(|q| ProfileBanded::new(self, &template, q, radius))
+            .collect();
+        if profiles.is_empty() {
+            return None;
+        }
+        let total_lk = profiles.iter().map(|prof| prof.lk()).sum::<f64>();
+        let diff = 0.001;
+        fn merge(mut xs: Vec<f64>, ys: Vec<f64>) -> Vec<f64> {
+            xs.iter_mut().zip(ys).for_each(|(x, y)| *x += y);
+            xs
+        }
+        let profed = std::time::Instant::now();
+        let profile_with_diff = profiles
+            .iter()
+            .map(|prf| prf.to_modification_table())
+            .reduce(merge)
+            .unwrap();
+        let converted = std::time::Instant::now();
+        let mut improved = template.clone();
+        let mut offset = 0;
+        let mut profile_with_diff = profile_with_diff.chunks_exact(9).enumerate();
+        let mut changed_positions = vec![];
+        while let Some((pos, with_diff)) = profile_with_diff.next() {
+            // diff = [A,C,G,T,A,C,G,T,-], first four element is for mutation,
+            // second four element is for insertion.
+            let (op, &lk) = with_diff
+                .iter()
+                .enumerate()
+                .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
+                .unwrap();
+            if total_lk + diff < lk {
+                let pos = pos as isize + offset;
+                changed_positions.push(pos);
+                let (op, base) = (op / 4, (op % 4) as u8);
+                let op = [Op::Match, Op::Ins, Op::Del][op];
+                match op {
+                    Op::Match => improved[pos as isize] = base,
+                    Op::Del => {
+                        offset -= 1;
+                        improved.remove(pos as isize);
+                    }
+                    Op::Ins => {
+                        offset += 1;
+                        improved.insert(pos as isize, base);
+                    }
+                }
+                for _ in 0..skip_size {
+                    profile_with_diff.next();
+                }
+            }
+        }
+        debug!("{:?}", changed_positions);
+        debug!(
+            "Correct\t{}\t{}",
+            (profed - start).as_millis(),
+            (converted - profed).as_millis(),
+        );
+        (!changed_positions.is_empty()).then(|| improved)
+    }
     pub fn fit_banded<T: std::borrow::Borrow<[u8]>>(
         &self,
         template: &[u8],
@@ -13,15 +83,16 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
     ) -> Self {
         let template = PadSeq::new(template);
         let queries: Vec<_> = queries.iter().map(|x| PadSeq::new(x.borrow())).collect();
-        self.fit_banded_inner(&template, &queries, radius)
+        self.fit_banded_inner(&template, &queries, radius).0
     }
-    pub fn fit_banded_inner(&self, xs: &PadSeq, yss: &[PadSeq], radius: usize) -> Self {
+    pub fn fit_banded_inner(&self, xs: &PadSeq, yss: &[PadSeq], radius: usize) -> (Self, f64) {
+        let start = std::time::Instant::now();
         let radius = radius as isize;
         let profiles: Vec<_> = yss
             .iter()
             .filter_map(|ys| ProfileBanded::new(self, xs, ys, radius))
             .collect();
-        let start = std::time::Instant::now();
+        let profiled = std::time::Instant::now();
         let initial_distribution = self.estimate_initial_distribution_banded(&profiles);
         let init = std::time::Instant::now();
         let transition_matrix = self.estimate_transition_prob_banded(&profiles);
@@ -29,18 +100,21 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
         let observation_matrix = self.estimate_observation_prob_banded(&profiles);
         let obs = std::time::Instant::now();
         debug!(
-            "{}\t{}\t{}",
-            (init - start).as_millis(),
+            "{}\t{}\t{}\t{}",
+            (profiled - start).as_millis(),
+            (init - profiled).as_millis(),
             (trans - init).as_millis(),
             (obs - trans).as_millis()
         );
-        Self {
+        let updated = Self {
             states: self.states,
             initial_distribution,
             transition_matrix,
             observation_matrix,
             _mode: std::marker::PhantomData,
-        }
+        };
+        let lk: f64 = profiles.iter().map(|x| x.lk()).sum();
+        (updated, lk)
     }
     pub fn estimate_observation_prob_banded(&self, profiles: &[ProfileBanded<Cond>]) -> Vec<f64> {
         let mut buffer = vec![0f64; ((self.states - 1) << 6) + 8 * 8];
@@ -114,7 +188,7 @@ impl<M: HMMType> GPHMM<M> {
         let radius = radius as isize;
         // (0,0,s) is at (0, radius, s)
         for s in 0..self.states {
-            dp[(0, radius, s as isize)] = log(&self.initial_distribution[s]);
+            dp[(0, radius, s)] = log(&self.initial_distribution[s]);
         }
         // Initial values.
         // j_orig ranges in 1..radius
@@ -122,9 +196,9 @@ impl<M: HMMType> GPHMM<M> {
             let j_orig = j - radius;
             let y = ys[j_orig - 1];
             for s in 0..self.states {
-                dp[(0, j, s as isize)] = (0..self.states)
+                dp[(0, j, s)] = (0..self.states)
                     .map(|t| {
-                        dp[(0, j - 1, t as isize)]
+                        dp[(0, j - 1, t)]
                             + log_transit[t][s]
                             + log_observe[s][(GAP << 3 | y) as usize]
                     })
@@ -148,20 +222,20 @@ impl<M: HMMType> GPHMM<M> {
                     let i = i as isize;
                     let max_path = (0..self.states)
                         .map(|t| {
-                            let mat = dp[(i - 1, j_prev - 1, t as isize)]
+                            let mat = dp[(i - 1, j_prev - 1, t)]
                                 + log_transit[t][s]
                                 + log_observe[s][(x << 3 | y) as usize];
-                            let del = dp[(i - 1, j_prev, t as isize)]
+                            let del = dp[(i - 1, j_prev, t)]
                                 + log_transit[t][s]
                                 + log_observe[s][(x << 3 | GAP) as usize];
                             // If j_in_ys == 0, this code should be skipped, but it is OK, DPTable would forgive "out-of-bound" access.
-                            let ins = dp[(i, j - 1, t as isize)]
+                            let ins = dp[(i, j - 1, t)]
                                 + log_transit[t][s]
                                 + log_observe[s][(GAP << 3 | y) as usize];
                             mat.max(del).max(ins)
                         })
                         .fold(std::f64::NEG_INFINITY, |x, y| x.max(y));
-                    dp[(i, j, s as isize)] = max_path;
+                    dp[(i, j, s)] = max_path;
                     // if max_lk < max_path {
                     //     max_lk = max_path;
                     //     max_j = j;
@@ -182,7 +256,7 @@ impl<M: HMMType> GPHMM<M> {
         let (max_lk, mut state) = {
             let j = j_orig + radius - centers[xs.len()];
             (0..self.states)
-                .map(|s| (dp[(i, j, s as isize)], s as isize))
+                .map(|s| (dp[(i, j, s)], s))
                 .max_by(|x, y| (x.0).partial_cmp(&(y.0)).unwrap())
                 .unwrap()
         };
@@ -195,21 +269,21 @@ impl<M: HMMType> GPHMM<M> {
             let (x, y) = (xs[i - 1], ys[j_orig - 1]);
             let (op, new_state) = (0..self.states)
                 .find_map(|t| {
-                    let mat = dp[(i - 1, j_prev - 1, t as isize)]
+                    let mat = dp[(i - 1, j_prev - 1, t)]
                         + log_transit[t][state as usize]
                         + log_observe[state as usize][(x << 3 | y) as usize];
-                    let del = dp[(i - 1, j_prev, t as isize)]
+                    let del = dp[(i - 1, j_prev, t)]
                         + log_transit[t][state as usize]
                         + log_observe[state as usize][(x << 3 | GAP) as usize];
-                    let ins = dp[(i, j - 1, t as isize)]
+                    let ins = dp[(i, j - 1, t)]
                         + log_transit[t][state as usize]
                         + log_observe[state as usize][(GAP << 3 | y) as usize];
                     if (current - mat).abs() < 0.00001 {
-                        Some((Op::Match, t as isize))
+                        Some((Op::Match, t))
                     } else if (current - del).abs() < 0.0001 {
-                        Some((Op::Del, t as isize))
+                        Some((Op::Del, t))
                     } else if (current - ins).abs() < 0.0001 {
-                        Some((Op::Ins, t as isize))
+                        Some((Op::Ins, t))
                     } else {
                         None
                     }
@@ -235,10 +309,10 @@ impl<M: HMMType> GPHMM<M> {
             let x = xs[i - 1];
             let new_state = (0..self.states)
                 .find_map(|t| {
-                    let del = dp[(i - 1, j_prev, t as isize)]
+                    let del = dp[(i - 1, j_prev, t)]
                         + log_transit[t][state as usize]
                         + log_observe[state as usize][(x << 3 | GAP) as usize];
-                    ((current - del).abs() < 0.001).then(|| t as isize)
+                    ((current - del).abs() < 0.001).then(|| t)
                 })
                 .unwrap();
             state = new_state;
@@ -254,10 +328,10 @@ impl<M: HMMType> GPHMM<M> {
             let y = ys[j_orig - 1];
             let new_state = (0..self.states)
                 .find_map(|t| {
-                    let ins = dp[(0, j - 1, t as isize)]
+                    let ins = dp[(0, j - 1, t)]
                         + log_transit[t][state as usize]
                         + log_observe[state as usize][(GAP << 3 | y) as usize];
-                    ((current - ins).abs() < 0.0001).then(|| t as isize)
+                    ((current - ins).abs() < 0.0001).then(|| t)
                 })
                 .unwrap();
             state = new_state;
@@ -281,7 +355,7 @@ impl<M: HMMType> GPHMM<M> {
         let n = xs.len() as isize;
         let m = ys.len() as isize - center + radius;
         (0..2 * radius + 1).contains(&m).then(|| {
-            let lk: f64 = (0..self.states).map(|s| dp[(n, m, s as isize)]).sum();
+            let lk: f64 = (0..self.states).map(|s| dp[(n, m, s)]).sum();
             lk.ln() + normalized_factor
         })
     }
@@ -298,10 +372,15 @@ impl<M: HMMType> GPHMM<M> {
         // In other words, if you want to convert the j-th element in the banded DP table into the original coordinate,
         // j + centers[i] - radius would be oK.
         // Inverse convertion is the sam, j_orig + radius - centers[i] would be OK.
+        // Find maximum position? No, use naive band.
         let mut centers = vec![0, 0];
+        for i in 0..xs.len() {
+            let next_center = (i * ys.len() / xs.len()) as isize;
+            centers.push(next_center);
+        }
         // Initialize.
         for (s, &x) in self.initial_distribution.iter().enumerate() {
-            dp[(0, radius, s as isize)] = x;
+            dp[(0, radius, s)] = x;
         }
         for j in radius + 1..2 * radius + 1 {
             let j_orig = j - radius - 1;
@@ -311,9 +390,9 @@ impl<M: HMMType> GPHMM<M> {
             let y = ys[j - radius - 1];
             for s in 0..self.states {
                 let trans: f64 = (0..self.states)
-                    .map(|t| dp[(0, j - 1, t as isize)] * self.transition(t, s))
+                    .map(|t| dp[(0, j - 1, t)] * self.transition(t, s))
                     .sum();
-                dp[(0, j, s as isize)] += trans * self.observe(s, GAP, y);
+                dp[(0, j, s)] += trans * self.observe(s, GAP, y);
             }
         }
         // Normalize.
@@ -322,7 +401,6 @@ impl<M: HMMType> GPHMM<M> {
         dp.div(0, total);
         // Fill DP cells.
         for (i, &x) in xs.iter().enumerate().map(|(pos, x)| (pos + 1, x)) {
-            assert_eq!(centers.len(), i + 1);
             let (center, prev) = (centers[i], centers[i - 1]);
             // Deletion and Match transitions.
             // Maybe we should treat the case when j_orig == 0, but it is OK. DPTable would treat such cases.
@@ -332,10 +410,10 @@ impl<M: HMMType> GPHMM<M> {
                 let prev_j = j + center - prev;
                 for s in 0..self.states {
                     let (mat_obs, del_obs) = (self.observe(s, x, y), self.observe(s, x, GAP));
-                    dp[(i as isize, j as isize, s as isize)] = (0..self.states)
+                    *dp.get_mut(i as isize, j as isize, s).unwrap() = (0..self.states)
                         .map(|t| {
-                            let mat = dp[(i as isize - 1, prev_j - 1, t as isize)];
-                            let del = dp[(i as isize - 1, prev_j, t as isize)];
+                            let mat = dp[(i as isize - 1, prev_j - 1, t)];
+                            let del = dp[(i as isize - 1, prev_j, t)];
                             (mat * mat_obs + del * del_obs) * self.transition(t, s)
                         })
                         .sum::<f64>();
@@ -347,23 +425,18 @@ impl<M: HMMType> GPHMM<M> {
             for j in get_range(radius, ys.len() as isize, center) {
                 let j_orig = j + center - radius;
                 let y = ys[j_orig - 1];
+                let (i, j) = (i as isize, j as isize);
                 for s in 0..self.states {
                     let ins_obs = self.observe(s, GAP, y);
-                    dp[(i as isize, j as isize, s as isize)] += (0..self.states)
-                        .map(|t| {
-                            dp[(i as isize, j as isize - 1, t as isize)]
-                                * self.transition(t, s)
-                                * ins_obs
-                        })
-                        .sum::<f64>();
+                    *dp.get_mut(i, j, s).unwrap() += (0..self.states)
+                        .map(|t| dp[(i as isize, j as isize - 1, t)] * self.transition(t, s))
+                        .sum::<f64>()
+                        * ins_obs;
                 }
             }
             let second_total = dp.total(i);
             dp.div(i, second_total);
             norm_factors.push(first_total * second_total);
-            // Find maximum position? No, use naive band.
-            let next_center = (i * ys.len() / xs.len()) as isize;
-            centers.push(next_center);
         }
         let m = ys.len() as isize - centers[xs.len()] + radius;
         (0..2 * radius + 1)
@@ -382,7 +455,7 @@ impl<M: HMMType> GPHMM<M> {
         let mut norm_factors = vec![];
         // Initialize
         let (xslen, yslen) = (xs.len() as isize, ys.len() as isize);
-        for s in 0..self.states as isize {
+        for s in 0..self.states {
             let j = yslen - centers[xs.len()] + radius;
             dp[(xslen, j, s)] = 1f64;
         }
@@ -392,11 +465,9 @@ impl<M: HMMType> GPHMM<M> {
             let j_orig = j + centers[xs.len()] - radius;
             let y = ys[j_orig];
             for s in 0..self.states {
-                dp[(xslen, j, s as isize)] += (0..self.states)
+                dp[(xslen, j, s)] += (0..self.states)
                     .map(|t| {
-                        self.transition(s, t)
-                            * self.observe(t, GAP, y)
-                            * dp[(xslen, j + 1, t as isize)]
+                        self.transition(s, t) * self.observe(t, GAP, y) * dp[(xslen, j + 1, t)]
                     })
                     .sum::<f64>();
             }
@@ -415,11 +486,11 @@ impl<M: HMMType> GPHMM<M> {
                 let i = i as isize;
                 let j_next = j + center - next;
                 for s in 0..self.states {
-                    dp[(i, j, s as isize)] = (0..self.states)
+                    dp[(i, j, s)] = (0..self.states)
                         .map(|t| {
                             self.transition(s, t)
-                                * (self.observe(t, x, y) * dp[(i + 1, j_next + 1, t as isize)]
-                                    + self.observe(t, x, GAP) * dp[(i + 1, j_next, t as isize)])
+                                * (self.observe(t, x, y) * dp[(i + 1, j_next + 1, t)]
+                                    + self.observe(t, x, GAP) * dp[(i + 1, j_next, t)])
                         })
                         .sum::<f64>();
                 }
@@ -431,11 +502,9 @@ impl<M: HMMType> GPHMM<M> {
                 let y = ys[j_orig];
                 for s in 0..self.states {
                     let i = i as isize;
-                    dp[(i, j, s as isize)] += (0..self.states)
+                    dp[(i, j, s)] += (0..self.states)
                         .map(|t| {
-                            self.transition(s, t)
-                                * self.observe(t, GAP, y)
-                                * dp[(i, j + 1, t as isize)]
+                            self.transition(s, t) * self.observe(t, GAP, y) * dp[(i, j + 1, t)]
                         })
                         .sum::<f64>();
                 }
@@ -465,12 +534,8 @@ impl<M: HMMType> GPHMM<M> {
         radius: usize,
     ) -> Option<PadSeq> {
         let mut template = template.clone();
-        let mut start_position = 0;
-        while let Some((seq, next)) =
-            self.correction_inner_banded(&template, &queries, radius, start_position)
-        {
+        while let Some((seq, _)) = self.correction_inner_banded(&template, &queries, radius, 0) {
             template = seq;
-            start_position = next;
         }
         Some(template)
     }
@@ -482,12 +547,10 @@ impl<M: HMMType> GPHMM<M> {
         _start_position: usize,
     ) -> Option<(PadSeq, usize)> {
         let radius = radius as isize;
-        // let start = std::time::Instant::now();
         let profiles: Vec<_> = queries
             .iter()
             .filter_map(|q| ProfileBanded::new(self, &template, q, radius))
             .collect();
-        // let prof = std::time::Instant::now();
         if profiles.is_empty() {
             return None;
         }
@@ -559,8 +622,6 @@ impl<M: HMMType> GPHMM<M> {
     }
     pub fn estimate_transition_prob_banded(&self, profiles: &[ProfileBanded<M>]) -> Vec<f64> {
         let states = self.states;
-        // [from * states + to] = Pr(from->to)
-        // Because it is easier to normalize.
         let mut buffer = vec![0f64; states * states];
         for prob in profiles.iter().map(|prf| prf.transition_probability()) {
             buffer.iter_mut().zip(prob).for_each(|(x, y)| *x += y);
@@ -570,18 +631,10 @@ impl<M: HMMType> GPHMM<M> {
             let sum: f64 = row.iter().sum();
             row.iter_mut().for_each(|x| *x /= sum);
         }
-        // Transpose. [to * states + from] = Pr{from->to}.
-        (0..states * states)
-            .map(|idx| {
-                let (to, from) = (idx / states, idx % states);
-                buffer[from * states + to]
-            })
-            .collect()
+        buffer
     }
     pub fn par_estimate_transition_prob_banded(&self, profiles: &[ProfileBanded<M>]) -> Vec<f64> {
         let states = self.states;
-        // [from * states + to] = Pr(from->to)
-        // Because it is easier to normalize.
         let mut buffer = profiles
             .par_iter()
             .map(|prf| prf.transition_probability())
@@ -592,13 +645,7 @@ impl<M: HMMType> GPHMM<M> {
             let sum: f64 = row.iter().sum();
             row.iter_mut().for_each(|x| *x /= sum);
         }
-        // Transpose. [to * states + from] = Pr{from->to}.
-        (0..states * states)
-            .map(|idx| {
-                let (to, from) = (idx / states, idx % states);
-                buffer[from * states + to]
-            })
-            .collect()
+        buffer
     }
 }
 
@@ -622,11 +669,19 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
         query: &'b PadSeq,
         radius: isize,
     ) -> Option<Self> {
+        let start = std::time::Instant::now();
         let (forward, forward_factor, centers) = model.forward_banded(template, query, radius)?;
+        let f_end = std::time::Instant::now();
         let (backward, backward_factor) = model.backward_banded(template, query, radius, &centers);
         if backward_factor.iter().any(|x| x.is_nan()) {
             panic!("{:?}\n{}", backward_factor, model,);
         }
+        let b_end = std::time::Instant::now();
+        // debug!(
+        //     "{}\t{}",
+        //     (f_end - start).as_millis(),
+        //     (b_end - f_end).as_millis(),
+        // );
         Some(Self {
             template,
             query,
@@ -642,7 +697,7 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
     pub fn lk(&self) -> f64 {
         let n = self.template.len();
         let m = self.query.len() as isize - self.centers[n] + self.radius;
-        let states = self.model.states as isize;
+        let states = self.model.states;
         let (n, m) = (n as isize, m as isize);
         let lk: f64 = (0..states).map(|s| self.forward[(n, m, s)]).sum();
         let factor: f64 = self.forward_factor.iter().map(log).sum();
@@ -661,14 +716,12 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
                 (0..states)
                     .map(|s| {
                         let forward: f64 = (0..states)
-                            .map(|t| {
-                                self.forward[(pos, j, t as isize)] * self.model.transition(t, s)
-                            })
+                            .map(|t| self.forward[(pos, j, t)] * self.model.transition(t, s))
                             .sum();
                         let backward = self.model.observe(s, base, y)
-                            * self.backward[(pos + 1, j_next + 1, s as isize)]
+                            * self.backward[(pos + 1, j_next + 1, s)]
                             + self.model.observe(s, base, GAP)
-                                * self.backward[(pos + 1, j_next, s as isize)];
+                                * self.backward[(pos + 1, j_next, s)];
                         forward * backward
                     })
                     .sum::<f64>()
@@ -684,7 +737,7 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
         let center = self.centers[pos];
         if pos + 1 == self.template.len() {
             let j = self.query.len() as isize - center + self.radius;
-            let lk: f64 = (0..states as isize)
+            let lk: f64 = (0..states)
                 .map(|s| self.forward[(pos as isize, j, s)])
                 .sum();
             let factor: f64 = self.forward_factor[..pos + 1].iter().map(log).sum();
@@ -701,21 +754,13 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
                 (0..states)
                     .map(|s| {
                         let forward: f64 = (0..states)
-                            .map(|t| {
-                                self.forward[(pos, j, t as isize)] * self.model.transition(t, s)
-                            })
+                            .map(|t| self.forward[(pos, j, t)] * self.model.transition(t, s))
                             .sum();
                         // This need to be `.get` method, as j_next might be out of range.
                         let backward_mat = self.model.observe(s, x, y)
-                            * self
-                                .backward
-                                .get(pos + 2, j_next + 1, s as isize)
-                                .unwrap_or(&0f64);
+                            * self.backward.get(pos + 2, j_next + 1, s).unwrap_or(&0f64);
                         let backward_del = self.model.observe(s, x, GAP)
-                            * self
-                                .backward
-                                .get(pos + 2, j_next, s as isize)
-                                .unwrap_or(&0f64);
+                            * self.backward.get(pos + 2, j_next, s).unwrap_or(&0f64);
                         forward * (backward_mat + backward_del)
                     })
                     .sum::<f64>()
@@ -737,14 +782,11 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
                 (0..states)
                     .map(|s| {
                         let forward: f64 = (0..states)
-                            .map(|t| {
-                                self.forward[(pos, j, t as isize)] * self.model.transition(t, s)
-                            })
+                            .map(|t| self.forward[(pos, j, t)] * self.model.transition(t, s))
                             .sum();
                         let backward = self.model.observe(s, base, y)
-                            * self.backward[(pos, j + 1, s as isize)]
-                            + self.model.observe(s, base, GAP)
-                                * self.backward[(pos, j, s as isize)];
+                            * self.backward[(pos, j + 1, s)]
+                            + self.model.observe(s, base, GAP) * self.backward[(pos, j, s)];
                         forward * backward
                     })
                     .sum::<f64>()
@@ -798,7 +840,7 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
                 let forward = (0..states).map(|s| {
                     let pos = pos as isize;
                     (0..states)
-                        .map(|t| self.forward[(pos, j, t as isize)] * self.model.transition(t, s))
+                        .map(|t| self.forward[(pos, j, t)] * self.model.transition(t, s))
                         .sum::<f64>()
                 });
                 let j_orig = j + center - self.radius;
@@ -806,16 +848,15 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
                 let y = self.query[j_orig];
                 let pos = pos as isize;
                 for (s, forward) in forward.enumerate() {
-                    for base in b"ACGT".iter().map(padseq::convert_to_twobit) {
+                    for base in 0..4u8 {
                         let backward = self.model.observe(s, base, y)
-                            * self.backward[(pos, j + 1, s as isize)]
-                            + self.model.observe(s, base, GAP)
-                                * self.backward[(pos, j, s as isize)];
+                            * self.backward[(pos, j + 1, s)]
+                            + self.model.observe(s, base, GAP) * self.backward[(pos, j, s)];
                         slots[4 + base as usize] += forward * backward;
                         let backward = self.model.observe(s, base, y)
-                            * self.backward[(pos + 1, j_next + 1, s as isize)]
+                            * self.backward[(pos + 1, j_next + 1, s)]
                             + self.model.observe(s, base, GAP)
-                                * self.backward[(pos + 1, j_next, s as isize)];
+                                * self.backward[(pos + 1, j_next, s)];
                         slots[base as usize] += forward * backward;
                     }
                     if pos + 1 != self.template.len() as isize {
@@ -825,13 +866,10 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
                         let backward_mat = self.model.observe(s, x, y)
                             * self
                                 .backward
-                                .get(pos + 2, j_gap_next + 1, s as isize)
+                                .get(pos + 2, j_gap_next + 1, s)
                                 .unwrap_or(&0f64);
                         let backward_del = self.model.observe(s, x, GAP)
-                            * self
-                                .backward
-                                .get(pos + 2, j_gap_next, s as isize)
-                                .unwrap_or(&0f64);
+                            * self.backward.get(pos + 2, j_gap_next, s).unwrap_or(&0f64);
                         slots[8] += forward * (backward_mat + backward_del);
                     }
                 }
@@ -844,11 +882,9 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
                 .for_each(|x| *x = x.ln() + forward_acc + backward_acc[pos]);
             if pos + 1 != self.template.len() {
                 slots[8] = slots[8].ln() + forward_acc + backward_acc[pos + 2];
-            }
-            // Deletion
-            if pos + 1 == self.template.len() {
+            } else {
                 let j = self.query.len() as isize - center + self.radius;
-                let lk: f64 = (0..states as isize)
+                let lk: f64 = (0..states)
                     .map(|s| self.forward[(pos as isize, j, s)])
                     .sum();
                 slots[8] = lk.ln() + forward_acc;
@@ -863,22 +899,21 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
                 .map(|s| {
                     let pos = pos as isize;
                     (0..states)
-                        .map(|t| self.forward[(pos, j, t as isize)] * self.model.transition(t, s))
+                        .map(|t| self.forward[(pos, j, t)] * self.model.transition(t, s))
                         .sum()
                 })
                 .collect();
-            for base in b"ACGT".iter().map(padseq::convert_to_twobit) {
+            for base in 0..4 {
                 let j_orig = j + center - self.radius;
                 let y = self.query[j_orig];
                 let pos = pos as isize;
-                slots[4 + base as usize] += forward
+                slots[4 + base] += forward
                     .iter()
                     .enumerate()
                     .map(|(s, forward)| {
-                        let backward = self.model.observe(s, base, y)
-                            * self.backward[(pos, j + 1, s as isize)]
-                            + self.model.observe(s, base, GAP)
-                                * self.backward[(pos, j, s as isize)];
+                        let backward = self.model.observe(s, base as u8, y)
+                            * self.backward[(pos, j + 1, s)]
+                            + self.model.observe(s, base as u8, GAP) * self.backward[(pos, j, s)];
                         forward * backward
                     })
                     .sum::<f64>();
@@ -890,7 +925,7 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
         lks
     }
     pub fn initial_distribution(&self) -> Vec<f64> {
-        let mut probs: Vec<_> = (0..self.model.states as isize)
+        let mut probs: Vec<_> = (0..self.model.states)
             .map(|s| {
                 // We should multiply the scaling factors,
                 // but it would be cancelled out by normalizing.
@@ -901,10 +936,64 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
         probs.iter_mut().for_each(|x| *x /= sum);
         probs
     }
+    pub fn transition_probability(&self) -> Vec<f64> {
+        let states = self.model.states;
+        // Log probability.
+        let (forward_acc, backward_acc) = self.accumlate_factors();
+        let offset_factor = forward_acc
+            .iter()
+            .zip(backward_acc.iter())
+            .fold(std::f64::MIN, |x, (f, b)| x.max(f + b));
+        let factors: Vec<_> = (0..self.template.len())
+            .map(|i| {
+                let forward_factor: f64 = forward_acc[i + 1];
+                let backward1: f64 = backward_acc[i + 1];
+                let backward2: f64 = backward_acc[i];
+                let backward = (backward2 - backward1).exp();
+                let factor = (backward1 + forward_factor - offset_factor).exp();
+                (backward, factor)
+            })
+            .collect();
+        let mut probs: Vec<_> = vec![0f64; self.model.states.pow(2)];
+        for from in 0..states {
+            for to in 0..states {
+                let mut lks = 0f64;
+                for (i, &x) in self.template.iter().enumerate() {
+                    let (center, next) = (self.centers[i], self.centers[i + 1]);
+                    let (backward, offset) = factors[i];
+                    let i = i as isize;
+                    for j in get_range(self.radius, self.query.len() as isize, center) {
+                        let transition = &self.model.transition(from, to);
+                        let j_orig = j + center - self.radius;
+                        let y = self.query[j_orig];
+                        let j_next = j + center - next;
+                        let forward = &self.forward[(i, j, from)];
+                        let backward_match =
+                            self.model.observe(from, x, y) * self.backward[(i + 1, j_next + 1, to)];
+                        let backward_del =
+                            self.model.observe(from, x, GAP) * self.backward[(i + 1, j_next, to)];
+                        let backward_ins =
+                            self.model.observe(from, GAP, y) * self.backward[(i, j + 1, to)];
+                        let backward = backward_match + backward_del + backward_ins * backward;
+                        lks += forward * transition * backward * offset;
+                    }
+                }
+                probs[from * states + to] += lks;
+            }
+        }
+        probs.chunks_mut(states).for_each(|sums| {
+            let sum: f64 = sums.iter().sum();
+            if 1000f64 * std::f64::EPSILON < sum {
+                sums.iter_mut().for_each(|x| *x /= sum);
+                assert!((1f64 - sums.iter().sum::<f64>()) < 0.001);
+            }
+        });
+        probs
+    }
     // Return [from * states + to] = Pr{from->to},
     // because it is much easy to normalize.
-    pub fn transition_probability(&self) -> Vec<f64> {
-        let start = std::time::Instant::now();
+    // Please do not use log so frequently.
+    pub fn transition_probability_old(&self) -> Vec<f64> {
         let states = self.model.states;
         // Log probability.
         let (forward_acc, backward_acc) = self.accumlate_factors();
@@ -923,13 +1012,13 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
                         let j_orig = j + center - self.radius;
                         let y = self.query[j_orig];
                         let j_next = j + center - next;
-                        let forward = log(&self.forward[(i, j, from as isize)]) + forward_factor;
-                        let backward_match = self.model.observe(from, x, y)
-                            * self.backward[(i + 1, j_next + 1, to as isize)];
-                        let backward_del = self.model.observe(from, x, GAP)
-                            * self.backward[(i + 1, j_next, to as isize)];
-                        let backward_ins = self.model.observe(from, GAP, y)
-                            * self.backward[(i, j + 1, to as isize)];
+                        let forward = log(&self.forward[(i, j, from)]) + forward_factor;
+                        let backward_match =
+                            self.model.observe(from, x, y) * self.backward[(i + 1, j_next + 1, to)];
+                        let backward_del =
+                            self.model.observe(from, x, GAP) * self.backward[(i + 1, j_next, to)];
+                        let backward_ins =
+                            self.model.observe(from, GAP, y) * self.backward[(i, j + 1, to)];
                         let backward = backward_match
                             + backward_del
                             + backward_ins * (backward2 - backward1).exp();
@@ -942,7 +1031,6 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
                 probs[from * states + to] = logsumexp(&lks);
             }
         }
-        let recorded = std::time::Instant::now();
         // Normalizing.
         // These are log-probability.
         probs.chunks_mut(states).for_each(|sums| {
@@ -955,12 +1043,6 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
                 sums.iter_mut().for_each(|x| *x = 0f64);
             }
         });
-        let normed = std::time::Instant::now();
-        debug!(
-            "{}\t{}",
-            (recorded - start).as_millis(),
-            (normed - recorded).as_millis()
-        );
         probs
     }
 }
@@ -972,8 +1054,57 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
 // }
 
 impl<'a, 'b, 'c> ProfileBanded<'a, 'b, 'c, Cond> {
-    // [state << 6 | x | y] = Pr{(x,y)|state}
     pub fn observation_probability(&self) -> Vec<f64> {
+        let states = self.model.states;
+        let (forward_acc, backward_acc) = self.accumlate_factors();
+        let offset_factor = forward_acc
+            .iter()
+            .zip(backward_acc.iter())
+            .fold(std::f64::MIN, |x, (f, b)| x.max(f + b));
+        let factors: Vec<_> = (0..self.template.len())
+            .map(|i| {
+                let current_fac = (forward_acc[i] + backward_acc[i] - offset_factor).exp();
+                let next_fac = (forward_acc[i] + backward_acc[i + 1] - offset_factor).exp();
+                (current_fac, next_fac)
+            })
+            .collect();
+        let mut prob = vec![0f64; ((states - 1) << 6) + 8 * 8];
+        for (i, &x) in self.template.iter().enumerate() {
+            let (center, next) = (self.centers[i], self.centers[i + 1]);
+            let (current_factor, next_factor) = factors[i];
+            for j in get_range(self.radius, self.query.len() as isize, center) {
+                let j_orig = j + center - self.radius;
+                let y = self.query[j_orig];
+                let i = i as isize;
+                let j_next = j + center - next;
+                for state in 0..self.model.states {
+                    let forward: f64 = (0..self.model.states)
+                        .map(|from| self.forward[(i, j, from)] * self.model.transition(from, state))
+                        .sum();
+                    let ins = self.model.observe(state, GAP, y) * self.backward[(i, j + 1, state)];
+                    let del =
+                        self.model.observe(state, x, GAP) * self.backward[(i + 1, j_next, state)];
+                    let mat =
+                        self.model.observe(state, x, y) * self.backward[(i + 1, j_next + 1, state)];
+                    prob[state << 6 | (x << 3 | y) as usize] += forward * mat * next_factor;
+                    prob[state << 6 | (x << 3 | GAP) as usize] += forward * del * next_factor;
+                    prob[state << 6 | (GAP << 3 | y) as usize] += forward * ins * current_factor;
+                }
+            }
+        }
+        // Normalizing.
+        prob.chunks_mut(8).for_each(|sums| {
+            let sum: f64 = sums.iter().sum();
+            if 1000f64 * std::f64::EPSILON < sum {
+                sums.iter_mut().for_each(|x| *x /= sum);
+                let tot: f64 = sums.iter().sum();
+                assert!((1f64 - tot).abs() < 0.0001, "{:?}\t{}", sums, sum);
+            }
+        });
+        prob
+    }
+    // [state << 6 | x | y] = Pr{(x,y)|state}
+    pub fn observation_probability_old(&self) -> Vec<f64> {
         // This is log_probabilities.
         let states = self.model.states;
         let (forward_acc, backward_acc) = self.accumlate_factors();
@@ -989,13 +1120,13 @@ impl<'a, 'b, 'c> ProfileBanded<'a, 'b, 'c, Cond> {
                 let i = i as isize;
                 let j_next = j + center - next;
                 for state in 0..self.model.states {
-                    let back_match = self.backward[(i + 1, j_next + 1, state as isize)];
-                    let back_del = self.backward[(i + 1, j_next, state as isize)];
-                    let back_ins = self.backward[(i, j + 1, state as isize)];
+                    let back_match = self.backward[(i + 1, j_next + 1, state)];
+                    let back_del = self.backward[(i + 1, j_next, state)];
+                    let back_ins = self.backward[(i, j + 1, state)];
                     let (mat, del, ins) = (0..self.model.states)
                         .map(|from| {
-                            let forward = self.forward[(i, j, from as isize)]
-                                * self.model.transition(from, state);
+                            let forward =
+                                self.forward[(i, j, from)] * self.model.transition(from, state);
                             let mat = forward * self.model.observe(state, x, y) * back_match;
                             let del = forward * self.model.observe(state, x, GAP) * back_del;
                             let ins = forward * self.model.observe(state, GAP, y) * back_ins;
@@ -1098,13 +1229,13 @@ mod gphmm_banded {
             .initial_distribution
             .iter()
             .enumerate()
-            .map(|(s, init)| init * dp[(0, 0, s as isize)])
+            .map(|(s, init)| init * dp[(0, 0, s)])
             .sum();
         let lk_b: f64 = model
             .initial_distribution
             .iter()
             .enumerate()
-            .map(|(s, init)| init * dp_b[(0, radius as isize - centers[0], s as isize)])
+            .map(|(s, init)| init * dp_b[(0, radius as isize - centers[0], s)])
             .sum();
         let factor_b: f64 = factors_b.iter().map(log).sum();
         let factor: f64 = factors.iter().map(log).sum();
@@ -1449,5 +1580,39 @@ mod gphmm_banded {
             }
         }
         model
+    }
+    #[test]
+    fn transition_prob_test() {
+        let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(4280);
+        let three_cond = GPHMM::<Cond>::new_three_state(0.9, 0.05, 0.05, 0.9);
+        let prof = crate::gen_seq::PROFILE;
+        let radius = 30;
+        let xs = crate::gen_seq::generate_seq(&mut rng, 200);
+        let seq = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+        let xs = PadSeq::new(xs.as_slice());
+        let seq = PadSeq::new(seq.as_slice());
+        let profile = ProfileBanded::new(&three_cond, &xs, &seq, radius).unwrap();
+        let trans1 = profile.transition_probability();
+        let trans2 = profile.transition_probability_old();
+        for (x, y) in trans1.iter().zip(trans2.iter()) {
+            assert!((x - y).abs() < 0.0001, "{},{}", x, y)
+        }
+    }
+    #[test]
+    fn observation_prob_test() {
+        let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(4280);
+        let three_cond = GPHMM::<Cond>::new_three_state(0.9, 0.05, 0.05, 0.9);
+        let prof = crate::gen_seq::PROFILE;
+        let radius = 30;
+        let xs = crate::gen_seq::generate_seq(&mut rng, 200);
+        let seq = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+        let xs = PadSeq::new(xs.as_slice());
+        let seq = PadSeq::new(seq.as_slice());
+        let profile = ProfileBanded::new(&three_cond, &xs, &seq, radius).unwrap();
+        let trans1 = profile.observation_probability();
+        let trans2 = profile.observation_probability_old();
+        for (x, y) in trans1.iter().zip(trans2.iter()) {
+            assert!((x - y).abs() < 0.0001, "{},{}", x, y)
+        }
     }
 }
