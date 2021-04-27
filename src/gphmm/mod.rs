@@ -165,6 +165,15 @@ impl DPTable {
         assert!(index < self.data.len());
         self.data.get_mut(index)
     }
+    // Normalize the dp[i], return the divider.
+    fn normalize(&mut self, i: usize) -> f64 {
+        let start = self.get_index(i as isize, 0, 0);
+        let length = self.column * self.states;
+        let data = &mut self.data[start..start + length];
+        let sum = data.iter().sum::<f64>();
+        data.iter_mut().for_each(|x| *x /= sum);
+        sum
+    }
     // Sum dp[i][j][s] over j and s.
     fn total(&self, i: usize) -> f64 {
         let start = self.get_index(i as isize, 0, 0);
@@ -184,6 +193,13 @@ impl DPTable {
     fn get_cells(&self, i: isize, j: isize) -> &[f64] {
         let start = self.get_index(i, j, 0);
         &self.data[start..start + self.states]
+    }
+    fn replace_cells(&mut self, i: isize, j: isize, replace: &[f64]) {
+        let start = self.get_index(i, j, 0);
+        self.data[start..start + self.states]
+            .iter_mut()
+            .zip(replace.iter())
+            .for_each(|(x, y)| *x = *y);
     }
 }
 

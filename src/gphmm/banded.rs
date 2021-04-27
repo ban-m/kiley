@@ -367,13 +367,15 @@ impl<M: HMMType> GPHMM<M> {
         radius: isize,
     ) -> Option<(DPTable, Vec<f64>, Vec<isize>)> {
         let mut dp = DPTable::new(xs.len() + 1, 2 * radius as usize + 1, self.states, 0f64);
-        let mut norm_factors = vec![];
+        let mut norm_factors = Vec::with_capacity(xs.len() + 2);
         // The location where the radius-th element is in the original DP table.
         // In other words, if you want to convert the j-th element in the banded DP table into the original coordinate,
         // j + centers[i] - radius would be oK.
         // Inverse convertion is the sam, j_orig + radius - centers[i] would be OK.
         // Find maximum position? No, use naive band.
-        let mut centers = vec![0, 0];
+        let mut centers = Vec::with_capacity(xs.len() + 2);
+        centers.push(0);
+        centers.push(0);
         for i in 0..xs.len() {
             let next_center = (i * ys.len() / xs.len()) as isize;
             centers.push(next_center);
@@ -396,10 +398,17 @@ impl<M: HMMType> GPHMM<M> {
             }
         }
         // Normalize.
-        let total = dp.total(0);
-        norm_factors.push(1f64 * total);
-        dp.div(0, total);
+        norm_factors.push(1f64 * dp.normalize(0));
+        // Transposed matrix.
+        let transitions: Vec<Vec<_>> = (0..self.states)
+            .map(|to| {
+                (0..self.states)
+                    .map(|from| self.transition(from, to))
+                    .collect()
+            })
+            .collect();
         // Fill DP cells.
+        let mut buffer = vec![0f64; self.states];
         for (i, &x) in xs.iter().enumerate().map(|(pos, x)| (pos + 1, x)) {
             let (center, prev) = (centers[i], centers[i - 1]);
             // Deletion and Match transitions.
@@ -408,34 +417,46 @@ impl<M: HMMType> GPHMM<M> {
                 let j_orig = j + center - radius;
                 let y = ys[j_orig - 1];
                 let prev_j = j + center - prev;
-                for s in 0..self.states {
+                let mat = dp.get_cells(i as isize - 1, prev_j - 1);
+                let del = dp.get_cells(i as isize - 1, prev_j);
+                for (s, (transition, buffer)) in
+                    transitions.iter().zip(buffer.iter_mut()).enumerate()
+                {
                     let (mat_obs, del_obs) = (self.observe(s, x, y), self.observe(s, x, GAP));
-                    *dp.get_mut(i as isize, j as isize, s).unwrap() = (0..self.states)
-                        .map(|t| {
-                            let mat = dp[(i as isize - 1, prev_j - 1, t)];
-                            let del = dp[(i as isize - 1, prev_j, t)];
-                            (mat * mat_obs + del * del_obs) * self.transition(t, s)
-                        })
-                        .sum::<f64>();
+                    let mat = mat
+                        .iter()
+                        .zip(transition.iter())
+                        .fold(0f64, |x, (y, z)| x + y * z);
+                    let del = del
+                        .iter()
+                        .zip(transition.iter())
+                        .fold(0f64, |x, (y, z)| x + y * z);
+                    *buffer = del * del_obs + mat * mat_obs;
                 }
+                dp.replace_cells(i as isize, j as isize, &buffer);
             }
-            let first_total = dp.total(i);
-            dp.div(i, first_total);
+            let first_total = dp.normalize(i);
             // Insertion transitions
             for j in get_range(radius, ys.len() as isize, center) {
                 let j_orig = j + center - radius;
                 let y = ys[j_orig - 1];
                 let (i, j) = (i as isize, j as isize);
-                for s in 0..self.states {
+                let ins = dp.get_cells(i, j - 1);
+                for (s, (transition, buffer)) in
+                    transitions.iter().zip(buffer.iter_mut()).enumerate()
+                {
                     let ins_obs = self.observe(s, GAP, y);
-                    *dp.get_mut(i, j, s).unwrap() += (0..self.states)
-                        .map(|t| dp[(i as isize, j as isize - 1, t)] * self.transition(t, s))
-                        .sum::<f64>()
-                        * ins_obs;
+                    let ins = ins
+                        .iter()
+                        .zip(transition.iter())
+                        .fold(0f64, |x, (y, z)| x + y * z);
+                    *buffer = ins * ins_obs;
+                }
+                for s in 0..self.states {
+                    dp[(i, j, s)] += buffer[s];
                 }
             }
-            let second_total = dp.total(i);
-            dp.div(i, second_total);
+            let second_total = dp.normalize(i);
             norm_factors.push(first_total * second_total);
         }
         let m = ys.len() as isize - centers[xs.len()] + radius;
@@ -480,8 +501,6 @@ impl<M: HMMType> GPHMM<M> {
             // Deletion transition to below and match transition into diagonal.
             for j in get_range(radius, ys.len() as isize, center) {
                 let j_orig = j + center - radius;
-                // You may think this would out-of-bound, but it never does.
-                // this is beacuse ys is `padded` so that any out-of-bound accessing would become NULL base.
                 let y = ys[j_orig];
                 let i = i as isize;
                 let j_next = j + center - next;
@@ -820,6 +839,64 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
         };
         (forward_acc, backward_acc)
     }
+    fn fill_modification_slots(
+        &self,
+        slots: &mut [f64],
+        pos: usize,
+        forward_acc: &[f64],
+        backward_acc: &[f64],
+    ) {
+        let states = self.model.states;
+        slots.iter_mut().for_each(|x| *x = 0f64);
+        let (center, next) = (self.centers[pos], self.centers[pos + 1]);
+        let forward_acc = forward_acc[pos];
+        let x = self.template[pos as isize + 1];
+        for j in get_range(self.radius, self.query.len() as isize, center) {
+            let pos = pos as isize;
+            let forward = (0..states).map(|s| {
+                (0..states)
+                    .map(|t| self.forward[(pos, j, t)] * self.model.transition(t, s))
+                    .sum::<f64>()
+            });
+            let j_orig = j + center - self.radius;
+            let j_next = j + center - next;
+            let y = self.query[j_orig];
+            for (s, forward) in forward.enumerate() {
+                for base in 0..4u8 {
+                    let backward = self.model.observe(s, base, y) * self.backward[(pos, j + 1, s)]
+                        + self.model.observe(s, base, GAP) * self.backward[(pos, j, s)];
+                    slots[4 + base as usize] += forward * backward;
+                    let backward = self.model.observe(s, base, y)
+                        * self.backward[(pos + 1, j_next + 1, s)]
+                        + self.model.observe(s, base, GAP) * self.backward[(pos + 1, j_next, s)];
+                    slots[base as usize] += forward * backward;
+                }
+                if let Some(gap_next) = self.centers.get(pos as usize + 2) {
+                    let j_gap_next = j + center - gap_next;
+                    let backward_mat =
+                        self.model.observe(s, x, y) * self.backward[(pos + 2, j_gap_next + 1, s)];
+                    let backward_del =
+                        self.model.observe(s, x, GAP) * self.backward[(pos + 2, j_gap_next, s)];
+                    slots[8] += forward * (backward_mat + backward_del);
+                }
+            }
+        }
+        slots[..4]
+            .iter_mut()
+            .for_each(|x| *x = x.ln() + forward_acc + backward_acc[pos + 1]);
+        slots[4..8]
+            .iter_mut()
+            .for_each(|x| *x = x.ln() + forward_acc + backward_acc[pos]);
+        if pos + 1 != self.template.len() {
+            slots[8] = slots[8].ln() + forward_acc + backward_acc[pos + 2];
+        } else {
+            let j = self.query.len() as isize - center + self.radius;
+            let lk: f64 = (0..states)
+                .map(|s| self.forward[(pos as isize, j, s)])
+                .sum();
+            slots[8] = lk.ln() + forward_acc;
+        }
+    }
     // 9-element window.
     // Position->[A,C,G,T,A,C,G,T,-]
     pub fn to_modification_table(&self) -> Vec<f64> {
@@ -831,89 +908,31 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
             .enumerate()
             .take(self.template.len())
         {
-            slots.iter_mut().for_each(|x| *x = 0f64);
-            let (center, next) = (self.centers[pos], self.centers[pos + 1]);
-            let range = get_range(self.radius, self.query.len() as isize, center);
-            let forward_acc = forward_acc[pos];
-            let x = self.template[pos as isize + 1];
-            for j in range.clone() {
-                let forward = (0..states).map(|s| {
-                    let pos = pos as isize;
-                    (0..states)
-                        .map(|t| self.forward[(pos, j, t)] * self.model.transition(t, s))
-                        .sum::<f64>()
-                });
-                let j_orig = j + center - self.radius;
-                let j_next = j + center - next;
-                let y = self.query[j_orig];
-                let pos = pos as isize;
-                for (s, forward) in forward.enumerate() {
-                    for base in 0..4u8 {
-                        let backward = self.model.observe(s, base, y)
-                            * self.backward[(pos, j + 1, s)]
-                            + self.model.observe(s, base, GAP) * self.backward[(pos, j, s)];
-                        slots[4 + base as usize] += forward * backward;
-                        let backward = self.model.observe(s, base, y)
-                            * self.backward[(pos + 1, j_next + 1, s)]
-                            + self.model.observe(s, base, GAP)
-                                * self.backward[(pos + 1, j_next, s)];
-                        slots[base as usize] += forward * backward;
-                    }
-                    if pos + 1 != self.template.len() as isize {
-                        let gap_next = self.centers[pos as usize + 2];
-                        let j_gap_next = j + center - gap_next;
-                        let pos = pos as isize;
-                        let backward_mat = self.model.observe(s, x, y)
-                            * self
-                                .backward
-                                .get(pos + 2, j_gap_next + 1, s)
-                                .unwrap_or(&0f64);
-                        let backward_del = self.model.observe(s, x, GAP)
-                            * self.backward.get(pos + 2, j_gap_next, s).unwrap_or(&0f64);
-                        slots[8] += forward * (backward_mat + backward_del);
-                    }
-                }
-            }
-            slots[..4]
-                .iter_mut()
-                .for_each(|x| *x = x.ln() + forward_acc + backward_acc[pos + 1]);
-            slots[4..8]
-                .iter_mut()
-                .for_each(|x| *x = x.ln() + forward_acc + backward_acc[pos]);
-            if pos + 1 != self.template.len() {
-                slots[8] = slots[8].ln() + forward_acc + backward_acc[pos + 2];
-            } else {
-                let j = self.query.len() as isize - center + self.radius;
-                let lk: f64 = (0..states)
-                    .map(|s| self.forward[(pos as isize, j, s)])
-                    .sum();
-                slots[8] = lk.ln() + forward_acc;
-            }
+            self.fill_modification_slots(slots, pos, &forward_acc, &backward_acc);
         }
         // Last insertion.
         let (pos, slots) = lks.chunks_exact_mut(9).enumerate().last().unwrap();
         let center = self.centers[pos];
         slots[4..8].iter_mut().for_each(|x| *x = 0f64);
         for j in get_range(self.radius, self.query.len() as isize, center) {
+            let pos = pos as isize;
             let forward: Vec<f64> = (0..states)
                 .map(|s| {
-                    let pos = pos as isize;
                     (0..states)
                         .map(|t| self.forward[(pos, j, t)] * self.model.transition(t, s))
                         .sum()
                 })
                 .collect();
-            for base in 0..4 {
+            for base in 0..4u8 {
                 let j_orig = j + center - self.radius;
                 let y = self.query[j_orig];
-                let pos = pos as isize;
-                slots[4 + base] += forward
+                slots[4 + base as usize] += forward
                     .iter()
                     .enumerate()
                     .map(|(s, forward)| {
-                        let backward = self.model.observe(s, base as u8, y)
+                        let backward = self.model.observe(s, base, y)
                             * self.backward[(pos, j + 1, s)]
-                            + self.model.observe(s, base as u8, GAP) * self.backward[(pos, j, s)];
+                            + self.model.observe(s, base, GAP) * self.backward[(pos, j, s)];
                         forward * backward
                     })
                     .sum::<f64>();
@@ -1195,7 +1214,7 @@ mod gphmm_banded {
     fn likelihood_banded_check<T: HMMType>(model: &GPHMM<T>, xs: &[u8], ys: &[u8], radius: usize) {
         let lk = model.likelihood(xs, ys);
         let lkb = model.likelihood_banded(xs, ys, radius).unwrap();
-        assert!((lk - lkb).abs() < 0.0001);
+        assert!((lk - lkb).abs() < 0.0001, "{},{}", lk, lkb);
     }
     #[test]
     fn likelihood_banded_test() {
