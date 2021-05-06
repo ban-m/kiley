@@ -6,7 +6,6 @@ pub mod fasta;
 pub mod gen_seq;
 pub mod hmm;
 pub mod padseq;
-// pub mod realigner;
 pub mod sam;
 pub mod trialignment;
 pub use bialignment::polish_until_converge_banded;
@@ -107,19 +106,21 @@ pub fn polish(
             let polished: Vec<_> = chunks
                 .par_iter()
                 .enumerate()
-                .filter_map(|(i, queries)| {
+                .map(|(i, queries)| {
                     let start = i * (config.chunk_size - config.overlap);
                     let end = (start + config.chunk_size).min(seq.len());
                     let draft = &seq[start..end];
                     if queries.len() < 5 {
-                        return Some(draft.to_vec());
+                        return draft.to_vec();
                     }
-                    debug!("POLISH\tSTART\t{}\t{}\t{}", i, queries.len(), draft.len());
-                    let start = std::time::Instant::now();
-                    let cons =
-                        model.correct_until_convergence_banded(&draft, &queries, config.radius);
-                    let end = std::time::Instant::now();
-                    debug!("POLISH\tEND\t{}\t{}", i, (end - start).as_millis());
+                    // debug!("POLISH\tSTART\t{}\t{}\t{}", i, queries.len(), draft.len());
+                    // let start = std::time::Instant::now();
+                    let draft =
+                        bialignment::polish_until_converge_banded(&draft, queries, config.radius);
+                    let cons = polish_chunk_by_parts(&draft, queries, config);
+                    // let cons = model.polish_banded_batch(&draft, &queries, config.radius, 20);
+                    // let end = std::time::Instant::now();
+                    // debug!("POLISH\tEND\t{}\t{}", i, (end - start).as_millis());
                     cons
                 })
                 .fold(Vec::new, |cons: Vec<u8>, chunk: Vec<u8>| {
@@ -214,13 +215,14 @@ fn register_all_alignments(
     chunks
 }
 
+// Connect chunk into the end of cons.
 fn merge(mut cons: Vec<u8>, mut chunk: Vec<u8>, overlap: usize) -> Vec<u8> {
     if cons.is_empty() {
         chunk
     } else {
         let split_len = 2 * overlap;
-        let cons_trailing = cons.split_off(cons.len() - split_len);
-        let chunk_trailing = chunk.split_off(split_len);
+        let cons_trailing = cons.split_off(cons.len().max(split_len) - split_len);
+        let chunk_trailing = chunk.split_off(split_len.min(chunk.len()));
         let merged_seq = merge_seq(&cons_trailing, &chunk);
         cons.extend(merged_seq);
         cons.extend(chunk_trailing);
@@ -468,31 +470,26 @@ pub fn fit_model_from_multiple(
     let mut lk = get_lk(&phmm, &drafts);
     debug!("Initial LK:{:.3}", lk);
     loop {
-        let new_drafts = loop {
-            let new_phmm = fit_multiple_inner(&phmm, &drafts, &queries, config);
-            let new_lk = get_lk(&new_phmm, &drafts);
-            debug!("{:.3}->{:.3}", lk, new_lk);
-            if new_lk - lk < 0.1f64 {
-                let new_drafts = drafts
-                    .par_iter()
-                    .zip(queries.par_iter())
-                    .map(|(d, qs)| {
-                        new_phmm
-                            .correction_until_convergence_banded_inner(d, qs, config.radius)
-                            .unwrap()
-                    })
-                    .collect();
-                break new_drafts;
-            } else {
-                lk = new_lk;
-                phmm = new_phmm;
-            }
-        };
+        let new_drafts = drafts
+            .par_iter()
+            .zip(queries.par_iter())
+            .map(
+                |(d, qs)| match phmm.correct_banded_batch(&d, qs, config.radius, 20) {
+                    Some(res) => res,
+                    None => d.clone(),
+                },
+            )
+            .collect();
         if drafts == new_drafts {
             break phmm;
-        } else {
-            drafts = new_drafts;
         }
+        drafts = new_drafts;
+        phmm = fit_multiple_inner(&phmm, &drafts, &queries, config);
+        let new_lk = get_lk(&phmm, &drafts);
+        if new_lk < lk {
+            break phmm;
+        }
+        lk = new_lk;
     }
 }
 
@@ -513,21 +510,21 @@ fn fit_multiple_inner(
                 .collect::<Vec<_>>()
         })
         .collect();
-    debug!("Profiled {} alignments.", profiles.len());
-    let start = std::time::Instant::now();
+    // debug!("Profiled {} alignments.", profiles.len());
+    // let start = std::time::Instant::now();
     let initial_distribution = model.par_estimate_initial_distribution_banded(&profiles);
-    let init = std::time::Instant::now();
+    // let init = std::time::Instant::now();
     let transition_matrix = model.par_estimate_transition_prob_banded(&profiles);
-    let trans = std::time::Instant::now();
+    // let trans = std::time::Instant::now();
     let observation_matrix = model.par_estimate_observation_prob_banded(&profiles);
-    let obs = std::time::Instant::now();
-    debug!(
-        "ESTIM\t{}\t{}\t{}",
-        (init - start).as_millis(),
-        (trans - init).as_millis(),
-        (obs - trans).as_millis()
-    );
-    debug!("Re-estimated parameters.");
+    // let obs = std::time::Instant::now();
+    // debug!(
+    //     "ESTIM\t{}\t{}\t{}",
+    //     (init - start).as_millis(),
+    //     (trans - init).as_millis(),
+    //     (obs - trans).as_millis()
+    // );
+    // debug!("Re-estimated parameters.");
     GPHMM::from_raw_elements(
         model.states(),
         transition_matrix,
@@ -565,30 +562,189 @@ pub fn fit_model<T: std::borrow::Borrow<[u8]>>(
     }
 }
 
+// Split reads into size intervals. Note that the last chunks is merged the 2nd last one.
+fn partition_query<'a>(
+    draft: &[u8],
+    query: &'a [u8],
+    _config: &PolishConfig<Cond>,
+    split_positions: &[usize],
+) -> Vec<(usize, &'a [u8])> {
+    use bialignment::Op;
+    let ops: Vec<_> = edlib_sys::global(draft, query)
+        .into_iter()
+        .map(|x| match x {
+            0 | 3 => Op::Mat,
+            1 => Op::Ins,
+            2 => Op::Del,
+            _ => unreachable!(),
+        })
+        .collect();
+    let (mut i, mut j) = (0, 0);
+    let mut q_split_position = vec![];
+    let mut target_poss = split_positions.iter();
+    let mut target_pos = *target_poss.next().unwrap();
+    for op in ops {
+        match op {
+            Op::Mat => {
+                if i == target_pos {
+                    q_split_position.push(j);
+                    target_pos = match target_poss.next() {
+                        Some(&res) => res,
+                        None => break,
+                    };
+                }
+                i += 1;
+                j += 1;
+            }
+            Op::Del => {
+                if i == target_pos {
+                    q_split_position.push(j);
+                    target_pos = match target_poss.next() {
+                        Some(&res) => res,
+                        None => break,
+                    };
+                }
+                i += 1;
+            }
+            Op::Ins => j += 1,
+        }
+    }
+    assert_eq!(q_split_position.len(), split_positions.len());
+    let mut split: Vec<_> = q_split_position
+        .windows(2)
+        .enumerate()
+        .map(|(bin, w)| (bin, &query[w[0]..w[1]]))
+        .collect();
+    // let ref_last = *split_positions.last().unwrap();
+    let query_last = *q_split_position.last().unwrap();
+    // if (draft.len() - ref_last) * 3 / 4 < query.len() - query_last {
+    split.push((split_positions.len() - 1, &query[query_last..]));
+    // }
+    split
+}
+
+/// Polish draft sequence by queries.
+pub fn polish_chunk_by_parts<T: std::borrow::Borrow<[u8]>>(
+    draft: &[u8],
+    queries: &[T],
+    config: &PolishConfig<Cond>,
+) -> Vec<u8> {
+    assert!(!draft.is_empty());
+    let subchunk_size = 100;
+    let mut draft = draft.to_vec();
+    let mut config = config.clone();
+    for offset in 0..2 {
+        let subchunk_size = subchunk_size + 10 * offset;
+        config.radius = 20;
+        // 1. Partition each reads into 100bp.
+        let chunk_start_position: Vec<_> = (0..)
+            .map(|i| i * subchunk_size)
+            .take_while(|l| l + subchunk_size <= draft.len())
+            .collect();
+        let part_queries: Vec<_> = queries
+            .iter()
+            .map(|query| partition_query(&draft, query.borrow(), &config, &chunk_start_position))
+            .collect();
+        let mut chunks: Vec<_> = chunk_start_position
+            .windows(2)
+            .map(|w| (&draft[w[0]..w[1]], vec![]))
+            .collect();
+        let pos = *chunk_start_position.last().unwrap();
+        chunks.push((&draft[pos..], vec![]));
+        for query in part_queries.iter() {
+            for &(pos, seq) in query.iter() {
+                chunks[pos].1.push(seq);
+            }
+        }
+        // Maybe we need filter out very short chunk.
+        chunks.iter_mut().for_each(|(_, qs)| {
+            let mean: usize = qs.iter().map(|x| x.len()).sum();
+            let thr = mean / qs.len() * 3 / 4;
+            qs.retain(|qs| thr < qs.len());
+        });
+        // 2. Polish each segments.
+        let (polished_segs, fit_model) = polish_multiple(&chunks, &config);
+        draft = polished_segs
+            .into_iter()
+            .flat_map(std::convert::identity)
+            .collect();
+        config.phmm = fit_model;
+    }
+    draft
+}
+
+fn polish_multiple(
+    chunks: &[(&[u8], Vec<&[u8]>)],
+    config: &PolishConfig<Cond>,
+) -> (Vec<Vec<u8>>, GPHMM<Cond>) {
+    use gphmm::banded::ProfileBanded;
+    use padseq::PadSeq;
+    let (mut drafts, queries): (Vec<_>, Vec<_>) = chunks
+        .iter()
+        .map(|&(x, ref ys)| {
+            let x = PadSeq::new(x);
+            let ys: Vec<_> = ys.iter().map(|&y| PadSeq::new(y)).collect();
+            (x, ys)
+        })
+        .unzip();
+    let mut phmm = config.phmm.clone();
+    loop {
+        let mut diff = 0;
+        for (d, qs) in drafts.iter_mut().zip(queries.iter()) {
+            if let Some(res) = phmm.correct_banded_batch(&d, qs, config.radius, 20) {
+                diff += 1;
+                *d = res;
+            }
+        }
+        if diff == 0 {
+            let drafts: Vec<Vec<_>> = drafts.into_iter().map(|x| x.into()).collect();
+            break (drafts, phmm);
+        }
+        let radius = config.radius as isize;
+        let profiles: Vec<_> = queries
+            .iter()
+            .zip(drafts.iter())
+            .flat_map(|(qs, d)| {
+                qs.iter()
+                    .filter_map(|q| ProfileBanded::new(&phmm, d, q, radius))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let initial_distribution = phmm.estimate_initial_distribution_banded(&profiles);
+        let transition_matrix = phmm.estimate_transition_prob_banded(&profiles);
+        let observation_matrix = phmm.estimate_observation_prob_banded(&profiles);
+        phmm = GPHMM::from_raw_elements(
+            phmm.states(),
+            transition_matrix,
+            observation_matrix,
+            initial_distribution,
+        );
+    }
+}
+
 // Polish chunk.
-// TODO:This function should not fail.
 fn polish_chunk<T: std::borrow::Borrow<[u8]>>(
     draft: &[u8],
     queries: &[T],
     config: &PolishConfig<Cond>,
-) -> Option<Vec<u8>> {
+) -> Vec<u8> {
     use padseq::PadSeq;
     let queries: Vec<_> = queries.iter().map(|x| PadSeq::new(x.borrow())).collect();
     let mut draft = PadSeq::new(draft);
     let mut phmm = config.phmm.clone();
     let mut lk = std::f64::NEG_INFINITY;
-    while let Some(seq) = phmm.correct_banded_batch(&draft, &queries, config.radius, 15) {
-        let (new_hmm, new_lk) = phmm.fit_banded_inner(&seq, &queries, config.radius);
-        if new_lk < lk {
-            break;
-        } else {
+    loop {
+        if let Some(seq) = phmm.correct_banded_batch(&draft, &queries, config.radius, 15) {
             draft = seq;
+        }
+        let (new_hmm, new_lk) = phmm.fit_banded_inner(&draft, &queries, config.radius);
+        if lk < new_lk {
             phmm = new_hmm;
             lk = new_lk;
+        } else {
+            break draft.into();
         }
     }
-    debug!("ModelDiff:{:?}", config.phmm.dist(&phmm));
-    Some(draft.into())
 }
 
 /// Take consensus and polish it. It consists of three step.
@@ -602,42 +758,21 @@ pub fn consensus<T: std::borrow::Borrow<[u8]>>(
     _seed: u64,
     repnum: usize,
     radius: usize,
-) -> Option<Vec<u8>> {
-    let start = std::time::Instant::now();
-    // let consensus = ternary_consensus(seqs, seed, repnum, radius);
+) -> Vec<u8> {
     let polished: Vec<_> = (0..repnum)
         .map(|i| {
             let seed = seqs[i % seqs.len()].borrow();
-            polish_by_pileup(&seed, seqs, radius)
+            polish_by_pileup(&seed, seqs)
         })
         .collect();
-    let consensus = polish_by_pileup(&polished[0], &polished, radius);
-    let ternary = std::time::Instant::now();
-    debug!("Cons:{}:{}", 1, (ternary - start).as_millis());
-    let consensus: Vec<_> = {
-        let consensus = padseq::PadSeq::new(consensus.as_slice());
-        let seqs: Vec<_> = seqs
-            .iter()
-            .map(|x| padseq::PadSeq::new(x.borrow()))
-            .collect();
-        use bialignment::{polish_by_batch_banded, polish_by_focused_banded};
-        let (mut cons, _) = polish_by_focused_banded(&consensus, &seqs, radius, 20, 25)?;
-        while let Some((improved, _)) = polish_by_batch_banded(&cons, &seqs, radius, 20) {
-            cons = improved;
-        }
-        cons.into()
-    };
-    let pileup = std::time::Instant::now();
-    debug!("Cons:{}:{}", 2, (pileup - ternary).as_millis());
+    let consensus = polish_by_pileup(&polished[0], &polished);
+    let consensus: Vec<_> = bialignment::polish_until_converge_banded(&consensus, &seqs, radius);
     let config = PolishConfig::new(radius, 0, seqs.len(), 0, 0);
-    let consensus = polish_chunk(&consensus, &seqs, &config);
-    let end = std::time::Instant::now();
-    debug!(
-        "{}\t{}\t{}",
-        (ternary - start).as_millis(),
-        (pileup - ternary).as_millis(),
-        (end - pileup).as_millis()
-    );
+    let consensus = if seqs.iter().all(|x| x.borrow().len() < 200) {
+        polish_chunk(&consensus, &seqs, &config)
+    } else {
+        polish_chunk_by_parts(&consensus, &seqs, &config)
+    };
     consensus
 }
 
@@ -651,12 +786,22 @@ pub fn consensus_bounded<T: std::borrow::Borrow<[u8]>>(
     max_radius: usize,
 ) -> Option<Vec<u8>> {
     let consensus = ternary_consensus(seqs, seed, repnum, radius);
-    let mut consensus = polish_by_pileup(&consensus, seqs, radius);
+    let consensus = polish_by_pileup(&consensus, seqs);
+    let consensus = padseq::PadSeq::new(consensus.as_slice());
+    let seqs: Vec<_> = seqs
+        .iter()
+        .map(|x| padseq::PadSeq::new(x.borrow()))
+        .collect();
+    use bialignment::*;
     for radius in (1..).map(|i| i * radius).take_while(|&r| r <= max_radius) {
-        match bialignment::polish_until_converge_banded(&consensus, &seqs, radius) {
-            Ok(res) => return Some(res),
-            Err(res) => consensus = res,
+        let (mut cons, _) = match polish_by_focused_banded(&consensus, &seqs, radius, 20, 25) {
+            Some(res) => res,
+            None => continue,
+        };
+        while let Some((improved, _)) = polish_by_batch_banded(&cons, &seqs, radius, 20) {
+            cons = improved;
         }
+        return Some(cons.into());
     }
     None
 }
@@ -747,58 +892,37 @@ pub fn consensus_poa<T: std::borrow::Borrow<[u8]>>(
     }
 }
 
-pub fn polish_by_pileup<T: std::borrow::Borrow<[u8]>>(
-    template: &[u8],
-    xs: &[T],
-    _radius: usize,
-) -> Vec<u8> {
+pub fn polish_by_pileup<T: std::borrow::Borrow<[u8]>>(template: &[u8], xs: &[T]) -> Vec<u8> {
     let mut matches = vec![[0; 4]; template.len()];
     // the 0-th element is the insertion before the 0-th base.
     // TODO: Maybe @-delemitered sequence would be much memory efficient.
     let mut insertions = vec![vec![]; template.len() + 1];
     let mut deletions = vec![0; template.len()];
-    use bialignment::Op;
     for x in xs.iter() {
         let x = x.borrow();
-        // use bialignment::edit_dist_banded;
-        // let (_dist, ops): (u32, Vec<Op>) = match edit_dist_banded(&template, x, radius) {
-        //     Some(res) => res,
-        //     None => continue,
-        // };
-        let ops: Vec<_> = edlib_sys::global(&template, x)
-            .into_iter()
-            .map(|x| match x {
-                0 | 3 => Op::Mat,
-                1 => Op::Ins,
-                2 => Op::Del,
-                _ => unreachable!(),
-            })
-            .collect();
+        let ops = edlib_sys::global(&template, x);
         let (mut i, mut j) = (0, 0);
         let mut ins_buffer = vec![];
-        for op in ops {
+        for &op in ops.iter() {
             match op {
-                Op::Mat => {
+                0 | 3 => {
                     matches[i][padseq::convert_to_twobit(&x[j]) as usize] += 1;
-                    if !ins_buffer.is_empty() {
-                        insertions[i].push(ins_buffer.clone());
-                        ins_buffer.clear();
-                    }
                     i += 1;
                     j += 1;
                 }
-                Op::Del => {
-                    if !ins_buffer.is_empty() {
-                        insertions[i].push(ins_buffer.clone());
-                        ins_buffer.clear();
-                    }
-                    deletions[i] += 1;
-                    i += 1;
-                }
-                Op::Ins => {
+                1 => {
                     ins_buffer.push(x[j]);
                     j += 1;
                 }
+                2 => {
+                    deletions[i] += 1;
+                    i += 1;
+                }
+                _ => unreachable!(),
+            }
+            if op != 1 && !ins_buffer.is_empty() {
+                insertions[i].push(ins_buffer.clone());
+                ins_buffer.clear();
             }
         }
         if !ins_buffer.is_empty() {
@@ -884,7 +1008,7 @@ mod test {
                     .map(|_| gen_seq::introduce_randomness(&template1, &mut rng, &gen_seq::PROFILE))
                     .collect();
                 let seqs: Vec<_> = seqs.iter().map(|e| e.as_slice()).collect();
-                let consensus = consensus(&seqs, cov as u64, 7, 30).unwrap();
+                let consensus = consensus(&seqs, cov as u64, 7, 30);
                 let dist = edit_dist(&consensus, &template1);
                 eprintln!("LONG:{}", dist);
                 dist <= 2
@@ -976,7 +1100,7 @@ mod test {
             let seqs: Vec<_> = (0..coverage)
                 .map(|_| gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE))
                 .collect();
-            let consensus = consensus(&seqs, i, 7, 20).unwrap();
+            let consensus = consensus(&seqs, i, 7, 20);
             let dist = edit_dist(&consensus, &template);
             eprintln!("T:{}", String::from_utf8_lossy(&template));
             eprintln!("C:{}", String::from_utf8_lossy(&consensus));
@@ -992,12 +1116,13 @@ mod test {
         let result = (start..coverage)
             .into_par_iter()
             .filter(|&cov| {
+                eprintln!("{}", cov);
                 let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(cov as u64);
                 let template1: Vec<_> = gen_seq::generate_seq(&mut rng, len);
                 let seqs: Vec<_> = (0..cov)
                     .map(|_| gen_seq::introduce_randomness(&template1, &mut rng, &gen_seq::PROFILE))
                     .collect();
-                let consensus = consensus(&seqs, cov as u64, 7, 10).unwrap();
+                let consensus = consensus(&seqs, cov as u64, 7, 100);
                 let dist = edit_dist(&consensus, &template1);
                 eprintln!("LONG:{}", dist);
                 dist <= 2

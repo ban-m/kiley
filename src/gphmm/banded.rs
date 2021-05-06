@@ -5,6 +5,20 @@
 //! entire sequences of the reference and the query.
 use super::*;
 impl GPHMM<ConditionalHiddenMarkovModel> {
+    pub fn polish_banded_batch<T: std::borrow::Borrow<[u8]>>(
+        &self,
+        template: &[u8],
+        queries: &[T],
+        radius: usize,
+        skip_size: usize,
+    ) -> Vec<u8> {
+        let mut template = PadSeq::new(template);
+        let queries: Vec<_> = queries.iter().map(|x| PadSeq::new(x.borrow())).collect();
+        while let Some(imp) = self.correct_banded_batch(&template, &queries, radius, skip_size) {
+            template = imp;
+        }
+        template.into()
+    }
     pub fn correct_banded_batch(
         &self,
         template: &PadSeq,
@@ -12,7 +26,6 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
         radius: usize,
         skip_size: usize,
     ) -> Option<PadSeq> {
-        let start = std::time::Instant::now();
         let radius = radius as isize;
         let profiles: Vec<_> = queries
             .iter()
@@ -27,13 +40,11 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
             xs.iter_mut().zip(ys).for_each(|(x, y)| *x += y);
             xs
         }
-        let profed = std::time::Instant::now();
         let profile_with_diff = profiles
             .iter()
             .map(|prf| prf.to_modification_table())
             .reduce(merge)
             .unwrap();
-        let converted = std::time::Instant::now();
         let mut improved = template.clone();
         let mut offset = 0;
         let mut profile_with_diff = profile_with_diff.chunks_exact(9).enumerate();
@@ -67,12 +78,9 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
                 }
             }
         }
-        debug!("{:?}", changed_positions);
-        debug!(
-            "Correct\t{}\t{}",
-            (profed - start).as_millis(),
-            (converted - profed).as_millis(),
-        );
+        // if !changed_positions.is_empty() {
+        //     debug!("{:?}", changed_positions);
+        // }
         (!changed_positions.is_empty()).then(|| improved)
     }
     pub fn fit_banded<T: std::borrow::Borrow<[u8]>>(
@@ -86,26 +94,14 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
         self.fit_banded_inner(&template, &queries, radius).0
     }
     pub fn fit_banded_inner(&self, xs: &PadSeq, yss: &[PadSeq], radius: usize) -> (Self, f64) {
-        let start = std::time::Instant::now();
         let radius = radius as isize;
         let profiles: Vec<_> = yss
             .iter()
             .filter_map(|ys| ProfileBanded::new(self, xs, ys, radius))
             .collect();
-        let profiled = std::time::Instant::now();
         let initial_distribution = self.estimate_initial_distribution_banded(&profiles);
-        let init = std::time::Instant::now();
         let transition_matrix = self.estimate_transition_prob_banded(&profiles);
-        let trans = std::time::Instant::now();
         let observation_matrix = self.estimate_observation_prob_banded(&profiles);
-        let obs = std::time::Instant::now();
-        debug!(
-            "{}\t{}\t{}\t{}",
-            (profiled - start).as_millis(),
-            (init - profiled).as_millis(),
-            (trans - init).as_millis(),
-            (obs - trans).as_millis()
-        );
         let updated = Self {
             states: self.states,
             initial_distribution,
@@ -602,8 +598,7 @@ impl<M: HMMType> GPHMM<M> {
                     })
             })
             .max_by(|x, y| (x.3).partial_cmp(&(y.3)).unwrap())
-            .map(|(pos, op, base, lk)| {
-                debug!("LK\t{:.3}->{:.3}", total_lk, lk);
+            .map(|(pos, op, base, _lk)| {
                 let mut template = template.clone();
                 match op {
                     Op::Match => template[pos as isize] = base,
@@ -688,19 +683,11 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
         query: &'b PadSeq,
         radius: isize,
     ) -> Option<Self> {
-        let start = std::time::Instant::now();
         let (forward, forward_factor, centers) = model.forward_banded(template, query, radius)?;
-        let f_end = std::time::Instant::now();
         let (backward, backward_factor) = model.backward_banded(template, query, radius, &centers);
         if backward_factor.iter().any(|x| x.is_nan()) {
             panic!("{:?}\n{}", backward_factor, model,);
         }
-        let b_end = std::time::Instant::now();
-        // debug!(
-        //     "{}\t{}",
-        //     (f_end - start).as_millis(),
-        //     (b_end - f_end).as_millis(),
-        // );
         Some(Self {
             template,
             query,

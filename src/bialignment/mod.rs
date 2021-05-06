@@ -301,15 +301,11 @@ pub fn edit_dist_with_deletion(pre_dp: &[Vec<u32>], post_dp: &[Vec<u32>], positi
         .unwrap()
 }
 
+/// Exact algorithm.
 pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(template: &[u8], xs: &[T]) -> Vec<u8> {
     let mut polished = template.to_vec();
     let mut current_dist = std::u32::MAX;
     while let Some((imp, dist)) = polish_by_flip(&polished, xs) {
-        let dist_naive: u32 = xs
-            .iter()
-            .map(|x| edlib_sys::global_dist(&imp, x.borrow()))
-            .sum();
-        assert_eq!(dist_naive, dist);
         assert!(dist < current_dist);
         current_dist = dist;
         polished = imp;
@@ -317,60 +313,52 @@ pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(template: &[u8], xs: 
     polished
 }
 
-fn get_modification_table_naive(xs: &[u8], ys: &[u8]) -> (u32, Vec<u32>) {
+pub fn get_modification_table_naive(xs: &[u8], ys: &[u8]) -> (u32, Vec<u32>) {
     let pre_dp = edit_dist_dp_pre(xs, ys);
     let post_dp = edit_dist_dp_post(xs, ys);
     let dist = pre_dp[xs.len()][ys.len()];
     let mut dists = vec![UPPER_BOUND; 9 * (xs.len() + 1)];
     for (pos, slots) in dists.chunks_exact_mut(9).enumerate().take(xs.len()) {
         let pre_row = &pre_dp[pos];
-        slots.iter_mut().for_each(|x| *x = 0);
-        // Mutation for 4 slots, insertion for 4 slots, deletion for the last slot.
-        for (base_idx, &base) in b"ACGT".iter().enumerate() {
-            let mut min_mat = UPPER_BOUND;
-            let mut min_ins = UPPER_BOUND;
-            let mut prev_mat = UPPER_BOUND;
-            let mut prev_ins = UPPER_BOUND;
-            for (j, &y) in ys.iter().enumerate() {
-                let pre = pre_row[j];
-                // Match
-                let mat_pen = (base != y) as u32;
-                let mat = post_dp[pos + 1][j + 1] + mat_pen;
-                let del = post_dp[pos + 1][j] + 1;
-                let current = mat.min(del).min(prev_mat + 1);
-                min_mat = min_mat.min(current + pre);
-                prev_mat = current;
-                // Ins
+        // slots.iter_mut().for_each(|x| *x = 0);
+        // Mutation for 4 slots, insertion for 4 slots,
+        // and deletion for the last slot.
+        slots
+            .iter_mut()
+            .take(4)
+            .for_each(|x| *x = pre_row[ys.len()] + 1 + post_dp[pos + 1][ys.len()]);
+        slots
+            .iter_mut()
+            .skip(4)
+            .for_each(|x| *x = pre_row[ys.len()] + 1 + post_dp[pos][ys.len()]);
+        slots[8] = pre_row[ys.len()] + post_dp[pos + 1][ys.len()];
+        for (j, &y) in ys.iter().enumerate() {
+            let pre = pre_row[j];
+            for base_idx in 0..4 {
+                let mat_pen = (b"ACGT"[base_idx] != y) as u32;
                 let mat = post_dp[pos][j + 1] + mat_pen;
                 let del = post_dp[pos][j] + 1;
-                let current = mat.min(del).min(prev_ins + 1);
-                min_ins = min_ins.min(current + pre);
-                prev_ins = current;
+                slots[base_idx + 4] = slots[base_idx + 4].min(mat + pre).min(del + pre);
+                // Match
+                let mat = post_dp[pos + 1][j + 1] + mat_pen;
+                let del = post_dp[pos + 1][j] + 1;
+                slots[base_idx] = slots[base_idx].min(pre + mat).min(pre + del);
             }
-            slots[base_idx] = min_mat;
-            slots[4 + base_idx] = min_ins;
+            // Deletion.
+            slots[8] = slots[8].min(pre_row[j] + post_dp[pos + 1][j]);
         }
-        // Deletion.
-        slots[8] = (0..ys.len())
-            .map(|j| pre_row[j] + post_dp[pos + 1][j])
-            .min()
-            .unwrap_or(UPPER_BOUND)
     }
     // The last insertion.
     if let Some((pos, slots)) = dists.chunks_exact_mut(9).enumerate().last() {
         let pre_row = &pre_dp[pos];
         for (base_idx, &base) in b"ACGT".iter().enumerate() {
-            let mut min_ins = UPPER_BOUND;
-            let mut prev_ins = UPPER_BOUND;
+            let mut min_ins = pre_row[ys.len()] + 1 + post_dp[pos][ys.len()];
             for (j, &y) in ys.iter().enumerate() {
                 let pre = pre_row[j];
                 let mat_pen = (y != base) as u32;
-                // Ins
                 let mat = post_dp[pos][j + 1] + mat_pen;
                 let del = post_dp[pos][j] + 1;
-                let current = mat.min(del).min(prev_ins + 1);
-                min_ins = min_ins.min(current + pre);
-                prev_ins = current;
+                min_ins = min_ins.min(mat + pre).min(del + pre);
             }
             slots[4 + base_idx] = min_ins;
         }
@@ -562,72 +550,46 @@ fn convert_dp_to_modification_table(
     let radius = radius as isize;
     let dist = post[(0, radius)];
     let mut dists = vec![UPPER_BOUND; 9 * (xs.len() + 1)];
-    let mut backward = [0; 9];
     for (pos, slots) in dists.chunks_exact_mut(9).enumerate().take(xs.len()) {
         let current_pre_row = pre.get_row(pos as isize);
         let center = centers[pos];
         // By adding this offset, you can access to the next position of j.
         let offset = center - centers[pos + 1];
         let pos = pos as isize;
-        backward.iter_mut().for_each(|x| *x = UPPER_BOUND);
         for j in get_range(radius, ys.len() as isize, center) {
-            let j_orig = j + center - radius;
-            // Match and insertion.
-            backward.iter_mut().take(4).for_each(|x| {
-                *x = (*x).min(post.get(pos + 1, j + offset)) + 1;
-            });
-            backward.iter_mut().skip(4).for_each(|x| {
-                *x = (*x).min(post.get(pos, j)) + 1;
-            });
-            let y_base = ys[j_orig] as usize;
-            let mat_score = &MATMAT[y_base << 3..y_base << 3 | 0b101];
-            let next_mat = post.get(pos + 1, j + offset + 1);
-            let current_mat = post.get(pos, j + 1);
-            for base in 0..4usize {
-                let mat = mat_score[base];
-                backward[base] = backward[base].min(mat + next_mat);
-                backward[base + 4] = backward[base + 4].min(mat + current_mat);
-            }
-            // Default implementation.
-            // for base in 0..4usize {
-            //     let mat = mat_score[base];
-            //     backward[base] = (backward[base] + 1)
-            //         .min(1 + post.get(pos + 1, j + offset))
-            //         .min(mat + post.get(pos + 1, j + offset + 1));
-            //     backward[base + 4] = (backward[base + 4] + 1)
-            //         .min(1 + post.get(pos, j))
-            //         .min(mat + post.get(pos, j + 1));
-            // }
-            // Deletion.
-            backward[8] = post.get(pos + 1, j + offset);
             let pre_score = current_pre_row[j as usize];
-            slots
-                .iter_mut()
-                .zip(backward.iter())
-                .for_each(|(x, &y)| *x = (*x).min(y + pre_score));
+            let j_orig = j + center - radius;
+            let y_base = ys[j_orig] as usize;
+            let mat = &MATMAT[(y_base << 3)..(y_base << 3 | 0b111)];
+            let current_mat = post.get(pos, j + 1);
+            let current_del = post.get(pos, j);
+            for base in 0..4usize {
+                let ins_min = (1 + current_del).min(mat[base] + current_mat) + pre_score;
+                slots[base + 4] = slots[base + 4].min(ins_min);
+            }
+            let next_mat = post.get(pos + 1, j + offset + 1);
+            let next_del = post.get(pos + 1, j + offset);
+            for base in 0..4usize {
+                let mat_min = (1 + next_del).min(mat[base] + next_mat) + pre_score;
+                slots[base] = slots[base].min(mat_min);
+            }
+            slots[8] = slots[8].min(pre_score + next_del);
         }
     }
     // The last insertion.
     if let Some((pos, slots)) = dists.chunks_exact_mut(9).enumerate().last() {
-        let mut backward = [UPPER_BOUND; 4];
         let current_pre_row = pre.get_row(pos as isize);
         let center = centers[pos];
         for j in get_range(radius, ys.len() as isize, center) {
-            let j_orig = j + center - radius;
-            let y_base = ys[j_orig] as usize;
-            let mat_score = &MATMAT[y_base << 3..y_base << 3 | 0b111];
             for base in 0..4usize {
-                let mat = mat_score[base];
-                backward[base] = (backward[base] + 1)
-                    .min(1 + post.get(pos as isize, j))
-                    .min(mat + post.get(pos as isize, j + 1));
+                let j_orig = j + center - radius;
+                let y_base = ys[j_orig] as usize;
+                let mat = MATMAT[y_base << 3 | base];
+                let pre_score = current_pre_row[j as usize];
+                slots[4 + base] = slots[4 + base]
+                    .min(pre_score + 1 + post.get(pos as isize, j))
+                    .min(pre_score + mat + post.get(pos as isize, j + 1));
             }
-            let pre_score = current_pre_row[j as usize];
-            slots
-                .iter_mut()
-                .skip(4)
-                .zip(backward.iter())
-                .for_each(|(x, &y)| *x = (*x).min(y + pre_score));
         }
     }
     (dist, dists)
@@ -840,7 +802,6 @@ fn edit_dist_banded_dp_post(xs: &PadSeq, ys: &PadSeq, radius: usize, centers: &[
         }
     }
     for k in (0..(xs.len() + ys.len() - 1) as isize).rev() {
-        // for (k, centers) in centers.windows(3).enumerate().rev() {
         let center = centers[k as usize];
         let matdiff = center - centers[k as usize + 2];
         let gapdiff = center - centers[k as usize + 1];
@@ -870,19 +831,17 @@ pub fn polish_until_converge_banded<T: std::borrow::Borrow<[u8]>>(
     template: &[u8],
     reads: &[T],
     radius: usize,
-) -> Result<Vec<u8>, Vec<u8>> {
-    let mut polished = PadSeq::new(template);
-    let mut total_edit_dist = std::u32::MAX;
-    let xs: Vec<_> = reads.iter().map(|x| PadSeq::new(x.borrow())).collect();
-    // while let Some((imp, current_dist)) = polish_by_focused_banded(&polished, &xs, radius, 30, 25) {
-    while let Some((imp, current_dist)) = polish_by_batch_banded(&polished, &xs, radius, 30) {
-        if total_edit_dist < current_dist {
-            return Err(polished.into());
-        }
-        polished = imp;
-        total_edit_dist = current_dist;
+) -> Vec<u8> {
+    let consensus = PadSeq::new(template);
+    let seqs: Vec<_> = reads.iter().map(|x| PadSeq::new(x.borrow())).collect();
+    let (mut cons, _) = match polish_by_focused_banded(&consensus, &seqs, radius, 20, 25) {
+        Some(res) => res,
+        None => return template.to_vec(),
+    };
+    while let Some((improved, _)) = polish_by_batch_banded(&cons, &seqs, radius, 20) {
+        cons = improved;
     }
-    Ok(polished.into())
+    cons.into()
 }
 
 fn get_range(radius: isize, ylen: isize, center: isize) -> std::ops::Range<isize> {
@@ -996,8 +955,10 @@ fn naive_banded_dp_post(xs: &PadSeq, ys: &PadSeq, radius: usize, centers: &[isiz
 /// distance decreases.
 /// In contrast, when the return value is None, it IS garanteed that there is no sequence
 /// within distance 1 from `template`, such that the total edit ditance would be smaller.
-/// It run by flippin bases in templates so that edit distance would descrease.
-/// It does not perform any flipping when there is flipped base in`skip_size` bp.
+/// In this function, first we search locations to be flipped,
+/// then we perform an exact algorithm in the `windows_size` window around these positions.
+/// Note that, if windows are overlapping, they would be merged as long as it
+/// is smaller than window_size * 4 length.
 pub fn polish_by_focused_banded<T: std::borrow::Borrow<PadSeq>>(
     template: &PadSeq,
     queries: &[T],
@@ -1007,7 +968,6 @@ pub fn polish_by_focused_banded<T: std::borrow::Borrow<PadSeq>>(
 ) -> Option<(PadSeq, u32)> {
     let mut current_edit_distance = 0;
     let mut alignments = vec![];
-    // let start = std::time::Instant::now();
     let profile_with_diff = queries
         .iter()
         .map(|query| {
@@ -1034,10 +994,8 @@ pub fn polish_by_focused_banded<T: std::borrow::Borrow<PadSeq>>(
             }
         }
     }
-    // let profiled = std::time::Instant::now();
-    // debug!("Profiled:{}", (profiled - start).as_millis());
     (!changed_pos.is_empty()).then(|| {
-        debug!("Focused:{:?}", changed_pos);
+        // debug!("Changed Pos:{:?}", changed_pos);
         let first_pos = changed_pos[0];
         let mut start = first_pos.saturating_sub(window_size);
         let mut end = (first_pos + window_size).min(template.len());
@@ -1054,6 +1012,28 @@ pub fn polish_by_focused_banded<T: std::borrow::Borrow<PadSeq>>(
             }
         }
         windows.push((start, end));
+        // debug!("Window:{:?}", windows);
+        let windows: Vec<_> = windows
+            .iter()
+            .flat_map(|&(s, e): &(usize, usize)| {
+                if e - s < 4 * window_size {
+                    vec![(s, e)]
+                } else {
+                    // Split them into 2 * window_size window.
+                    let start_positions: Vec<_> = (0..)
+                        .map(|i| s + i * 2 * window_size)
+                        .take_while(|pos| pos + 2 * window_size < e)
+                        .collect();
+                    let mut splits: Vec<(usize, usize)> =
+                        start_positions.windows(2).map(|w| (w[0], w[1])).collect();
+                    // Push the last one.
+                    let last = *start_positions.last().unwrap();
+                    splits.push((last, e));
+                    splits
+                }
+            })
+            .collect();
+        // debug!("Window:{:?}", windows);
         let polished = polish_in_windows(template, queries, &alignments, &windows);
         // let end2 = std::time::Instant::now();
         // debug!("Windowed:{}", (end2 - profiled).as_millis());
@@ -1120,6 +1100,10 @@ fn crop_region(query: &PadSeq, aln: &[Op], start: usize, end: usize) -> Vec<u8> 
                 qpos += 1;
             }
         }
+    }
+    if qend.is_none() && rpos == end {
+        assert!(qstart.is_some());
+        qend = Some(qpos);
     }
     assert!(qend.is_some());
     assert!(qstart.is_some());
@@ -1199,7 +1183,7 @@ pub fn polish_by_batch_banded<T: std::borrow::Borrow<PadSeq>>(
             }
         }
     }
-    debug!("Batch:{:?}", changed_pos);
+    // debug!("Batch:{:?}", changed_pos);
     is_diffed.then(|| (improved, current_edit_distance))
 }
 
@@ -1406,6 +1390,38 @@ mod test {
             let score = edit_dist_slow(&xs, &ys);
             let fastscore = edit_dist(&xs, &ys);
             assert_eq!(score, fastscore);
+        }
+    }
+    #[test]
+    fn naive_edit_dist_modification_check() {
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+        // let prof = crate::gen_seq::PROFILE;
+        for _ in 0..500 {
+            let xslen = rng.gen::<usize>() % 10 + 5;
+            let xs = crate::gen_seq::generate_seq(&mut rng, xslen);
+            let mut xs_mut = xs.clone();
+            let ys = crate::gen_seq::generate_seq(&mut rng, xslen);
+            eprintln!("{}", String::from_utf8_lossy(&xs));
+            eprintln!("{}", String::from_utf8_lossy(&ys));
+            let (_, profiles) = get_modification_table_naive(&xs, &ys);
+            for (pos, diffs) in profiles.chunks_exact(9).enumerate().take(xs.len()) {
+                let original = xs_mut[pos];
+                for (idx, &base) in b"ACGT".iter().enumerate() {
+                    xs_mut[pos] = base;
+                    assert_eq!(edit_dist(&xs_mut, &ys), diffs[idx], "{},{}", pos, xs.len());
+                    xs_mut[pos] = original;
+                }
+                for (idx, &base) in b"ACGT".iter().enumerate() {
+                    xs_mut.insert(pos, base);
+                    assert_eq!(edit_dist(&xs_mut, &ys), diffs[idx + 4]);
+                    xs_mut.remove(pos);
+                }
+                xs_mut.remove(pos);
+                let exact_dist = edit_dist(&xs_mut, &ys);
+                let dist = diffs[8];
+                assert_eq!(dist, exact_dist, "{},{}", pos, xs.len());
+                xs_mut.insert(pos, original);
+            }
         }
     }
     #[test]
@@ -1676,10 +1692,4 @@ mod test {
             assert_eq!(dist, exact_dist, "{:?}", dp.get_row(0 as isize));
         }
     }
-    // #[test]
-    // fn get_range_test() {
-    //     let ypos = vec![0, 1, 2, 3, 4, 5];
-    //     let range = get_range(ypos);
-    //     assert_eq!(range, (0, 6));
-    // }
 }

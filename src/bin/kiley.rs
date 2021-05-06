@@ -195,13 +195,7 @@ fn consensus(matches: &clap::ArgMatches) -> std::io::Result<()> {
         .unwrap();
     let seqs: Vec<_> = reads.iter().map(|x| x.1.as_slice()).collect();
     let polished = kiley::consensus(&seqs, seed, repeat_num, radius);
-    if let Some(polished) = polished {
-        println!(">0 Kiley consensus\n{}", String::from_utf8_lossy(&polished));
-    } else {
-        error!("Failed to take consensus.");
-        error!("Please check that the start/end positions of the input are properly aligned. ");
-        error!("Or, try again with larger radius value.");
-    }
+    println!(">0 Kiley consensus\n{}", String::from_utf8_lossy(&polished));
     Ok(())
 }
 fn main() -> std::io::Result<()> {

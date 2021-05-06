@@ -43,20 +43,10 @@ pub struct GeneralizedPairHiddenMarkovModel<T: HMMType> {
 pub mod banded;
 use crate::hmm::Op;
 use rayon::prelude::*;
-// TODO: remove `if` statements as many as possible.
-// - let j_orig = foo(); if !(0..ys.len() as isize).contains(j_orig){ --- } should be removed, removed.
 fn get_range(radius: isize, ylen: isize, center: isize) -> std::ops::Range<isize> {
     let start = radius - center;
     let end = ylen + radius - center;
     start.max(0)..(end.min(2 * radius) + 1)
-    // let mut range = (0..2 * radius + 1).filter(|j| {
-    //     let j_orig = j + center - radius;
-    //     (0..ylen + 1).contains(&j_orig)
-    // });
-    // // If none, return (0,0)
-    // let start = range.next().unwrap_or(0);
-    // let end = range.last().unwrap_or(0);
-    // start..end + 1
 }
 
 /// Please Do not implement this trait by your own program.
@@ -518,6 +508,32 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
             &[del_prob],
             &[ins_prob],
             &[1f64],
+        )
+    }
+    // /// CLR profile.
+    pub fn clr() -> Self {
+        let states = 3;
+        let transition_matrix = [
+            vec![0.86, 0.07, 0.07],
+            vec![0.78, 0.15, 0.07],
+            vec![0.78, 0.07, 0.15],
+        ];
+        let (mat, mism) = (0.97, 0.01);
+        let match_emit = [
+            mat, mism, mism, mism, mism, mat, mism, mism, mism, mism, mat, mism, mism, mism, mism,
+            mat,
+        ];
+        let match_prob = vec![match_emit, [0f64; 16], [0f64; 16]];
+        let ins_prob = vec![[0f64; 4], [0f64; 4], [4f64.recip(); 4]];
+        let del_prob = vec![[0f64; 4], [1f64; 4], [0f64; 4]];
+        let init = [1f64, 0f64, 0f64];
+        Self::new(
+            states,
+            &transition_matrix,
+            &match_prob,
+            &del_prob,
+            &ins_prob,
+            &init,
         )
     }
     /// Return a three states pair HMM for computing conditional likelihood, LK(y|x)
