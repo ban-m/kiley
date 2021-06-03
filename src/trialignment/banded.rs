@@ -51,7 +51,7 @@ impl Aligner {
         // Also, we put a "sentinel" value at the beggining of each input sequence,
         // so that we would not get invalid access to any xs[i-1] value.
         // For example, if xs = b"ACACA", the converted array would be [NULL, 0b000, 0b001, 0b000, 0b001,0b000];
-        let start = std::time::Instant::now();
+        // let start = std::time::Instant::now();
         let xs: Vec<_> = std::iter::once(NULL)
             .chain(xs.iter().map(convert_to_twobit))
             .collect();
@@ -72,7 +72,7 @@ impl Aligner {
         let dp = self.memory.as_mut_slice();
         // We do not need this.
         dp.iter_mut().for_each(|x| *x = total_length);
-        let alloc = std::time::Instant::now();
+        // let alloc = std::time::Instant::now();
         let len = len as isize;
         // Initialization.
         dp[get!(0, rad, rad, len)] = 0;
@@ -140,7 +140,7 @@ impl Aligner {
             .unwrap();
             centers.push(next_center);
         }
-        let filled = std::time::Instant::now();
+        // let filled = std::time::Instant::now();
         // Traceback.
         let (mut s, mut t, mut u, min, mut ops) = {
             // Search the last element filled.
@@ -195,14 +195,14 @@ impl Aligner {
             ops.push(op);
         }
         ops.reverse();
-        let traced = std::time::Instant::now();
-        debug!(
-            "ALN\t{}\t{}\t{}\t{}",
-            dp.len(),
-            (alloc - start).as_millis(),
-            (filled - alloc).as_millis(),
-            (traced - filled).as_millis()
-        );
+        // let traced = std::time::Instant::now();
+        // debug!(
+        //     "ALN\t{}\t{}\t{}\t{}",
+        //     dp.len(),
+        //     (alloc - start).as_millis(),
+        //     (filled - alloc).as_millis(),
+        //     (traced - filled).as_millis()
+        // );
         (min, ops)
     }
     pub fn consensus(&mut self, xs: &[u8], ys: &[u8], zs: &[u8], radius: usize) -> (u32, Vec<u8>) {

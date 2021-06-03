@@ -170,6 +170,9 @@ pub fn edit_dist_dp_post(xs: &[u8], ys: &[u8]) -> Vec<Vec<u32>> {
 /// end and start of the returned vector.
 pub fn edit_dist_slow_ops_semiglobal(xs: &[u8], ys: &[u8]) -> (u32, Vec<Op>) {
     let mut dp = vec![vec![0; ys.len() + 1]; xs.len() + 1];
+    for i in 0..xs.len() + 1 {
+        dp[i][0] = i as u32;
+    }
     for (i, x) in xs.iter().enumerate() {
         for (j, y) in ys.iter().enumerate() {
             dp[i + 1][j + 1] = (dp[i][j] + (x != y) as u32)
@@ -177,35 +180,42 @@ pub fn edit_dist_slow_ops_semiglobal(xs: &[u8], ys: &[u8]) -> (u32, Vec<Op>) {
                 .min(dp[i + 1][j] + 1);
         }
     }
-    let (mut j, dist) = dp
-        .last()
-        .unwrap()
-        .iter()
-        .enumerate()
-        .min_by_key(|x| x.1)
-        .unwrap();
+    // DIFF: This code might have some bugs.
+    // We keep the j as small as possible!
+    let (mut j, dist) = dp.last().unwrap().iter().enumerate().fold(
+        (0, std::u32::MAX),
+        |(argmin, min), (idx, &score)| {
+            if score < min {
+                (idx, score)
+            } else {
+                (argmin, min)
+            }
+        },
+    );
     let mut i = xs.len();
     let mut ops = vec![Op::Ins; ys.len() - j];
     while 0 < i && 0 < j {
+        // We prefer match/dele to insertion,
+        // as it would decrease the aligned length.
         let dist = dp[i][j];
+        let mat_pen = (xs[i - 1] != ys[j - 1]) as u32;
         if dist == dp[i - 1][j] + 1 {
             ops.push(Op::Del);
             i -= 1;
-        } else if dist == dp[i][j - 1] + 1 {
-            ops.push(Op::Ins);
-            j -= 1;
-        } else {
-            let mat_pen = (xs[i - 1] != ys[j - 1]) as u32;
-            assert_eq!(dist, dp[i - 1][j - 1] + mat_pen);
+        } else if dist == dp[i - 1][j - 1] + mat_pen {
             ops.push(Op::Mat);
             i -= 1;
+            j -= 1;
+        } else {
+            assert_eq!(dist, dp[i][j - 1] + 1);
+            ops.push(Op::Ins);
             j -= 1;
         }
     }
     ops.extend(std::iter::repeat(Op::Del).take(i));
     ops.extend(std::iter::repeat(Op::Ins).take(j));
     ops.reverse();
-    (*dist, ops)
+    (dist, ops)
 }
 
 /// Edit distance and its operations.
@@ -596,7 +606,6 @@ fn convert_dp_to_modification_table(
 }
 
 pub fn get_modification_table(xs: &PadSeq, ys: &PadSeq, radius: usize) -> (u32, Vec<u32>, Vec<Op>) {
-    // let now = || std::time::Instant::now();
     let (centers, pre) = naive_banded_dp_pre(xs, ys, radius);
     let post = naive_banded_dp_post(xs, ys, radius, &centers);
     let (dist, prf) = convert_dp_to_modification_table(xs, ys, radius, &pre, &post, &centers);
@@ -838,7 +847,9 @@ pub fn polish_until_converge_banded<T: std::borrow::Borrow<[u8]>>(
         Some(res) => res,
         None => return template.to_vec(),
     };
-    while let Some((improved, _)) = polish_by_batch_banded(&cons, &seqs, radius, 20) {
+    let mut skip_size = 7;
+    while let Some((improved, _)) = polish_by_batch_banded(&cons, &seqs, radius, skip_size) {
+        skip_size = skip_size + 3;
         cons = improved;
     }
     cons.into()
@@ -1183,7 +1194,6 @@ pub fn polish_by_batch_banded<T: std::borrow::Borrow<PadSeq>>(
             }
         }
     }
-    // debug!("Batch:{:?}", changed_pos);
     is_diffed.then(|| (improved, current_edit_distance))
 }
 

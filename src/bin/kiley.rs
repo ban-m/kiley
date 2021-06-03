@@ -169,7 +169,10 @@ fn polish(matches: &clap::ArgMatches) -> std::io::Result<()> {
         .value_of("seed")
         .and_then(|e| e.parse().ok())
         .unwrap();
-    let config = kiley::PolishConfig::new(radius, chunk_size, max_coverage, overlap, seed);
+    use kiley::gphmm::*;
+    let model = GPHMM::<Cond>::clr();
+    let config =
+        kiley::PolishConfig::with_model(radius, chunk_size, max_coverage, seed, overlap, model);
     let result = kiley::polish(&contigs, &reads, &alignments, &config);
     let stdout = std::io::stdout();
     let mut wtr = std::io::BufWriter::new(stdout.lock());
