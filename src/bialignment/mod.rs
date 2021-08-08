@@ -311,6 +311,16 @@ pub fn edit_dist_with_deletion(pre_dp: &[Vec<u32>], post_dp: &[Vec<u32>], positi
         .unwrap()
 }
 
+// Return edit distance by deleting bases from the `position`-th base to where the edit distance would be minimized.
+pub fn edit_dist_from_deletion(pre_dp: &[Vec<u32>], post_dp: &[Vec<u32>], position: usize) -> u32 {
+    post_dp[position + 1]
+        .iter()
+        .zip(pre_dp[position].iter())
+        .map(|(x, y)| x + y)
+        .min()
+        .unwrap()
+}
+
 /// Exact algorithm.
 pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(template: &[u8], xs: &[T]) -> Vec<u8> {
     let mut polished = template.to_vec();
