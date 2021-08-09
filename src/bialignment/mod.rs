@@ -311,14 +311,39 @@ pub fn edit_dist_with_deletion(pre_dp: &[Vec<u32>], post_dp: &[Vec<u32>], positi
         .unwrap()
 }
 
-// Return edit distance by deleting bases from the `position`-th base to where the edit distance would be minimized.
-pub fn edit_dist_from_deletion(pre_dp: &[Vec<u32>], post_dp: &[Vec<u32>], position: usize) -> u32 {
-    post_dp[position + 1]
+// Return edit distance by deleting bases from the `i`-th base to where the edit distance would be minimized.
+pub fn edit_dist_from_deletion(pre_dp: &[Vec<u32>], post_dp: &[Vec<u32>]) -> Vec<u32> {
+    // First, create MB matrix, where
+    // MB[i][j] = min_{i<=k}(post_dp[k][j]).
+    // We can create this matrix in O(n^2) time from the bigget i-value to smaller.
+    let mut post_min_dp: Vec<_> = post_dp.to_vec();
+    for i in (0..post_dp.len() - 1).rev() {
+        for j in 0..post_dp[i + 1].len() {
+            post_min_dp[i][j] = post_min_dp[i][j].min(post_min_dp[i + 1][j]);
+        }
+    }
+    // Then, compute min_j{pre_dp[i][j] + MB[i+1][j]} for each i.
+    // Note that this array is pre_dp.len()-1 length.
+    // The inner-unwrap would never panic.
+    pre_dp
         .iter()
-        .zip(pre_dp[position].iter())
-        .map(|(x, y)| x + y)
-        .min()
-        .unwrap()
+        .zip(post_min_dp.iter().skip(1))
+        .map(|(pre, post)| pre.iter().zip(post).map(|(x, y)| x + y).min().unwrap())
+        .collect()
+    //     let max_dist = (post_dp.len() + post_dp[0].len()) as u32;
+    // let min_values = vec![max_dist; post_dp[position].len()];
+    // let post_dp_min: Vec<_> = post_dp[position + 1..]
+    //     .iter()
+    //     .fold(min_values, |mut mins, post| {
+    //         mins.iter_mut().zip(post).for_each(|(m, &x)| *m = x.min(*m));
+    //         mins
+    //     });
+    // post_dp_min
+    //     .iter()
+    //     .zip(pre_dp[position].iter())
+    //     .map(|(x, y)| x + y)
+    //     .min()
+    //     .unwrap()
 }
 
 /// Exact algorithm.
@@ -1651,6 +1676,40 @@ mod test {
                 let mut xs = xs.clone();
                 xs.remove(pos);
                 let exact_dist = edit_dist(&xs, &ys);
+                assert_eq!(dist, exact_dist);
+            }
+        }
+    }
+    #[test]
+    fn edit_dist_deletion_from_check() {
+        let xs = b"ACGTTTTACGT";
+        let ys = b"ACGTACGT";
+        let pre_dp = edit_dist_dp_pre(xs, ys);
+        let post_dp = edit_dist_dp_post(xs, ys);
+        let dists = edit_dist_from_deletion(&pre_dp, &post_dp);
+        let exact_dist = 0;
+        assert_eq!(dists[3], exact_dist);
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+        let prof = crate::gen_seq::PROFILE;
+        for _ in 0..10 {
+            let xslen = rng.gen::<usize>() % 50 + 10;
+            let xs = crate::gen_seq::generate_seq(&mut rng, xslen);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+            let pre_dp = edit_dist_dp_pre(&xs, &ys);
+            let post_dp = edit_dist_dp_post(&xs, &ys);
+            let dists = edit_dist_from_deletion(&pre_dp, &post_dp);
+            for pos in 0..xs.len() {
+                let dist = dists[pos];
+                let mut xs = xs.clone();
+                let take_len = xs.len() - pos;
+                let exact_dist = std::iter::repeat(0)
+                    .take(take_len)
+                    .map(|_| {
+                        xs.remove(pos);
+                        edit_dist(&xs, &ys)
+                    })
+                    .min()
+                    .unwrap();
                 assert_eq!(dist, exact_dist);
             }
         }
