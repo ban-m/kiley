@@ -884,6 +884,114 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
             slots[8] = lk.ln() + forward_acc;
         }
     }
+    /// Return 2,3,...,len-size deletion table.
+    /// Specifically, it returns an array xs,
+    /// where xs[(len-1) * i + d - 1] = the likelihood when
+    /// we remove the i..i+d bases from the reference.
+    /// So, len should be larger than 1 and
+    /// the access is valid as long as i is less than |template|-len.
+    /// The reason why 1-size deletion is not in this array
+    /// is because it is calculated by `to_modification_table` method.
+    pub fn to_deletion_table(&self, len: usize) -> Vec<f64> {
+        let (forward_acc, backward_acc) = self.accumlate_factors();
+        let states = self.model.states;
+        let width = len - 1;
+        let mut lks = vec![EP; width * (self.template.len() - width)];
+        for (pos, slots) in lks.chunks_exact_mut(width).enumerate() {
+            slots.iter_mut().for_each(|x| *x = 0f64);
+            let center = self.centers[pos];
+            let forward_acc = forward_acc[pos];
+            for del_size in 2..len + 1 {
+                if pos + del_size == self.template.len() {
+                    let j = self.query.len() as isize - center + self.radius;
+                    let lk: f64 = (0..states)
+                        .map(|s| self.forward[(pos as isize, j, s)])
+                        .sum();
+                    slots[del_size - 2] = lk.ln() + forward_acc;
+                } else {
+                    let x = self.template[(pos + del_size) as isize];
+                    let mut lk_total = 0f64;
+                    for j in get_range(self.radius, self.query.len() as isize, center) {
+                        let pos = pos as isize;
+                        let gap_next = match self.centers.get(pos as usize + del_size + 1) {
+                            Some(res) => res,
+                            None => continue,
+                        };
+                        let forward = (0..states).map(|s| {
+                            (0..states)
+                                .map(|t| self.forward[(pos, j, t)] * self.model.transition(t, s))
+                                .sum::<f64>()
+                        });
+                        let j_orig = j + center - self.radius;
+                        let y = self.query[j_orig];
+                        for (s, forward) in forward.enumerate() {
+                            let j_gap_next = j + center - gap_next;
+                            let pos_after = pos + del_size as isize + 1;
+                            let backward_mat = match self.backward.get(pos_after, j_gap_next + 1, s)
+                            {
+                                Some(mat) => mat * self.model.observe(s, x, y),
+                                None => 0f64,
+                            };
+                            let backward_del = match self.backward.get(pos_after, j_gap_next, s) {
+                                Some(del) => del * self.model.observe(s, x, GAP),
+                                None => 0f64,
+                            };
+                            lk_total += forward * (backward_mat + backward_del);
+                        }
+                    }
+                    slots[del_size - 2] =
+                        lk_total.ln() + forward_acc + backward_acc[pos + del_size + 1];
+                }
+            }
+        }
+        lks
+    }
+    /// Return an array xs,
+    /// where xs[i * len + k] is the likleihood
+    /// when we duplicate xs[i..i+k] right after xs[i+k]. In other words,
+    /// the likelihood between  xs[..i+k] + xs[i..] and ys.
+    /// So, the i is bounded by i + k < |xs|
+    pub fn to_copy_table(&self, len: usize) -> Vec<f64> {
+        let (forward_acc, backward_acc) = self.accumlate_factors();
+        let states = self.model.states;
+        let mut lks = vec![EP; len * (self.template.len() - len)];
+        for (pos, slots) in lks.chunks_exact_mut(len).enumerate() {
+            slots.iter_mut().for_each(|x| *x = 0f64);
+            for dup_size in 1..len + 1 {
+                let from_pos = pos + dup_size;
+                let center = self.centers[from_pos];
+                let forward_acc = forward_acc[from_pos];
+                let x = self.template[pos as isize];
+                let mut lk_total = 0f64;
+                for j in get_range(self.radius, self.query.len() as isize, center) {
+                    let gap_next = self.centers[pos + 1];
+                    let pos = pos as isize;
+                    let from_pos = from_pos as isize;
+                    let forward = (0..states).map(|s| {
+                        (0..states)
+                            .map(|t| self.forward[(from_pos, j, t)] * self.model.transition(t, s))
+                            .sum::<f64>()
+                    });
+                    let j_orig = j + center - self.radius;
+                    let y = self.query[j_orig];
+                    for (s, forward) in forward.enumerate() {
+                        let j_gap_next = j + center - gap_next;
+                        let backward_mat = match self.backward.get(pos + 1, j_gap_next + 1, s) {
+                            Some(mat) => mat * self.model.observe(s, x, y),
+                            None => 0f64,
+                        };
+                        let backward_del = match self.backward.get(pos + 1, j_gap_next, s) {
+                            Some(del) => del * self.model.observe(s, x, GAP),
+                            None => 0f64,
+                        };
+                        lk_total += forward * (backward_mat + backward_del);
+                    }
+                }
+                slots[dup_size - 1] = lk_total.ln() + forward_acc + backward_acc[pos + 1];
+            }
+        }
+        lks
+    }
     // 9-element window.
     // Position->[A,C,G,T,A,C,G,T,-]
     pub fn to_modification_table(&self) -> Vec<f64> {
@@ -1456,7 +1564,6 @@ mod gphmm_banded {
             xs.insert(pos as isize, original);
         }
     }
-
     #[test]
     fn profile_modification_banded_test() {
         let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(4280);
@@ -1475,6 +1582,96 @@ mod gphmm_banded {
             profile_modification_banded_check(&three_cond, &xs, &ys, radius);
         }
     }
+    fn profile_multi_deletion_banded_check<T: HMMType>(
+        model: &GPHMM<T>,
+        xs: &[u8],
+        ys: &[u8],
+        radius: isize,
+    ) {
+        let orig_xs: Vec<_> = xs.to_vec();
+        let (xs, ys) = (PadSeq::new(xs), PadSeq::new(ys));
+        let profile = ProfileBanded::new(model, &xs, &ys, radius).unwrap();
+        let len = 6;
+        let difftable = profile.to_deletion_table(len);
+        for (pos, diffs) in difftable.chunks(len - 1).enumerate() {
+            let mut xs: Vec<_> = orig_xs.clone();
+            xs.remove(pos);
+            for (i, lkd) in diffs.iter().enumerate() {
+                xs.remove(pos);
+                let xs = PadSeq::new(xs.as_slice());
+                let lk = model
+                    .likelihood_banded_inner(&xs, &ys, radius as usize)
+                    .unwrap();
+                assert!((lk - lkd).abs() < 0.001, "{},{},{},{}", lk, lkd, pos, i);
+            }
+        }
+    }
+    #[test]
+    fn profile_multi_deletion_banded_test() {
+        let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(4280);
+        let single = GPHMM::<Full>::default();
+        let single_cond = GPHMM::<Cond>::default();
+        let three = GPHMM::<Full>::new_three_state(0.9, 0.05, 0.05, 0.9);
+        let three_cond = GPHMM::<Cond>::new_three_state(0.9, 0.05, 0.05, 0.9);
+        let prof = crate::gen_seq::PROFILE;
+        let radius = 30;
+        for _ in 0..2 {
+            let xs = crate::gen_seq::generate_seq(&mut rng, 200);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+            profile_multi_deletion_banded_check(&single, &xs, &ys, radius);
+            profile_multi_deletion_banded_check(&single_cond, &xs, &ys, radius);
+            profile_multi_deletion_banded_check(&three, &xs, &ys, radius);
+            profile_multi_deletion_banded_check(&three_cond, &xs, &ys, radius);
+        }
+    }
+    fn profile_copy_banded_check<T: HMMType>(
+        model: &GPHMM<T>,
+        xs: &[u8],
+        ys: &[u8],
+        radius: isize,
+    ) {
+        let orig_xs: Vec<_> = xs.to_vec();
+        let (xs, ys) = (PadSeq::new(xs), PadSeq::new(ys));
+        let profile = ProfileBanded::new(model, &xs, &ys, radius).unwrap();
+        let len = 4;
+        let difftable = profile.to_copy_table(len);
+        for (pos, diffs) in difftable.chunks(len).enumerate() {
+            let latter = orig_xs.iter().skip(pos);
+            for (i, lkd) in diffs.iter().enumerate() {
+                let xs: Vec<_> = orig_xs
+                    .iter()
+                    .take(pos + i + 1)
+                    .chain(latter.clone())
+                    .copied()
+                    .collect();
+                assert_eq!(xs.len(), orig_xs.len() + i + 1);
+                let xs = PadSeq::from(xs);
+                let lk = model
+                    .likelihood_banded_inner(&xs, &ys, radius as usize)
+                    .unwrap();
+                assert!((lk - lkd).abs() < 0.001, "{},{},{},{}", lk, lkd, pos, i);
+            }
+        }
+    }
+    #[test]
+    fn profile_copy_banded_test() {
+        let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(4280);
+        let single = GPHMM::<Full>::default();
+        let single_cond = GPHMM::<Cond>::default();
+        let three = GPHMM::<Full>::new_three_state(0.9, 0.05, 0.05, 0.9);
+        let three_cond = GPHMM::<Cond>::new_three_state(0.9, 0.05, 0.05, 0.9);
+        let prof = crate::gen_seq::PROFILE;
+        let radius = 30;
+        for _ in 0..2 {
+            let xs = crate::gen_seq::generate_seq(&mut rng, 200);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+            profile_copy_banded_check(&single, &xs, &ys, radius);
+            profile_copy_banded_check(&single_cond, &xs, &ys, radius);
+            profile_copy_banded_check(&three, &xs, &ys, radius);
+            profile_copy_banded_check(&three_cond, &xs, &ys, radius);
+        }
+    }
+
     fn correction_banded_check<T: HMMType>(
         model: &GPHMM<T>,
         draft: &[u8],

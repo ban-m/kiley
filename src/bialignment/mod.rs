@@ -330,20 +330,21 @@ pub fn edit_dist_from_deletion(pre_dp: &[Vec<u32>], post_dp: &[Vec<u32>]) -> Vec
         .zip(post_min_dp.iter().skip(1))
         .map(|(pre, post)| pre.iter().zip(post).map(|(x, y)| x + y).min().unwrap())
         .collect()
-    //     let max_dist = (post_dp.len() + post_dp[0].len()) as u32;
-    // let min_values = vec![max_dist; post_dp[position].len()];
-    // let post_dp_min: Vec<_> = post_dp[position + 1..]
-    //     .iter()
-    //     .fold(min_values, |mut mins, post| {
-    //         mins.iter_mut().zip(post).for_each(|(m, &x)| *m = x.min(*m));
-    //         mins
-    //     });
-    // post_dp_min
-    //     .iter()
-    //     .zip(pre_dp[position].iter())
-    //     .map(|(x, y)| x + y)
-    //     .min()
-    //     .unwrap()
+}
+
+/// Return edit distance by duplicating position..position+len base in the template sequence.
+pub fn edit_dist_copy_from(
+    pre_dp: &[Vec<u32>],
+    post_dp: &[Vec<u32>],
+    position: usize,
+    len: usize,
+) -> u32 {
+    pre_dp[position + len]
+        .iter()
+        .zip(post_dp[position].iter())
+        .map(|(x, y)| x + y)
+        .min()
+        .unwrap()
 }
 
 /// Exact algorithm.
@@ -389,7 +390,6 @@ pub fn get_modification_table_naive(xs: &[u8], ys: &[u8]) -> (u32, Vec<u32>) {
                 let del = post_dp[pos + 1][j] + 1;
                 slots[base_idx] = slots[base_idx].min(pre + mat).min(pre + del);
             }
-            // Deletion.
             slots[8] = slots[8].min(pre_row[j] + post_dp[pos + 1][j]);
         }
     }
@@ -1466,6 +1466,31 @@ mod test {
                 let dist = diffs[8];
                 assert_eq!(dist, exact_dist, "{},{}", pos, xs.len());
                 xs_mut.insert(pos, original);
+            }
+        }
+    }
+    #[test]
+    fn edit_dist_copy_from_check() {
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+        let prof = crate::gen_seq::PROFILE;
+        for _ in 0..100 {
+            let xslen = rng.gen::<usize>() % 1000 + 10;
+            let xs = crate::gen_seq::generate_seq(&mut rng, xslen);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+            let pre_dp = edit_dist_dp_pre(&xs, &ys);
+            let post_dp = edit_dist_dp_post(&xs, &ys);
+            for len in 2..10 {
+                for pos in 0..(xs.len() - len) {
+                    let dist = edit_dist_copy_from(&pre_dp, &post_dp, pos, len);
+                    let xs: Vec<_> = xs
+                        .iter()
+                        .take(pos + len)
+                        .chain(xs.iter().skip(pos))
+                        .copied()
+                        .collect();
+                    let exact_dist = edit_dist(&xs, &ys);
+                    assert_eq!(dist, exact_dist);
+                }
             }
         }
     }
