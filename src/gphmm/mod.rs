@@ -1152,18 +1152,18 @@ impl<M: HMMType> GPHMM<M> {
 }
 
 #[derive(Debug, Clone)]
-struct Profile<'a, 'b, 'c, T: HMMType> {
+pub struct Profile<'a, 'b, 'c, T: HMMType> {
     template: &'a PadSeq,
     query: &'b PadSeq,
     model: &'c GPHMM<T>,
     forward: DPTable,
-    forward_factor: Vec<f64>,
+    pub forward_factor: Vec<f64>,
     backward: DPTable,
-    backward_factor: Vec<f64>,
+    pub backward_factor: Vec<f64>,
 }
 
 impl<'a, 'b, 'c, T: HMMType> Profile<'a, 'b, 'c, T> {
-    fn new(model: &'c GPHMM<T>, template: &'a PadSeq, query: &'b PadSeq) -> Self {
+    pub fn new(model: &'c GPHMM<T>, template: &'a PadSeq, query: &'b PadSeq) -> Self {
         let (forward, forward_factor) = model.forward(template, query);
         let (backward, backward_factor) = model.backward(template, query);
         Self {
@@ -1176,7 +1176,7 @@ impl<'a, 'b, 'c, T: HMMType> Profile<'a, 'b, 'c, T> {
             backward_factor,
         }
     }
-    fn lk(&self) -> f64 {
+    pub fn lk(&self) -> f64 {
         let n = self.forward.row as isize - 1;
         let m = self.forward.column as isize - 1;
         let state = self.model.states;
@@ -1184,7 +1184,7 @@ impl<'a, 'b, 'c, T: HMMType> Profile<'a, 'b, 'c, T> {
         lk.ln() + self.forward_factor.iter().map(log).sum::<f64>()
     }
     // Return Likelihood when the `pos` base of the template is mutated into `base`.
-    fn with_mutation(&self, pos: usize, base: u8) -> f64 {
+    pub fn with_mutation(&self, pos: usize, base: u8) -> f64 {
         let states = self.model.states;
         let lk = (0..self.query.len() as isize + 1)
             .map(|j| {
@@ -1206,6 +1206,73 @@ impl<'a, 'b, 'c, T: HMMType> Profile<'a, 'b, 'c, T> {
         let forward_factor: f64 = self.forward_factor[..pos + 1].iter().map(|x| x.ln()).sum();
         let backward_factor: f64 = self.backward_factor[pos + 1..].iter().map(|x| x.ln()).sum();
         lk.ln() + forward_factor + backward_factor
+    }
+    pub fn accumlate_factors(&self) -> (Vec<f64>, Vec<f64>) {
+        // pos -> [..pos+1].ln().sum()
+        let (forward_acc, _) =
+            self.forward_factor
+                .iter()
+                .fold((vec![], 0f64), |(mut result, accum), x| {
+                    result.push(accum + log(x));
+                    (result, accum + log(x))
+                });
+        // pos -> [pos..].ln().sum()
+        let backward_acc = {
+            let (mut backfac, _) =
+                self.backward_factor
+                    .iter()
+                    .rev()
+                    .fold((vec![], 0f64), |(mut result, accum), x| {
+                        result.push(accum + log(x));
+                        (result, accum + log(x))
+                    });
+            backfac.reverse();
+            backfac
+        };
+        (forward_acc, backward_acc)
+    }
+    pub fn to_deletion_table(&self, len: usize) -> Vec<f64> {
+        let (forward_acc, backward_acc) = self.accumlate_factors();
+        let states = self.model.states;
+        let width = len - 1;
+        let mut lks = vec![EP; width * (self.template.len() - width)];
+        for (pos, slots) in lks.chunks_exact_mut(width).enumerate() {
+            slots.iter_mut().for_each(|x| *x = 0f64);
+            let forward_acc = forward_acc[pos];
+            for del_size in 2..len + 1 {
+                if pos + del_size == self.template.len() {
+                    let j = self.query.len() as isize;
+                    let lk: f64 = (0..states)
+                        .map(|s| self.forward[(pos as isize, j, s)])
+                        .sum();
+                    slots[del_size - 2] = lk.ln() + forward_acc;
+                } else {
+                    let x = self.template[(pos + del_size) as isize];
+                    let mut lk_total = 0f64;
+                    for (j, &y) in self.query.iter().enumerate() {
+                        let pos = pos as isize;
+                        let j = j as isize;
+                        let forward = (0..states).map(|s| {
+                            (0..states)
+                                .map(|t| self.forward[(pos, j, t)] * self.model.transition(t, s))
+                                .sum::<f64>()
+                        });
+                        for (s, forward) in forward.enumerate() {
+                            let pos_after = pos + del_size as isize + 1;
+                            let backward_mat =
+                                self.backward.get(pos_after, j + 1, s).unwrap_or(&0f64);
+                            let backward_del = self.backward.get(pos_after, j, s).unwrap_or(&0f64);
+                            lk_total += forward
+                                * (backward_mat * self.model.observe(s, x, y)
+                                    + backward_del * self.model.observe(s, x, GAP));
+                        }
+                    }
+                    slots[del_size - 2] =
+                        lk_total.ln() + forward_acc + backward_acc[pos + del_size + 1];
+                }
+            }
+        }
+        lks
     }
     // Return likelihood when the `pos` base of the template is removed.
     fn with_deletion(&self, pos: usize) -> f64 {

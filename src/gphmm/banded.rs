@@ -669,9 +669,9 @@ pub struct ProfileBanded<'a, 'b, 'c, T: HMMType> {
     query: &'b PadSeq,
     model: &'c GPHMM<T>,
     forward: DPTable,
-    forward_factor: Vec<f64>,
+    pub forward_factor: Vec<f64>,
     backward: DPTable,
-    backward_factor: Vec<f64>,
+    pub backward_factor: Vec<f64>,
     centers: Vec<isize>,
     radius: isize,
 }
@@ -710,7 +710,7 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
         lk.ln() + factor
     }
     #[allow(dead_code)]
-    fn with_mutation(&self, pos: usize, base: u8) -> f64 {
+    pub fn with_mutation(&self, pos: usize, base: u8) -> f64 {
         let states = self.model.states;
         let (center, next) = (self.centers[pos], self.centers[pos + 1]);
         let lk = get_range(self.radius, self.query.len() as isize, center)
@@ -802,7 +802,7 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
         let backward_factor: f64 = self.backward_factor[pos..].iter().map(log).sum();
         lk.ln() + forward_factor + backward_factor
     }
-    fn accumlate_factors(&self) -> (Vec<f64>, Vec<f64>) {
+    pub fn accumlate_factors(&self) -> (Vec<f64>, Vec<f64>) {
         // pos -> [..pos+1].ln().sum()
         let (forward_acc, _) =
             self.forward_factor
@@ -913,9 +913,10 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
                     let mut lk_total = 0f64;
                     for j in get_range(self.radius, self.query.len() as isize, center) {
                         let pos = pos as isize;
-                        let gap_next = match self.centers.get(pos as usize + del_size + 1) {
-                            Some(res) => res,
-                            None => continue,
+                        let gap_next = self.centers[pos as usize + del_size + 1];
+                        let j_gap_next = match j + center - gap_next {
+                            x if 0 <= x => x,
+                            _ => continue,
                         };
                         let forward = (0..states).map(|s| {
                             (0..states)
@@ -925,18 +926,16 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
                         let j_orig = j + center - self.radius;
                         let y = self.query[j_orig];
                         for (s, forward) in forward.enumerate() {
-                            let j_gap_next = j + center - gap_next;
                             let pos_after = pos + del_size as isize + 1;
-                            let backward_mat = match self.backward.get(pos_after, j_gap_next + 1, s)
-                            {
-                                Some(mat) => mat * self.model.observe(s, x, y),
-                                None => 0f64,
-                            };
-                            let backward_del = match self.backward.get(pos_after, j_gap_next, s) {
-                                Some(del) => del * self.model.observe(s, x, GAP),
-                                None => 0f64,
-                            };
-                            lk_total += forward * (backward_mat + backward_del);
+                            let backward_mat = self
+                                .backward
+                                .get(pos_after, j_gap_next + 1, s)
+                                .unwrap_or(&0f64);
+                            let backward_del =
+                                self.backward.get(pos_after, j_gap_next, s).unwrap_or(&0f64);
+                            lk_total += forward
+                                * (backward_mat * self.model.observe(s, x, y)
+                                    + backward_del * self.model.observe(s, x, GAP));
                         }
                     }
                     slots[del_size - 2] =
