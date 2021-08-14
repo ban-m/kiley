@@ -896,7 +896,7 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
         let (forward_acc, backward_acc) = self.accumlate_factors();
         let states = self.model.states;
         let width = len - 1;
-        let mut lks = vec![EP; width * (self.template.len() - width)];
+        let mut lks = vec![EP; width * (self.template.len() - len)];
         for (pos, slots) in lks.chunks_exact_mut(width).enumerate() {
             slots.iter_mut().for_each(|x| *x = 0f64);
             let center = self.centers[pos];
