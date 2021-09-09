@@ -21,19 +21,34 @@ fn main() {
         let kiley_time = (end - start).as_millis();
         let kiley_dist = edit_dist(&template, &consensus);
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\tTernary",
+            "{}\t{}\t{}\t{}\t{}\t{}\tKiley",
             len, seed, coverage, error_rate, kiley_time, kiley_dist
         );
     }
-    //// POA
+    //// Ternary
     {
         let start = std::time::Instant::now();
-        let consensus = kiley::consensus_poa(&seqs, seed, 10, 10, "CLR");
+        // let consensus = kiley::consensus_poa(&seqs, seed, 10, 10, "CLR");
+        let consensus = kiley::ternary_consensus_by_chunk(&seqs, 100);
         let end = std::time::Instant::now();
         let poa_time = (end - start).as_millis();
         let poa_dist = edit_dist(&template, &consensus);
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\tPOA",
+            "{}\t{}\t{}\t{}\t{}\t{}\tTern",
+            len, seed, coverage, error_rate, poa_time, poa_dist
+        );
+    }
+    //// SWG
+    {
+        let start = std::time::Instant::now();
+        let radius = len / 10;
+        let params = (2, -4, -4, -2);
+        let consensus = kiley::consensus_by_pileup_affine(&seqs, params, radius, 10);
+        let end = std::time::Instant::now();
+        let poa_time = (end - start).as_millis();
+        let poa_dist = edit_dist(&template, &consensus);
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}\tSWG",
             len, seed, coverage, error_rate, poa_time, poa_dist
         );
     }

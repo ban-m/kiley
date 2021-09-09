@@ -1017,6 +1017,96 @@ pub fn polish_by_pileup<T: std::borrow::Borrow<[u8]>>(template: &[u8], xs: &[T])
     template
 }
 
+pub fn consensus_by_pileup_affine<T: std::borrow::Borrow<[u8]>>(
+    xs: &[T],
+    alignment_parameters: (i32, i32, i32, i32),
+    radius: usize,
+    repeat_num: usize,
+) -> Vec<u8> {
+    let mut consensus = xs[0].borrow().to_vec();
+    for _ in 0..repeat_num {
+        consensus = polish_by_pileup_affine(&consensus, xs, alignment_parameters, radius);
+    }
+    consensus
+}
+
+pub fn polish_by_pileup_affine<T: std::borrow::Borrow<[u8]>>(
+    template: &[u8],
+    xs: &[T],
+    (mat, mism, open, ext): (i32, i32, i32, i32),
+    radius: usize,
+) -> Vec<u8> {
+    let mut matches = vec![[0; 4]; template.len()];
+    // the 0-th element is the insertion before the 0-th base.
+    // TODO: Maybe @-delemitered sequence would be much memory efficient.
+    let mut insertions = vec![vec![]; template.len() + 1];
+    let mut deletions = vec![0; template.len()];
+    for x in xs.iter() {
+        let x = x.borrow();
+        let (_, ops) = bialignment::global_banded(&template, x, mat, mism, open, ext, radius);
+        let (mut i, mut j) = (0, 0);
+        let mut ins_buffer = vec![];
+        for &op in ops.iter() {
+            match op {
+                bialignment::Op::Mat => {
+                    matches[i][padseq::convert_to_twobit(&x[j]) as usize] += 1;
+                    i += 1;
+                    j += 1;
+                }
+                bialignment::Op::Ins => {
+                    ins_buffer.push(x[j]);
+                    j += 1;
+                }
+                bialignment::Op::Del => {
+                    deletions[i] += 1;
+                    i += 1;
+                }
+            }
+            if op != bialignment::Op::Ins && !ins_buffer.is_empty() {
+                insertions[i].push(ins_buffer.clone());
+                ins_buffer.clear();
+            }
+        }
+        if !ins_buffer.is_empty() {
+            insertions[i].push(ins_buffer);
+        }
+    }
+    println!("DUMP");
+    for (idx, ((m, d), i)) in matches
+        .iter()
+        .zip(deletions.iter())
+        .zip(insertions.iter())
+        .enumerate()
+    {
+        println!("{}\t{:?}\t{}\t{:?}", idx, i, d, m);
+    }
+    let mut template = vec![];
+    for ((i, m), &d) in insertions.iter().zip(matches.iter()).zip(deletions.iter()) {
+        let insertion = i.iter().len();
+        let coverage = m.iter().sum::<usize>() + d;
+        if coverage / 2 < insertion {
+            let mut counts = [0; 4];
+            for s in i.iter().filter(|s| !s.is_empty()) {
+                counts[padseq::convert_to_twobit(&s[0]) as usize] += 1;
+            }
+            let (max, _) = counts.iter().enumerate().max_by_key(|x| x.1).unwrap();
+            println!("{:?}->{}", i, b"ACGT"[max] as char);
+            template.push(b"ACGT"[max]);
+        }
+        if d < coverage / 2 {
+            if let Some(base) = m
+                .iter()
+                .enumerate()
+                .max_by_key(|x| x.1)
+                .map(|(idx, _)| b"ACGT"[idx])
+            {
+                template.push(base);
+            }
+        }
+    }
+    template
+}
+
 // Take a consensus from seqeunces.
 // This is very naive consensus, majority voting.
 fn naive_consensus(xs: &[Vec<u8>]) -> Vec<u8> {

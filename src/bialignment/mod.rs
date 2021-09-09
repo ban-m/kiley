@@ -501,11 +501,7 @@ impl DPTable {
         r * (self.column + 2 * Self::OFFSET) + c
     }
     fn get(&self, i: isize, j: isize) -> u32 {
-        // unsafe { *self.data.get_unchecked(self.get_location(i, j)) }
         *self.data.get(self.get_location(i, j)).unwrap()
-        // let location = self.get_location(i, j);
-        // assert!(location < self.data.len());
-        // self.data[self.get_location(i, j)]
     }
     fn get_check(&self, i: isize, j: isize) -> Option<u32> {
         self.data.get(self.get_location(i, j)).copied()
@@ -1287,6 +1283,7 @@ pub fn polish_by_flip_banded<T: std::borrow::Borrow<PadSeq>>(
         })
 }
 
+/// xs is a reference ,ys is a query.
 pub fn edit_dist_banded(xs: &[u8], ys: &[u8], radius: usize) -> Option<(u32, Vec<Op>)> {
     assert!(radius > 0);
     assert!(!xs.is_empty());
@@ -1347,6 +1344,233 @@ pub fn edit_dist_banded(xs: &[u8], ys: &[u8], radius: usize) -> Option<(u32, Vec
     ops.extend(std::iter::repeat(Op::Ins).take(j as usize));
     ops.reverse();
     Some((edit_dist, ops))
+}
+
+/// Global alignment with affine gap score. xs is the reference and ys is the query.
+pub fn global(xs: &[u8], ys: &[u8], mat: i32, mism: i32, open: i32, ext: i32) -> (i32, Vec<Op>) {
+    let min = (xs.len() + ys.len()) as i32 * open.min(mism);
+    // 0->Match, 1-> Del, 2-> Ins phase.
+    let mut dp = vec![vec![vec![min; ys.len() + 1]; xs.len() + 1]; 3];
+    // Initialize.
+    dp[0][0][0] = 0;
+    for i in 1..xs.len() + 1 {
+        dp[1][i][0] = open + ext * (i - 1) as i32;
+    }
+    for j in 1..ys.len() + 1 {
+        dp[2][0][j] = open + ext * (j - 1) as i32;
+    }
+    // Recur.
+    for (i, x) in xs.iter().enumerate() {
+        let i = i + 1;
+        for (j, y) in ys.iter().enumerate() {
+            let j = j + 1;
+            let mat_score = if x == y { mat } else { mism };
+            dp[0][i][j] = (dp[0][i - 1][j - 1] + mat_score)
+                .max(dp[1][i - 1][j - 1] + mat_score)
+                .max(dp[2][i - 1][j - 1] + mat_score);
+            dp[1][i][j] = (dp[0][i - 1][j] + open)
+                .max(dp[1][i - 1][j] + ext)
+                .max(dp[2][i - 1][j] + open);
+            dp[2][i][j] = (dp[0][i][j - 1] + open).max(dp[2][i][j - 1] + ext);
+        }
+    }
+    let (mut xpos, mut ypos) = (xs.len(), ys.len());
+    let (mat_end, del_end, ins_end) = (dp[0][xpos][ypos], dp[1][xpos][ypos], dp[2][xpos][ypos]);
+    let score = mat_end.max(del_end).max(ins_end);
+    let mut state = match score {
+        x if x == mat_end => 0,
+        x if x == del_end => 1,
+        x if x == ins_end => 2,
+        _ => panic!(),
+    };
+    let mut ops = vec![];
+    while 0 < xpos && 0 < ypos {
+        let current = dp[state][xpos][ypos];
+        let (x, y) = (xs[xpos - 1], ys[ypos - 1]);
+        let mat_score = if x == y { mat } else { mism };
+        let (op, new_state) = if state == 0 {
+            let mat = dp[0][xpos - 1][ypos - 1] + mat_score;
+            let del = dp[1][xpos - 1][ypos - 1] + mat_score;
+            let ins = dp[2][xpos - 1][ypos - 1] + mat_score;
+            if current == mat {
+                (Op::Mat, 0)
+            } else if current == del {
+                (Op::Mat, 1)
+            } else {
+                assert_eq!(current, ins);
+                (Op::Mat, 2)
+            }
+        } else if state == 1 {
+            if current == dp[0][xpos - 1][ypos] + open {
+                (Op::Del, 0)
+            } else if current == dp[1][xpos - 1][ypos] + ext {
+                (Op::Del, 1)
+            } else {
+                assert_eq!(current, dp[2][xpos - 1][ypos] + open);
+                (Op::Del, 2)
+            }
+        } else {
+            assert_eq!(state, 2);
+            if current == dp[0][xpos][ypos - 1] + open {
+                (Op::Ins, 0)
+            } else {
+                assert_eq!(current, dp[2][xpos][ypos - 1] + ext);
+                (Op::Ins, 2)
+            }
+        };
+        match op {
+            Op::Del => xpos -= 1,
+            Op::Ins => ypos -= 1,
+            Op::Mat => {
+                xpos -= 1;
+                ypos -= 1;
+            }
+        }
+        ops.push(op);
+        state = new_state;
+    }
+    ops.extend(std::iter::repeat(Op::Del).take(xpos));
+    ops.extend(std::iter::repeat(Op::Ins).take(ypos));
+    ops.reverse();
+    (score, ops)
+}
+
+/// Global alignment with banded alignment. In this algorithm, the band is "fixed", not adaptive(currently).
+pub fn global_banded(
+    xs: &[u8],
+    ys: &[u8],
+    mat: i32,
+    mism: i32,
+    open: i32,
+    ext: i32,
+    band: usize,
+) -> (i32, Vec<Op>) {
+    match (xs.is_empty(), ys.is_empty()) {
+        (true, true) => return (0, vec![]),
+        (true, false) => return (open + (ys.len() - 1) as i32 * ext, vec![Op::Ins; ys.len()]),
+        (false, true) => return (open + (xs.len() - 1) as i32 * ext, vec![Op::Del; xs.len()]),
+        _ => {}
+    }
+    // We fill the [center-band..center+band](2*band) cells for each reference base,
+    // resulting to 2*band*xs.len()*3 cells in total.
+    // here, the center is i * ys.len()/xs.len() in the i-th row.
+    let min = (xs.len() + ys.len()) as i32 * open.min(mism);
+    let row_offset = 2 * band * 3;
+    let mut dp = vec![min; 2 * band * (xs.len() + 1) * 3];
+    // To access the [s][i][j] location in the "full" DP,
+    // (2 * band * 3) * i + 3 * (j + band - center) + s
+    macro_rules! get {
+        ($i:expr, $j:expr, $s:expr, $center:expr) => {
+            row_offset * $i + 3 * ($j + band - $center) + $s
+        };
+    }
+    // Initialization(Match).
+    dp[get!(0, 0, 0, 0)] = 0;
+    // Initialization(Ins).
+    for j in 1..band {
+        dp[get!(0, j, 2, 0)] = open + (j - 1) as i32 * ext;
+    }
+    // Recur.
+    // Start and end index of the previous row.
+    let (mut start, mut end) = (0, band);
+    for (i, &x) in xs.iter().enumerate() {
+        let i = i + 1;
+        let center = i * ys.len() / xs.len();
+        for j in center.max(band) - band..(center + band).min(ys.len() + 1) {
+            // Initialization(Lazy). We should `continue` loop, as the index would be invalid in i-1,j-1.
+            if j == 0 {
+                dp[get!(i, j, 1, center)] = open + (i - 1) as i32 * ext;
+                continue;
+            }
+            // Recur(Usual).
+            let y = ys[j - 1];
+            let mat_score = if x == y { mat } else { mism };
+            let prev_center = (i - 1) * ys.len() / xs.len();
+            let fill_pos = get!(i, j, 0, center);
+            dp[fill_pos] = if (start..end).contains(&(j - 1)) {
+                let mat_pos = get!(i - 1, j - 1, 0, prev_center);
+                dp[mat_pos].max(dp[mat_pos + 1]).max(dp[mat_pos + 2]) + mat_score
+            } else {
+                min
+            };
+            dp[fill_pos + 1] = if (start..end).contains(&j) {
+                let del_pos = get!(i - 1, j, 0, prev_center);
+                (dp[del_pos] + open)
+                    .max(dp[del_pos + 2] + open)
+                    .max(dp[del_pos + 1] + ext)
+            } else {
+                min
+            };
+            dp[fill_pos + 2] = if j != center.max(band) - band {
+                let ins_pos = get!(i, j - 1, 0, center);
+                (dp[ins_pos] + open).max(dp[ins_pos + 2] + ext)
+            } else {
+                min
+            };
+        }
+        start = center.max(band) - band;
+        end = center + band;
+    }
+    // Trackback.
+    let (mut xpos, mut ypos) = (xs.len(), ys.len());
+    let end_pos = get!(xpos, ypos, 0, xpos * ys.len() / xs.len());
+    let (mut state, score) = dp[end_pos..end_pos + 3]
+        .iter()
+        .enumerate()
+        .max_by_key(|x| x.1)
+        .unwrap();
+    let mut ops = vec![];
+    while 0 < xpos && 0 < ypos {
+        let center = xpos * ys.len() / xs.len();
+        let prev_center = (xpos - 1) * ys.len() / xs.len();
+        let current = dp[get!(xpos, ypos, state, center)];
+        let (x, y) = (xs[xpos - 1], ys[ypos - 1]);
+        let mat_score = if x == y { mat } else { mism };
+        let (op, new_state) = if state == 0 {
+            let mat_pos = get!(xpos - 1, ypos - 1, 0, prev_center);
+            if dp[mat_pos] + mat_score == current {
+                (Op::Mat, 0)
+            } else if dp[mat_pos + 1] + mat_score == current {
+                (Op::Mat, 1)
+            } else {
+                assert_eq!(dp[mat_pos + 2] + mat_score, current);
+                (Op::Mat, 2)
+            }
+        } else if state == 1 {
+            let del_pos = get!(xpos - 1, ypos, 0, prev_center);
+            if dp[del_pos] + open == current {
+                (Op::Del, 0)
+            } else if dp[del_pos + 1] + ext == current {
+                (Op::Del, 1)
+            } else {
+                assert_eq!(dp[del_pos + 2] + open, current);
+                (Op::Del, 2)
+            }
+        } else {
+            assert_eq!(state, 2);
+            let ins_pos = get!(xpos, ypos - 1, 0, center);
+            if dp[ins_pos] + open == current {
+                (Op::Ins, 0)
+            } else {
+                assert_eq!(dp[ins_pos + 2] + ext, current);
+                (Op::Ins, 2)
+            }
+        };
+        match op {
+            Op::Del => xpos -= 1,
+            Op::Ins => ypos -= 1,
+            Op::Mat => {
+                xpos -= 1;
+                ypos -= 1;
+            }
+        }
+        ops.push(op);
+        state = new_state;
+    }
+    ops.extend(std::iter::repeat(Op::Del).take(xpos));
+    ops.extend(std::iter::repeat(Op::Ins).take(ypos));
+    ops.reverse();
+    (*score, ops)
 }
 
 #[cfg(test)]
@@ -1794,6 +2018,100 @@ mod test {
             let dp = naive_banded_dp_post(&xs, &ys, radius, &centers);
             let dist = dp[(0, radius as isize)];
             assert_eq!(dist, exact_dist, "{:?}", dp.get_row(0 as isize));
+        }
+    }
+    #[test]
+    fn global_affine_check() {
+        let xs = b"AAAA";
+        let ys = b"AAAA";
+        let (score, ops) = global(xs, ys, 1, -1, -3, -1);
+        assert_eq!(score, 4);
+        assert_eq!(ops, vec![Op::Mat; 4]);
+        let (score, ops) = global(b"", b"", 1, -1, -3, -1);
+        assert_eq!(score, 0);
+        assert_eq!(ops, vec![]);
+        let xs = b"ACGT";
+        let ys = b"ACCT";
+        let (score, ops) = global(xs, ys, 1, -1, -3, -1);
+        assert_eq!(score, 2);
+        assert_eq!(ops, vec![Op::Mat; 4]);
+        let xs = b"ACTGT";
+        let ys = b"ACGT";
+        let (score, ops) = global(xs, ys, 1, -1, -3, -1);
+        assert_eq!(score, 1);
+        assert_eq!(ops, vec![Op::Mat, Op::Mat, Op::Del, Op::Mat, Op::Mat,]);
+        let xs = b"ACGT";
+        let ys = b"ACTGT";
+        let (score, ops) = global(xs, ys, 1, -1, -3, -1);
+        assert_eq!(score, 1);
+        assert_eq!(ops, vec![Op::Mat, Op::Mat, Op::Ins, Op::Mat, Op::Mat,]);
+        let xs = b"ACTTTGT";
+        let ys = b"ACGT";
+        let (score, ops) = global(xs, ys, 1, -1, -3, -1);
+        assert_eq!(score, -1);
+        assert_eq!(
+            ops,
+            vec![
+                Op::Mat,
+                Op::Mat,
+                Op::Del,
+                Op::Del,
+                Op::Del,
+                Op::Mat,
+                Op::Mat,
+            ]
+        );
+    }
+    #[test]
+    fn global_affine_banded_check() {
+        let xs = b"AAAA";
+        let ys = b"AAAA";
+        let (score, ops) = global_banded(xs, ys, 1, -1, -3, -1, 2);
+        assert_eq!(score, 4);
+        assert_eq!(ops, vec![Op::Mat; 4]);
+        let (score, ops) = global_banded(b"", b"", 1, -1, -3, -1, 1);
+        assert_eq!(score, 0);
+        assert_eq!(ops, vec![]);
+        let xs = b"ACGT";
+        let ys = b"ACCT";
+        let (score, ops) = global_banded(xs, ys, 1, -1, -3, -1, 2);
+        assert_eq!(score, 2);
+        assert_eq!(ops, vec![Op::Mat; 4]);
+        let xs = b"ACTGT";
+        let ys = b"ACGT";
+        let (score, ops) = global_banded(xs, ys, 1, -1, -3, -1, 2);
+        assert_eq!(score, 1);
+        assert_eq!(ops, vec![Op::Mat, Op::Mat, Op::Del, Op::Mat, Op::Mat,]);
+        let xs = b"ACGT";
+        let ys = b"ACTGT";
+        let (score, ops) = global_banded(xs, ys, 1, -1, -3, -1, 2);
+        assert_eq!(score, 1);
+        assert_eq!(ops, vec![Op::Mat, Op::Mat, Op::Ins, Op::Mat, Op::Mat,]);
+        let xs = b"ACTTTGT";
+        let ys = b"ACGT";
+        let (score, ops) = global_banded(xs, ys, 1, -1, -3, -1, 3);
+        assert_eq!(score, -1);
+        assert_eq!(
+            ops,
+            vec![
+                Op::Mat,
+                Op::Mat,
+                Op::Del,
+                Op::Del,
+                Op::Del,
+                Op::Mat,
+                Op::Mat,
+            ]
+        );
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+        let prof = crate::gen_seq::PROFILE;
+        for _ in 0..10 {
+            let xs = crate::gen_seq::generate_seq(&mut rng, 1000);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+            let (score, ops) = global(&xs, &ys, 1, -1, -3, -1);
+            let (score_b, ops_b) = global_banded(&xs, &ys, 1, -1, -3, -1, 200);
+            assert_eq!(score, score_b);
+            assert_eq!(ops, ops_b);
         }
     }
 }

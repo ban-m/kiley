@@ -1,79 +1,96 @@
-use kiley::gphmm::*;
-use std::io::{BufRead, BufReader};
-fn main() -> std::io::Result<()> {
-    env_logger::init();
-    let args: Vec<_> = std::env::args().collect();
-    let seqs: Vec<_> = std::fs::File::open(&args[1])
-        .map(BufReader::new)?
-        .lines()
-        .filter_map(|line| line.ok())
-        .map(|l| l.split('\t').nth(1).unwrap().to_string())
-        .collect();
-    let template = seqs[0].as_bytes();
-    let hmm = GPHMM::clr();
-    profile_multi_deletion_banded_check(&hmm, template, seqs[1].as_bytes(), 50);
-    Ok(())
-}
-
-fn profile_multi_deletion_banded_check<T: HMMType>(
-    model: &GPHMM<T>,
-    xs: &[u8],
-    ys: &[u8],
-    radius: isize,
-) {
-    use banded::ProfileBanded;
-    use kiley::padseq::PadSeq;
-    // let xs: Vec<_> = xs.iter().rev().copied().take(350).collect();
-    // let ys: Vec<_> = ys.iter().rev().copied().take(350).collect();
-    let xs: Vec<_> = xs.iter().copied().take(350).collect();
-    let ys: Vec<_> = ys.iter().copied().take(350).collect();
-
-    // let (_, ops, _) = model.align(&xs, &ys);
-    // let (xa, oa, ya) = kiley::hmm::recover(&xs, &ys, &ops);
-    // for ((xa, oa), ya) in xa.chunks(200).zip(oa.chunks(200)).zip(ya.chunks(200)) {
-    //     println!("{}", String::from_utf8_lossy(xa));
-    //     println!("{}", String::from_utf8_lossy(oa));
-    //     println!("{}", String::from_utf8_lossy(ya));
-    // }
-    let orig_xs: Vec<_> = xs.to_vec();
-    let (xs, ys) = (PadSeq::new(xs), PadSeq::new(ys));
-    let profile = ProfileBanded::new(model, &xs, &ys, radius).unwrap();
-    let len = 6;
-    let difftable = profile.to_deletion_table(len);
-    // let n_profile = Profile::new(&model, &xs, &ys);
-    // let n_difftable = n_profile.to_deletion_table(len);
-    // for (i, (p, q)) in n_difftable.iter().zip(difftable.iter()).enumerate() {
-    //     assert!((p - q).abs() < 1f64, "{},{},{}", i, p, q);
-    // }
-    for (pos, diffs) in difftable.chunks(len - 1).enumerate() {
-        let mut xs: Vec<_> = orig_xs.clone();
-        xs.remove(pos);
-        for (i, lkd) in diffs.iter().enumerate() {
-            xs.remove(pos);
-            let xs = PadSeq::new(xs.as_slice());
-            let lk = model
-                .likelihood_banded_inner(&xs, &ys, radius as usize)
-                .unwrap();
-            assert!((lk - lkd).abs() < 10f64, "{},{},{},{}", lk, lkd, pos, i);
-        }
-    }
-    let copytable = profile.to_copy_table(len);
-    for (pos, copies) in copytable.chunks(len).enumerate() {
-        for (i, lkd) in copies.iter().enumerate() {
-            let xs: Vec<_> = orig_xs
-                .iter()
-                .take(pos + i)
-                .chain(orig_xs.iter().skip(pos))
-                .copied()
-                .collect();
-            let xs = PadSeq::new(xs.as_slice());
-            let lk = model
-                .likelihood_banded_inner(&xs, &ys, radius as usize)
-                .unwrap();
-            assert!((lk - lkd).abs() < 10f64, "{},{},{},{}", lk, lkd, pos, i);
-        }
+fn main() {
+    use rand::SeedableRng;
+    use rand_xoshiro::Xoshiro256StarStar;
+    for seed in 0..4 {
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
+        let xs = kiley::gen_seq::generate_seq(&mut rng, 200);
+        let prof = kiley::gen_seq::PROFILE;
+        let ys = kiley::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+        let (score, ops) = kiley::bialignment::global(&xs, &ys, 1, -2, -4, -1);
+        let (xa, oa, ya) = kiley::bialignment::recover(&xs, &ys, &ops);
+        println!("{}", score);
+        println!("{}", String::from_utf8_lossy(&xa));
+        println!("{}", String::from_utf8_lossy(&oa));
+        println!("{}", String::from_utf8_lossy(&ya));
     }
 }
+
+// use kiley::gphmm::*;
+// use std::io::{BufRead, BufReader};
+// fn main() -> std::io::Result<()> {
+//     env_logger::init();
+//     let args: Vec<_> = std::env::args().collect();
+//     let seqs: Vec<_> = std::fs::File::open(&args[1])
+//         .map(BufReader::new)?
+//         .lines()
+//         .filter_map(|line| line.ok())
+//         .map(|l| l.split('\t').nth(1).unwrap().to_string())
+//         .collect();
+//     let template = seqs[0].as_bytes();
+//     let hmm = GPHMM::clr();
+//     profile_multi_deletion_banded_check(&hmm, template, seqs[1].as_bytes(), 50);
+//     Ok(())
+// }
+
+// fn profile_multi_deletion_banded_check<T: HMMType>(
+//     model: &GPHMM<T>,
+//     xs: &[u8],
+//     ys: &[u8],
+//     radius: isize,
+// ) {
+//     use banded::ProfileBanded;
+//     use kiley::padseq::PadSeq;
+//     // let xs: Vec<_> = xs.iter().rev().copied().take(350).collect();
+//     // let ys: Vec<_> = ys.iter().rev().copied().take(350).collect();
+//     let xs: Vec<_> = xs.iter().copied().take(350).collect();
+//     let ys: Vec<_> = ys.iter().copied().take(350).collect();
+
+//     // let (_, ops, _) = model.align(&xs, &ys);
+//     // let (xa, oa, ya) = kiley::hmm::recover(&xs, &ys, &ops);
+//     // for ((xa, oa), ya) in xa.chunks(200).zip(oa.chunks(200)).zip(ya.chunks(200)) {
+//     //     println!("{}", String::from_utf8_lossy(xa));
+//     //     println!("{}", String::from_utf8_lossy(oa));
+//     //     println!("{}", String::from_utf8_lossy(ya));
+//     // }
+//     let orig_xs: Vec<_> = xs.to_vec();
+//     let (xs, ys) = (PadSeq::new(xs), PadSeq::new(ys));
+//     let profile = ProfileBanded::new(model, &xs, &ys, radius).unwrap();
+//     let len = 6;
+//     let difftable = profile.to_deletion_table(len);
+//     // let n_profile = Profile::new(&model, &xs, &ys);
+//     // let n_difftable = n_profile.to_deletion_table(len);
+//     // for (i, (p, q)) in n_difftable.iter().zip(difftable.iter()).enumerate() {
+//     //     assert!((p - q).abs() < 1f64, "{},{},{}", i, p, q);
+//     // }
+//     for (pos, diffs) in difftable.chunks(len - 1).enumerate() {
+//         let mut xs: Vec<_> = orig_xs.clone();
+//         xs.remove(pos);
+//         for (i, lkd) in diffs.iter().enumerate() {
+//             xs.remove(pos);
+//             let xs = PadSeq::new(xs.as_slice());
+//             let lk = model
+//                 .likelihood_banded_inner(&xs, &ys, radius as usize)
+//                 .unwrap();
+//             assert!((lk - lkd).abs() < 10f64, "{},{},{},{}", lk, lkd, pos, i);
+//         }
+//     }
+//     let copytable = profile.to_copy_table(len);
+//     for (pos, copies) in copytable.chunks(len).enumerate() {
+//         for (i, lkd) in copies.iter().enumerate() {
+//             let xs: Vec<_> = orig_xs
+//                 .iter()
+//                 .take(pos + i)
+//                 .chain(orig_xs.iter().skip(pos))
+//                 .copied()
+//                 .collect();
+//             let xs = PadSeq::new(xs.as_slice());
+//             let lk = model
+//                 .likelihood_banded_inner(&xs, &ys, radius as usize)
+//                 .unwrap();
+//             assert!((lk - lkd).abs() < 10f64, "{},{},{},{}", lk, lkd, pos, i);
+//         }
+//     }
+// }
 
 // use rand::SeedableRng;
 // fn main() {
