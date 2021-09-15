@@ -41,6 +41,7 @@ pub type PHMM = PairHiddenMarkovModel;
 // Samll value.
 const EP: f64 = -10000000000000000000000000000000f64;
 /// A dynamic programming table. It is a serialized 2-d array.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct DPTable {
     mat_dp: Vec<f64>,
@@ -675,7 +676,7 @@ impl PHMM {
             .map(|row| {
                 row.iter()
                     .enumerate()
-                    .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
+                    .max_by(|x, y| (x.1).partial_cmp(y.1).unwrap())
                     .map(|(j, _)| {
                         let mut slot = [0; 4];
                         slot[crate::padseq::LOOKUP_TABLE[ys[j - 1] as usize] as usize] += 1;
@@ -690,7 +691,7 @@ impl PHMM {
             .map(|row| {
                 row.iter()
                     .enumerate()
-                    .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
+                    .max_by(|x, y| (x.1).partial_cmp(y.1).unwrap())
                     .map(|(j, _)| {
                         let mut slot = [0u8; 4];
                         slot[crate::padseq::LOOKUP_TABLE[ys[j - 1] as usize] as usize] += 1;
@@ -719,7 +720,7 @@ impl PHMM {
         summary: &LikelihoodSummary,
     ) -> (Vec<u8>, LikelihoodSummary) {
         assert!(!queries.is_empty());
-        let new_template = summary.correct(&template);
+        let new_template = summary.correct(template);
         let summary: Option<LikelihoodSummary> = queries
             .iter()
             .map(|x| self.get_profile(&new_template, x.borrow()))
@@ -742,7 +743,7 @@ impl PHMM {
     ) -> (Vec<u8>, LikelihoodSummary) {
         let lks: Option<LikelihoodSummary> = queries
             .iter()
-            .map(|x| self.get_profile(&template, x.borrow()))
+            .map(|x| self.get_profile(template, x.borrow()))
             .fold(None, |summary, x| match summary {
                 Some(mut summary) => {
                     summary.add(&x);
@@ -775,7 +776,7 @@ impl PHMM {
         let mut ok_sequences = 0;
         let lks: Option<LikelihoodSummary> = queries
             .iter()
-            .filter_map(|x| self.get_profile_banded(&template, x.borrow(), radius))
+            .filter_map(|x| self.get_profile_banded(template, x.borrow(), radius))
             .fold(None, |summary, x| {
                 ok_sequences += 1;
                 match summary {
@@ -799,7 +800,7 @@ impl PHMM {
         assert!(!queries.is_empty());
         let lks: Option<LikelihoodSummary> = queries
             .iter()
-            .map(|x| self.get_profile(&template, x.borrow()))
+            .map(|x| self.get_profile(template, x.borrow()))
             .fold(None, |summary, x| match summary {
                 Some(mut summary) => {
                     summary.add(&x);
@@ -820,7 +821,7 @@ impl PHMM {
         repeat_time: usize,
         radius: usize,
     ) -> (Vec<u8>, LikelihoodSummary) {
-        let mut lks = self.get_profiles_banded(&template, queries, radius);
+        let mut lks = self.get_profiles_banded(template, queries, radius);
         let mut template = template.to_vec();
         println!("{:.0}", lks.total_likelihood);
         for _ in 0..repeat_time {
@@ -843,7 +844,7 @@ impl PHMM {
         rng: &mut R,
         repeat_time: usize,
     ) -> (Vec<u8>, LikelihoodSummary) {
-        let mut lks = self.get_profiles(&template, queries);
+        let mut lks = self.get_profiles(template, queries);
         let mut template = template.to_vec();
         for _ in 0..repeat_time {
             let new_template = lks.correct_flip(rng);
@@ -981,6 +982,7 @@ impl PHMM {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct DiagonalDP {
     // Mat,Del,Ins, Mat,Del,Ins,....,
@@ -1142,7 +1144,7 @@ pub fn logsumexp(xs: &[f64]) -> f64 {
     if xs.is_empty() {
         return 0.;
     }
-    let max = xs.iter().max_by(|x, y| x.partial_cmp(&y).unwrap()).unwrap();
+    let max = xs.iter().max_by(|x, y| x.partial_cmp(y).unwrap()).unwrap();
     let sum = xs.iter().map(|x| (x - max).exp()).sum::<f64>().ln();
     assert!(sum >= 0., "{:?}->{}", xs, sum);
     max + sum

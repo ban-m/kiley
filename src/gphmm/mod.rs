@@ -350,11 +350,7 @@ impl GPHMM<FullHiddenMarkovModel> {
                 }
             }
         }
-        let transition_matrix: Vec<_> = transition_matrix
-            .iter()
-            .flat_map(std::convert::identity)
-            .copied()
-            .collect();
+        let transition_matrix: Vec<_> = transition_matrix.iter().flatten().copied().collect();
         Self {
             states,
             transition_matrix,
@@ -476,11 +472,7 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
                 }
             }
         }
-        let transition_matrix: Vec<_> = transition_matrix
-            .iter()
-            .flat_map(std::convert::identity)
-            .copied()
-            .collect();
+        let transition_matrix: Vec<_> = transition_matrix.iter().flatten().copied().collect();
         Self {
             states,
             transition_matrix,
@@ -1074,7 +1066,7 @@ impl<M: HMMType> GPHMM<M> {
     ) -> Option<(PadSeq, usize)> {
         let profiles: Vec<_> = queries
             .iter()
-            .map(|q| Profile::new(self, &template, q))
+            .map(|q| Profile::new(self, template, q))
             .collect();
         let total_lk = profiles.iter().map(|prof| prof.lk()).sum::<f64>();
         (0..template.len())
@@ -1379,7 +1371,7 @@ impl<'a, 'b, 'c, T: HMMType> Profile<'a, 'b, 'c, T> {
         // Normalizing.
         // These are log-probability.
         probs.chunks_mut(states).for_each(|sums| {
-            let sum = logsumexp(&sums);
+            let sum = logsumexp(sums);
             // This is normal value.
             sums.iter_mut().for_each(|x| *x = (*x - sum).exp());
             assert!((1f64 - sums.iter().sum::<f64>()) < 0.001);

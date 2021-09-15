@@ -3,6 +3,10 @@
 //! they do not track the most promissing DPcell or employ some other heuristics.
 //! The rationale is that the `_banded` algorithm should be a banded version of "global" algorithm, consuming the
 //! entire sequences of the reference and the query.
+/// Default maximum deletion length to consider to polish a draft sequence.
+pub const DEL_SIZE: usize = 4;
+/// Default maximum copy length to consider to polish a draft sequence.
+pub const REP_SIZE: usize = 4;
 use super::*;
 impl GPHMM<ConditionalHiddenMarkovModel> {
     pub fn polish_banded_batch<T: std::borrow::Borrow<[u8]>>(
@@ -29,59 +33,133 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
         let radius = radius as isize;
         let profiles: Vec<_> = queries
             .iter()
-            .filter_map(|q| ProfileBanded::new(self, &template, q, radius))
+            .filter_map(|q| ProfileBanded::new(self, template, q, radius))
             .collect();
         if profiles.is_empty() {
             return None;
         }
         let total_lk = profiles.iter().map(|prof| prof.lk()).sum::<f64>();
+        // debug!("LK\t{}\t{}", total_lk, queries.len());
         let diff = 0.001;
         fn merge(mut xs: Vec<f64>, ys: Vec<f64>) -> Vec<f64> {
             xs.iter_mut().zip(ys).for_each(|(x, y)| *x += y);
             xs
         }
-        let profile_with_diff = profiles
-            .iter()
-            .map(|prf| prf.to_modification_table())
-            .reduce(merge)
-            .unwrap();
-        let mut improved = template.clone();
-        let mut offset = 0;
-        let mut profile_with_diff = profile_with_diff.chunks_exact(9).enumerate();
-        let mut changed_positions = vec![];
-        while let Some((pos, with_diff)) = profile_with_diff.next() {
-            // diff = [A,C,G,T,A,C,G,T,-], first four element is for mutation,
-            // second four element is for insertion.
-            let (op, &lk) = with_diff
+        // Single base edits.
+        {
+            let profile_with_diff = profiles
                 .iter()
-                .enumerate()
-                .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
+                .map(|prf| prf.to_modification_table())
+                .reduce(merge)
                 .unwrap();
-            if total_lk + diff < lk {
-                let pos = pos as isize + offset;
-                changed_positions.push(pos);
-                let (op, base) = (op / 4, (op % 4) as u8);
-                let op = [Op::Match, Op::Ins, Op::Del][op];
-                match op {
-                    Op::Match => improved[pos as isize] = base,
-                    Op::Del => {
-                        offset -= 1;
-                        improved.remove(pos as isize);
+            let mut improved = template.clone();
+            let mut offset = 0;
+            let mut profile_with_diff = profile_with_diff.chunks_exact(9).enumerate();
+            let mut changed_positions = vec![];
+            while let Some((pos, with_diff)) = profile_with_diff.next() {
+                // diff = [A,C,G,T,A,C,G,T,-], first four element is for mutation,
+                // second four element is for insertion.
+                let (op, &lk) = with_diff
+                    .iter()
+                    .enumerate()
+                    .max_by(|x, y| (x.1).partial_cmp(y.1).unwrap())
+                    .unwrap();
+                if total_lk + diff < lk {
+                    let pos = pos as isize + offset;
+                    changed_positions.push(pos);
+                    let (op, base) = (op / 4, (op % 4) as u8);
+                    let op = [Op::Match, Op::Ins, Op::Del][op];
+                    match op {
+                        Op::Match => improved[pos as isize] = base,
+                        Op::Del => {
+                            offset -= 1;
+                            improved.remove(pos as isize);
+                        }
+                        Op::Ins => {
+                            offset += 1;
+                            improved.insert(pos as isize, base);
+                        }
                     }
-                    Op::Ins => {
-                        offset += 1;
-                        improved.insert(pos as isize, base);
-                    }
-                }
-                for _ in 0..skip_size {
-                    profile_with_diff.next();
+                    profile_with_diff.nth(skip_size);
                 }
             }
+            if !changed_positions.is_empty() {
+                return Some(improved);
+            }
         }
-        // if !changed_positions.is_empty() {
-        //     debug!("{:?}", changed_positions);
-        // }
-        (!changed_positions.is_empty()).then(|| improved)
+        // multiple-base copy-edits.
+        {
+            let mut improved: Vec<u8> = vec![];
+            let profile_with_rep = profiles
+                .iter()
+                .map(|prf| prf.to_copy_table(REP_SIZE))
+                .reduce(merge)
+                .unwrap();
+            let mut changed_positions = vec![];
+            let mut inactive = 0;
+            for (i, &base) in template.iter().enumerate() {
+                if 0 < inactive {
+                    inactive -= 1;
+                } else {
+                    let suggested = profile_with_rep
+                        .iter()
+                        .skip(i * REP_SIZE)
+                        .take(REP_SIZE)
+                        .enumerate()
+                        .filter(|(_, &lk)| total_lk + diff < lk)
+                        .max_by(|x, y| (x.1).partial_cmp(y.1).unwrap())
+                        .map(|(len, _)| len + 1);
+                    if let Some(len) = suggested {
+                        changed_positions.push((i, len));
+                        inactive = len + skip_size;
+                        improved.extend(template.get_range(i as isize, (i + len) as isize));
+                    }
+                }
+                improved.push(base);
+            }
+            if !changed_positions.is_empty() {
+                return Some(PadSeq::from_raw_parts(improved));
+            }
+        }
+        // Multiple-base deletion.
+        {
+            let mut improved = vec![];
+            let profile_with_del = profiles
+                .iter()
+                .map(|prf| prf.to_deletion_table(DEL_SIZE))
+                .reduce(merge)
+                .unwrap();
+            let mut changed_positions = vec![];
+            let mut inactive = 0;
+            let mut template = template.iter().enumerate();
+            while let Some((i, &base)) = template.next() {
+                if 0 < inactive {
+                    inactive -= 1;
+                } else {
+                    let suggested = profile_with_del
+                        .iter()
+                        .skip(i * (DEL_SIZE - 1))
+                        .take(DEL_SIZE - 1)
+                        .enumerate()
+                        .filter(|(_, &lk)| total_lk + diff < lk)
+                        .max_by(|x, y| (x.1).partial_cmp(y.1).unwrap())
+                        .map(|(len, _)| len + 1);
+                    // This is 1, as we already removed the i-th base if
+                    // we omit improved.push(base) below.
+                    if let Some(len) = suggested {
+                        changed_positions.push((i, len));
+                        inactive = len + skip_size;
+                        template.nth(len);
+                        continue;
+                    }
+                }
+                improved.push(base);
+            }
+            if !changed_positions.is_empty() {
+                return Some(PadSeq::from_raw_parts(improved));
+            }
+        }
+        None
     }
     pub fn fit_banded<T: std::borrow::Borrow<[u8]>>(
         &self,
@@ -549,7 +627,7 @@ impl<M: HMMType> GPHMM<M> {
         radius: usize,
     ) -> Option<PadSeq> {
         let mut template = template.clone();
-        while let Some((seq, _)) = self.correction_inner_banded(&template, &queries, radius, 0) {
+        while let Some((seq, _)) = self.correction_inner_banded(&template, queries, radius, 0) {
             template = seq;
         }
         Some(template)
@@ -564,7 +642,7 @@ impl<M: HMMType> GPHMM<M> {
         let radius = radius as isize;
         let profiles: Vec<_> = queries
             .iter()
-            .filter_map(|q| ProfileBanded::new(self, &template, q, radius))
+            .filter_map(|q| ProfileBanded::new(self, template, q, radius))
             .collect();
         if profiles.is_empty() {
             return None;
@@ -590,14 +668,14 @@ impl<M: HMMType> GPHMM<M> {
                     .iter()
                     .enumerate()
                     .filter(|&(_, &lk)| total_lk + diff < lk)
-                    .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
+                    .max_by(|x, y| (x.1).partial_cmp(y.1).unwrap())
                     .map(|(op, lk)| {
                         let (op, base) = (op / 4, op % 4);
                         let op = [Op::Match, Op::Ins, Op::Del][op];
                         (pos, op, base as u8, lk)
                     })
             })
-            .max_by(|x, y| (x.3).partial_cmp(&(y.3)).unwrap())
+            .max_by(|x, y| (x.3).partial_cmp(y.3).unwrap())
             .map(|(pos, op, base, _lk)| {
                 let mut template = template.clone();
                 match op {
@@ -1147,7 +1225,7 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
         // Normalizing.
         // These are log-probability.
         probs.chunks_mut(states).for_each(|sums| {
-            let sum = logsumexp(&sums);
+            let sum = logsumexp(sums);
             // This is normal value.
             if EP < sum {
                 sums.iter_mut().for_each(|x| *x = (*x - sum).exp());

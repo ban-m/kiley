@@ -170,8 +170,8 @@ pub fn edit_dist_dp_post(xs: &[u8], ys: &[u8]) -> Vec<Vec<u32>> {
 /// end and start of the returned vector.
 pub fn edit_dist_slow_ops_semiglobal(xs: &[u8], ys: &[u8]) -> (u32, Vec<Op>) {
     let mut dp = vec![vec![0; ys.len() + 1]; xs.len() + 1];
-    for i in 0..xs.len() + 1 {
-        dp[i][0] = i as u32;
+    for (i, row) in dp.iter_mut().enumerate() {
+        row[0] = i as u32;
     }
     for (i, x) in xs.iter().enumerate() {
         for (j, y) in ys.iter().enumerate() {
@@ -420,7 +420,7 @@ pub fn polish_by_flip<T: std::borrow::Borrow<[u8]>>(
         .iter()
         .map(|query| {
             let query = query.borrow();
-            let (dist, prf) = get_modification_table_naive(&template, &query);
+            let (dist, prf) = get_modification_table_naive(template, query);
             current_edit_distance += dist;
             prf
         })
@@ -461,6 +461,7 @@ pub fn polish_by_flip<T: std::borrow::Borrow<[u8]>>(
         })
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct DPTable {
     data: Vec<u32>,
@@ -880,7 +881,7 @@ pub fn polish_until_converge_banded<T: std::borrow::Borrow<[u8]>>(
     };
     let mut skip_size = 7;
     while let Some((improved, _)) = polish_by_batch_banded(&cons, &seqs, radius, skip_size) {
-        skip_size = skip_size + 3;
+        skip_size += 3;
         cons = improved;
     }
     cons.into()
@@ -1178,7 +1179,7 @@ pub fn polish_by_batch_banded<T: std::borrow::Borrow<PadSeq>>(
     let profile_with_diff = queries
         .iter()
         .map(|query| {
-            let (dist, prf, _) = get_modification_table(&template, query.borrow(), radius);
+            let (dist, prf, _) = get_modification_table(template, query.borrow(), radius);
             current_edit_distance += dist;
             prf
         })
@@ -1242,7 +1243,7 @@ pub fn polish_by_flip_banded<T: std::borrow::Borrow<PadSeq>>(
     let profile_with_diff = queries
         .iter()
         .map(|query| {
-            let (dist, prf, _) = get_modification_table(&template, query.borrow(), radius);
+            let (dist, prf, _) = get_modification_table(template, query.borrow(), radius);
             current_edit_distance += dist;
             prf
         })

@@ -63,6 +63,9 @@ impl PadSeq {
     pub fn get_mut(&mut self, index: isize) -> Option<&mut u8> {
         self.0.get_mut((index + Self::OFFSET as isize) as usize)
     }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     pub fn len(&self) -> usize {
         self.0.len() - 2 * Self::OFFSET
     }

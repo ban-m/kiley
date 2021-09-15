@@ -43,14 +43,14 @@ fn subcommand_polish() -> App<'static, 'static> {
             Arg::with_name("radius")
                 .long("radius")
                 .takes_value(true)
-                .default_value(&"100")
+                .default_value("100")
                 .help("Band width. Increase for erroneos reads."),
         )
         .arg(
             Arg::with_name("chunk_size")
                 .long("chunk_size")
                 .takes_value(true)
-                .default_value(&"2025")
+                .default_value("2025")
                 .help("Length to polish at once. Increase for better QV."),
         )
         .arg(
@@ -64,14 +64,14 @@ fn subcommand_polish() -> App<'static, 'static> {
             Arg::with_name("max_coverage")
                 .long("max_coverage")
                 .takes_value(true)
-                .default_value(&"30")
+                .default_value("30")
                 .help("Maximum coverage for each chunk."),
         )
         .arg(
             Arg::with_name("seed")
                 .long("seed")
                 .takes_value(true)
-                .default_value(&"32389")
+                .default_value("32389")
                 .help("Seed"),
         )
         .arg(
@@ -108,21 +108,21 @@ fn subcommand_consensus() -> App<'static, 'static> {
             Arg::with_name("radius")
                 .long("radius")
                 .takes_value(true)
-                .default_value(&"100")
+                .default_value("100")
                 .help("Band width. Increase for erroneos reads."),
         )
         .arg(
             Arg::with_name("seed")
                 .long("seed")
                 .takes_value(true)
-                .default_value(&"32389")
+                .default_value("32389")
                 .help("Seed"),
         )
         .arg(
             Arg::with_name("repeat_num")
                 .long("repeat_num")
                 .takes_value(true)
-                .default_value(&"10")
+                .default_value("10")
                 .help("Repetition number."),
         )
         .arg(

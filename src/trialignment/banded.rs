@@ -112,13 +112,8 @@ impl Aligner {
                     let x_base = xs[(x_axis - 1) as usize];
                     let y_base = ys[(y_axis - 1) as usize];
                     let z_base = zs[(u_orig - 1) as usize];
-                    let score = get_next_score(
-                        &filled_dp,
-                        len,
-                        (s, t, u),
-                        &diffs,
-                        (x_base, y_base, z_base),
-                    );
+                    let score =
+                        get_next_score(filled_dp, len, (s, t, u), &diffs, (x_base, y_base, z_base));
                     filling_dp[(t * len + u) as usize] = score;
                     if score < min {
                         min = score;
@@ -188,7 +183,7 @@ impl Aligner {
             let y_base = ys[(y_axis - 1) as usize];
             let z_base = zs[(z_axis - 1) as usize];
             let (op, next_position) =
-                get_next_position(&dp, len, (s, t, u), &diffs, (x_base, y_base, z_base));
+                get_next_position(dp, len, (s, t, u), &diffs, (x_base, y_base, z_base));
             s = next_position.0;
             t = next_position.1;
             u = next_position.2;
