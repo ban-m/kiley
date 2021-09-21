@@ -736,8 +736,6 @@ fn polish_chunk<T: std::borrow::Borrow<[u8]>>(
 /// 1: Make consensus by ternaly alignments.
 /// 2: Polish consensus by ordinary pileup method
 /// 3: polish consensus by increment polishing method
-/// If the radius was too small for the dataset, return None.
-/// In such case, please increase radius(recommend doubling) and try again.
 pub fn consensus<T: std::borrow::Borrow<[u8]>>(
     seqs: &[T],
     _seed: u64,
