@@ -764,7 +764,15 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
         let (forward, forward_factor, centers) = model.forward_banded(template, query, radius)?;
         let (backward, backward_factor) = model.backward_banded(template, query, radius, &centers);
         if backward_factor.iter().any(|x| x.is_nan()) {
-            panic!("{:?}\n{}", backward_factor, model,);
+            error!(
+                "TEMPLATE\t{}",
+                String::from_utf8(template.clone().into()).unwrap()
+            );
+            error!(
+                "QUERY\t{}",
+                String::from_utf8(query.clone().into()).unwrap()
+            );
+            return None;
         }
         Some(Self {
             template,
@@ -1237,12 +1245,6 @@ impl<'a, 'b, 'c, T: HMMType> ProfileBanded<'a, 'b, 'c, T> {
         probs
     }
 }
-
-// impl<'a, 'b, 'c> ProfileBanded<'a, 'b, 'c, Full> {
-//     fn observation_probability(&self) -> Vec<f64> {
-//         unimplemented!()
-//     }
-// }
 
 impl<'a, 'b, 'c> ProfileBanded<'a, 'b, 'c, Cond> {
     pub fn observation_probability(&self) -> Vec<f64> {

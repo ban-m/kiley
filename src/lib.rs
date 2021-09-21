@@ -565,9 +565,10 @@ fn partition_query<'a>(
     let ops: Vec<_> = edlib_sys::global(draft, query)
         .into_iter()
         .map(|x| match x {
-            0 | 3 => Op::Mat,
+            0 => Op::Mat,
             1 => Op::Ins,
             2 => Op::Del,
+            3 => Op::Mism,
             _ => unreachable!(),
         })
         .collect();
@@ -577,7 +578,7 @@ fn partition_query<'a>(
     let mut target_pos = *target_poss.next().unwrap();
     for op in ops {
         match op {
-            Op::Mat => {
+            Op::Mat | Op::Mism => {
                 if i == target_pos {
                     q_split_position.push(j);
                     target_pos = match target_poss.next() {
@@ -648,14 +649,16 @@ pub fn polish_chunk_by_parts<T: std::borrow::Borrow<[u8]>>(
                 chunks[pos].1.push(seq);
             }
         }
-        // Maybe we need filter out very short chunk.
+        // Maybe we need filter out very short/long chunk.
         chunks.iter_mut().for_each(|(_, qs)| {
             let (sum, sumsq) = qs
                 .iter()
                 .map(|x| x.len())
                 .fold((0, 0), |(sum, sumsq), len| (sum + len, sumsq + len * len));
             let mean = sum as f64 / qs.len() as f64;
-            let sd = (sumsq as f64 / qs.len() as f64 - mean * mean).sqrt() + 1f64;
+            let sd = (sumsq as f64 / qs.len() as f64 - mean * mean)
+                .sqrt()
+                .max(1f64);
             // I hope some seqeunce would reserved.
             if qs.iter().any(|x| (x.len() as f64 - mean).abs() < 3f64 * sd) {
                 qs.retain(|qs| (qs.len() as f64 - mean).abs() < 3f64 * sd);
@@ -683,14 +686,20 @@ fn polish_multiple(
         })
         .unzip();
     let phmm = config.phmm.clone();
-    for (d, qs) in drafts.iter_mut().zip(queries.iter()) {
+    for (i, (d, qs)) in drafts.iter_mut().zip(queries.iter()).enumerate() {
         let mut skip = 7;
-        // debug!("Polishing chunk...");
+        let orig = d.len();
         while let Some(res) = phmm.correct_banded_batch(d, qs, config.radius, skip % d.len()) {
             skip += 1;
             *d = res;
             if d.len() * 3 < skip {
-                debug!("Reached max cycle. Something occred?");
+                warn!("Reached max cycle. Something occred?,{}", i);
+                let draft = String::from_utf8(d.clone().into()).unwrap();
+                warn!("CHUNK\tREF\t{}\t{}\t{}", draft.len(), orig, draft);
+                for q in qs.iter() {
+                    let query = String::from_utf8(q.clone().into()).unwrap();
+                    warn!("CHUNK\tQUERY\t{}\t{}", q.len(), query);
+                }
                 break;
             }
         }
@@ -799,7 +808,13 @@ pub fn ternary_consensus_by_chunk<T: std::borrow::Borrow<[u8]>>(
     let max = chunk_size * 2;
     let mut aligner = Aligner::new(max, max, max, chunk_size / 2);
     let draft = seqs[0].borrow();
-    // 1. Partition each reads into 100bp.
+    // let draft = seqs
+    //     .iter()
+    //     .map(|x| x.borrow())
+    //     .max_by_key(|x| x.len())
+    //     .unwrap();
+    // 1. Partition each reads into `chunk-size`bp.
+    // Calculate the range of each window.
     let chunk_start_position: Vec<_> = (0..)
         .map(|i| i * chunk_size)
         .take_while(|l| l + chunk_size <= draft.len())
@@ -1010,7 +1025,7 @@ pub fn polish_by_pileup_affine<T: std::borrow::Borrow<[u8]>>(
         let mut ins_buffer = vec![];
         for &op in ops.iter() {
             match op {
-                bialignment::Op::Mat => {
+                bialignment::Op::Mat | bialignment::Op::Mism => {
                     matches[i][padseq::convert_to_twobit(&x[j]) as usize] += 1;
                     i += 1;
                     j += 1;
@@ -1033,15 +1048,15 @@ pub fn polish_by_pileup_affine<T: std::borrow::Borrow<[u8]>>(
             insertions[i].push(ins_buffer);
         }
     }
-    println!("DUMP");
-    for (idx, ((m, d), i)) in matches
-        .iter()
-        .zip(deletions.iter())
-        .zip(insertions.iter())
-        .enumerate()
-    {
-        println!("{}\t{:?}\t{}\t{:?}", idx, i, d, m);
-    }
+    // println!("DUMP");
+    // for (idx, ((m, d), i)) in matches
+    //     .iter()
+    //     .zip(deletions.iter())
+    //     .zip(insertions.iter())
+    //     .enumerate()
+    // {
+    //     println!("{}\t{:?}\t{}\t{:?}", idx, i, d, m);
+    // }
     let mut template = vec![];
     for ((i, m), &d) in insertions.iter().zip(matches.iter()).zip(deletions.iter()) {
         let insertion = i.iter().len();
@@ -1052,7 +1067,7 @@ pub fn polish_by_pileup_affine<T: std::borrow::Borrow<[u8]>>(
                 counts[padseq::convert_to_twobit(&s[0]) as usize] += 1;
             }
             let (max, _) = counts.iter().enumerate().max_by_key(|x| x.1).unwrap();
-            println!("{:?}->{}", i, b"ACGT"[max] as char);
+            // println!("{:?}->{}", i, b"ACGT"[max] as char);
             template.push(b"ACGT"[max]);
         }
         if d < coverage / 2 {

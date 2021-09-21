@@ -4,6 +4,7 @@ pub enum Op {
     Del,
     Ins,
     Mat,
+    Mism,
 }
 
 impl Op {
@@ -12,7 +13,7 @@ impl Op {
         match *self {
             Op::Del => Op::Ins,
             Op::Ins => Op::Del,
-            Op::Mat => Op::Mat,
+            x => x,
         }
     }
 }
@@ -37,7 +38,14 @@ pub fn recover(xs: &[u8], ys: &[u8], ops: &[Op]) -> (Vec<u8>, Vec<u8>, Vec<u8>) 
             Op::Mat => {
                 xr.push(xs[i]);
                 yr.push(ys[j]);
-                opr.push(if xs[i] == ys[j] { b'|' } else { b'X' });
+                opr.push(b'|');
+                i += 1;
+                j += 1;
+            }
+            Op::Mism => {
+                xr.push(xs[i]);
+                yr.push(ys[j]);
+                opr.push(b'X');
                 i += 1;
                 j += 1;
             }
@@ -203,7 +211,7 @@ pub fn edit_dist_slow_ops_semiglobal(xs: &[u8], ys: &[u8]) -> (u32, Vec<Op>) {
             ops.push(Op::Del);
             i -= 1;
         } else if dist == dp[i - 1][j - 1] + mat_pen {
-            ops.push(Op::Mat);
+            ops.push(if mat_pen == 0 { Op::Mat } else { Op::Mism });
             i -= 1;
             j -= 1;
         } else {
@@ -234,7 +242,7 @@ pub fn edit_dist_slow_ops(xs: &[u8], ys: &[u8]) -> (u32, Vec<Op>) {
         } else {
             let mat_pen = (xs[i - 1] != ys[j - 1]) as u32;
             assert_eq!(dist, dp[i - 1][j - 1] + mat_pen);
-            ops.push(Op::Mat);
+            ops.push(if mat_pen == 0 { Op::Mat } else { Op::Mism });
             i -= 1;
             j -= 1;
         }
@@ -449,7 +457,7 @@ pub fn polish_by_flip<T: std::borrow::Borrow<[u8]>>(
         .map(|(pos, op, base, &dist)| {
             let mut template = template.to_vec();
             match op {
-                Op::Mat => template[pos] = base,
+                Op::Mat | Op::Mism => template[pos] = base,
                 Op::Del => {
                     template.remove(pos);
                 }
@@ -953,7 +961,7 @@ fn convert_dp_to_alignment(
             let y = ys[j_orig - 1];
             let score = dp[(i - 1, j_prev - 1)] + (x != y) as u32;
             assert_eq!(score, current_score);
-            ops.push(Op::Mat);
+            ops.push(if x == y { Op::Mat } else { Op::Mism });
             i -= 1;
             j_orig -= 1;
         }
@@ -1116,7 +1124,7 @@ fn crop_region(query: &PadSeq, aln: &[Op], start: usize, end: usize) -> Vec<u8> 
     let (mut qstart, mut qend) = (None, None);
     for op in aln.iter() {
         match op {
-            Op::Mat => {
+            Op::Mat | Op::Mism => {
                 if rpos == start {
                     assert!(qstart.is_none());
                     qstart = Some(qpos);
@@ -1208,7 +1216,7 @@ pub fn polish_by_batch_banded<T: std::borrow::Borrow<PadSeq>>(
             let base = base as u8;
             is_diffed = true;
             match op {
-                Op::Mat => {
+                Op::Mat | Op::Mism => {
                     assert_ne!(base, improved[pos]);
                     improved[pos] = base;
                 }
@@ -1272,7 +1280,7 @@ pub fn polish_by_flip_banded<T: std::borrow::Borrow<PadSeq>>(
         .map(|(pos, op, base, &dist)| {
             let mut template = template.clone();
             match op {
-                Op::Mat => template[pos as isize] = base,
+                Op::Mism | Op::Mat => template[pos as isize] = base,
                 Op::Del => {
                     template.remove(pos as isize);
                 }
@@ -1322,7 +1330,7 @@ pub fn edit_dist_banded(xs: &[u8], ys: &[u8], radius: usize) -> Option<(u32, Vec
         if dist == mat {
             k -= 2;
             u -= 1;
-            ops.push(Op::Mat);
+            ops.push(if mat_pen == 0 { Op::Mat } else { Op::Mism });
         } else if dist == del {
             k -= 1;
             u -= 1;
@@ -1393,13 +1401,14 @@ pub fn global(xs: &[u8], ys: &[u8], mat: i32, mism: i32, open: i32, ext: i32) ->
             let mat = dp[0][xpos - 1][ypos - 1] + mat_score;
             let del = dp[1][xpos - 1][ypos - 1] + mat_score;
             let ins = dp[2][xpos - 1][ypos - 1] + mat_score;
+            let mat_op = if x == y { Op::Mat } else { Op::Mism };
             if current == mat {
-                (Op::Mat, 0)
+                (mat_op, 0)
             } else if current == del {
-                (Op::Mat, 1)
+                (mat_op, 1)
             } else {
                 assert_eq!(current, ins);
-                (Op::Mat, 2)
+                (mat_op, 2)
             }
         } else if state == 1 {
             if current == dp[0][xpos - 1][ypos] + open {
@@ -1422,7 +1431,7 @@ pub fn global(xs: &[u8], ys: &[u8], mat: i32, mism: i32, open: i32, ext: i32) ->
         match op {
             Op::Del => xpos -= 1,
             Op::Ins => ypos -= 1,
-            Op::Mat => {
+            Op::Mism | Op::Mat => {
                 xpos -= 1;
                 ypos -= 1;
             }
@@ -1529,13 +1538,14 @@ pub fn global_banded(
         let mat_score = if x == y { mat } else { mism };
         let (op, new_state) = if state == 0 {
             let mat_pos = get!(xpos - 1, ypos - 1, 0, prev_center);
+            let mat_op = if x == y { Op::Mat } else { Op::Mism };
             if dp[mat_pos] + mat_score == current {
-                (Op::Mat, 0)
+                (mat_op, 0)
             } else if dp[mat_pos + 1] + mat_score == current {
-                (Op::Mat, 1)
+                (mat_op, 1)
             } else {
                 assert_eq!(dp[mat_pos + 2] + mat_score, current);
-                (Op::Mat, 2)
+                (mat_op, 2)
             }
         } else if state == 1 {
             let del_pos = get!(xpos - 1, ypos, 0, prev_center);
@@ -1560,7 +1570,7 @@ pub fn global_banded(
         match op {
             Op::Del => xpos -= 1,
             Op::Ins => ypos -= 1,
-            Op::Mat => {
+            Op::Mism | Op::Mat => {
                 xpos -= 1;
                 ypos -= 1;
             }
@@ -1609,7 +1619,7 @@ mod test {
         let (dist, ops) = edit_dist_slow_ops(ys, xs);
         assert_eq!(dist, 2);
         use Op::*;
-        let answer = vec![Mat, Mat, Mat, Ins, Mat, Mat];
+        let answer = vec![Mat, Mism, Mat, Ins, Mat, Mat];
         assert_eq!(ops, answer);
     }
     #[test]
@@ -2035,7 +2045,7 @@ mod test {
         let ys = b"ACCT";
         let (score, ops) = global(xs, ys, 1, -1, -3, -1);
         assert_eq!(score, 2);
-        assert_eq!(ops, vec![Op::Mat; 4]);
+        assert_eq!(ops, vec![Op::Mat, Op::Mat, Op::Mism, Op::Mat]);
         let xs = b"ACTGT";
         let ys = b"ACGT";
         let (score, ops) = global(xs, ys, 1, -1, -3, -1);
@@ -2077,7 +2087,7 @@ mod test {
         let ys = b"ACCT";
         let (score, ops) = global_banded(xs, ys, 1, -1, -3, -1, 2);
         assert_eq!(score, 2);
-        assert_eq!(ops, vec![Op::Mat; 4]);
+        assert_eq!(ops, vec![Op::Mat, Op::Mat, Op::Mism, Op::Mat,]);
         let xs = b"ACTGT";
         let ys = b"ACGT";
         let (score, ops) = global_banded(xs, ys, 1, -1, -3, -1, 2);
