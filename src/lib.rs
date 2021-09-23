@@ -665,9 +665,9 @@ pub fn polish_chunk_by_parts<T: std::borrow::Borrow<[u8]>>(
             }
         });
         // 2. Polish each segments.
-        let (polished_segs, fit_model) = polish_multiple(&chunks, &config);
+        let (polished_segs, _) = polish_multiple(&chunks, &config);
         draft = polished_segs.into_iter().flatten().collect();
-        config.phmm = fit_model;
+        // config.phmm = fit_model;
     }
     draft
 }
@@ -685,11 +685,13 @@ fn polish_multiple(
             (x, ys)
         })
         .unzip();
-    let phmm = config.phmm.clone();
     for (i, (d, qs)) in drafts.iter_mut().zip(queries.iter()).enumerate() {
         let mut skip = 7;
         let orig = d.len();
-        while let Some(res) = phmm.correct_banded_batch(d, qs, config.radius, skip % d.len()) {
+        while let Some(res) = config
+            .phmm
+            .correct_banded_batch(d, qs, config.radius, skip % d.len())
+        {
             skip += 1;
             *d = res;
             if d.len() * 3 < skip {
