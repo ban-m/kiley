@@ -665,17 +665,14 @@ pub fn polish_chunk_by_parts<T: std::borrow::Borrow<[u8]>>(
             }
         });
         // 2. Polish each segments.
-        let (polished_segs, _) = polish_multiple(&chunks, &config);
+        let polished_segs = polish_multiple(&chunks, &config);
         draft = polished_segs.into_iter().flatten().collect();
         // config.phmm = fit_model;
     }
     draft
 }
 
-fn polish_multiple(
-    chunks: &[(&[u8], Vec<&[u8]>)],
-    config: &PolishConfig<Cond>,
-) -> (Vec<Vec<u8>>, GPHMM<Cond>) {
+fn polish_multiple(chunks: &[(&[u8], Vec<&[u8]>)], config: &PolishConfig<Cond>) -> Vec<Vec<u8>> {
     use padseq::PadSeq;
     let (mut drafts, queries): (Vec<_>, Vec<_>) = chunks
         .iter()
@@ -706,7 +703,7 @@ fn polish_multiple(
             }
         }
     }
-    (drafts.into_iter().map(|x| x.into()).collect(), phmm)
+    drafts.into_iter().map(|x| x.into()).collect()
 }
 
 // Polish chunk.
