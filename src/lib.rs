@@ -608,15 +608,13 @@ fn partition_query<'a>(
         .enumerate()
         .map(|(bin, w)| (bin, &query[w[0]..w[1]]))
         .collect();
-    // let ref_last = *split_positions.last().unwrap();
     let query_last = *q_split_position.last().unwrap();
-    // if (draft.len() - ref_last) * 3 / 4 < query.len() - query_last {
     split.push((split_positions.len() - 1, &query[query_last..]));
-    // }
     split
 }
 
 /// Polish draft sequence by queries.
+/// TODO:Maybe re use the alignment, rather than re-compute?
 pub fn polish_chunk_by_parts<T: std::borrow::Borrow<[u8]>>(
     draft: &[u8],
     queries: &[T],
@@ -667,7 +665,6 @@ pub fn polish_chunk_by_parts<T: std::borrow::Borrow<[u8]>>(
         // 2. Polish each segments.
         let polished_segs = polish_multiple(&chunks, &config);
         draft = polished_segs.into_iter().flatten().collect();
-        // config.phmm = fit_model;
     }
     draft
 }
@@ -692,13 +689,13 @@ fn polish_multiple(chunks: &[(&[u8], Vec<&[u8]>)], config: &PolishConfig<Cond>) 
             skip += 1;
             *d = res;
             if d.len() * 3 < skip {
-                warn!("Reached max cycle. Something occred?,{}", i);
+                warn!("CHUNK\tReached max cycle\t{}\t{}", i, config.seed);
                 let draft = String::from_utf8(d.clone().into()).unwrap();
                 warn!("CHUNK\tREF\t{}\t{}\t{}", draft.len(), orig, draft);
-                for q in qs.iter() {
-                    let query = String::from_utf8(q.clone().into()).unwrap();
-                    warn!("CHUNK\tQUERY\t{}\t{}", q.len(), query);
-                }
+                // for q in qs.iter() {
+                //     let query = String::from_utf8(q.clone().into()).unwrap();
+                //     warn!("CHUNK\tQUERY\t{}\t{}", q.len(), query);
+                // }
                 break;
             }
         }
