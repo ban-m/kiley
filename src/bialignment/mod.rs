@@ -887,10 +887,23 @@ pub fn polish_until_converge_banded<T: std::borrow::Borrow<[u8]>>(
         Some(res) => res,
         None => return template.to_vec(),
     };
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
     let mut skip_size = 7;
+    let mut loop_count = 0;
+    let mut hash_values_sofar = vec![];
     while let Some((improved, _)) = polish_by_batch_banded(&cons, &seqs, radius, skip_size) {
-        skip_size += 3;
-        cons = improved;
+        let mut hasher = DefaultHasher::new();
+        improved.as_ref().hash(&mut hasher);
+        let hv = hasher.finish();
+        if hash_values_sofar.contains(&hv) || 1_000 < loop_count {
+            break;
+        } else {
+            skip_size += 3;
+            loop_count += 1;
+            cons = improved;
+            hash_values_sofar.push(hv);
+        }
     }
     cons.into()
 }
