@@ -502,8 +502,58 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
             &[1f64],
         )
     }
-    // /// CLR profile.
+    /// CLR profile.
     pub fn clr() -> Self {
+        let states = 3;
+        let transition_matrix = [
+            vec![0.86, 0.07, 0.07],
+            vec![0.78, 0.15, 0.07],
+            vec![0.78, 0.07, 0.15],
+        ];
+        let (mat, mism) = (0.97, 0.01);
+        let match_emit = [
+            mat, mism, mism, mism, mism, mat, mism, mism, mism, mism, mat, mism, mism, mism, mism,
+            mat,
+        ];
+        let match_prob = vec![match_emit, [0f64; 16], [0f64; 16]];
+        let ins_prob = vec![[0f64; 4], [0f64; 4], [4f64.recip(); 4]];
+        let del_prob = vec![[0f64; 4], [1f64; 4], [0f64; 4]];
+        let init = [1f64, 0f64, 0f64];
+        Self::new(
+            states,
+            &transition_matrix,
+            &match_prob,
+            &del_prob,
+            &ins_prob,
+            &init,
+        )
+    }
+    pub fn ccs() -> Self {
+        let states = 3;
+        let transition_matrix = [
+            vec![0.9, 0.05, 0.05],
+            vec![0.78, 0.15, 0.07],
+            vec![0.78, 0.07, 0.15],
+        ];
+        let (mat, mism) = (0.97, 0.01);
+        let match_emit = [
+            mat, mism, mism, mism, mism, mat, mism, mism, mism, mism, mat, mism, mism, mism, mism,
+            mat,
+        ];
+        let match_prob = vec![match_emit, [0f64; 16], [0f64; 16]];
+        let ins_prob = vec![[0f64; 4], [0f64; 4], [4f64.recip(); 4]];
+        let del_prob = vec![[0f64; 4], [1f64; 4], [0f64; 4]];
+        let init = [1f64, 0f64, 0f64];
+        Self::new(
+            states,
+            &transition_matrix,
+            &match_prob,
+            &del_prob,
+            &ins_prob,
+            &init,
+        )
+    }
+    pub fn ont() -> Self {
         let states = 3;
         let transition_matrix = [
             vec![0.86, 0.07, 0.07],
