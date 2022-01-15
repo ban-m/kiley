@@ -532,8 +532,8 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
         let states = 3;
         let transition_matrix = [
             vec![0.98, 0.01, 0.01],
-            vec![0.05, 0.75, 0.20],
-            vec![0.75, 0.20, 0.05],
+            vec![0.2, 0.75, 0.05],
+            vec![0.2, 0.05, 0.75],
         ];
         let (mat, mism) = (0.97, 0.01);
         let match_emit = [
@@ -557,8 +557,8 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
         let states = 3;
         let transition_matrix = [
             vec![0.96, 0.02, 0.02],
-            vec![0.1, 0.8, 0.1],
-            vec![0.1, 0.1, 0.8],
+            vec![0.8, 0.1, 0.1],
+            vec![0.8, 0.1, 0.1],
         ];
         let (mat, mism) = (0.97, 0.01);
         let match_emit = [
