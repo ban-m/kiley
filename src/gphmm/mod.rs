@@ -446,9 +446,8 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
     /// 5: The sum of ins_prob[x] should be 1 (summing over x).
     /// Each 16-length array of match probabilities is:
     /// [(A|A), (C|A), (G|A), (T|A), (C,A), ... ,(T|T)]
-    /// and Each array of del_prob is [(-|A), ...,(-|T)],
+    /// and each array of del_prob is [(-|A), ...,(-|T)],
     /// and each array of ins_prob is [(A|-), ... ,(T|-)]
-    // TODO:Sanity check.
     pub fn new(
         states: usize,
         transition_matrix: &[Vec<f64>],
@@ -568,6 +567,42 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
         let match_prob = vec![match_emit, [0f64; 16], [0f64; 16]];
         let ins_prob = vec![[0f64; 4], [0f64; 4], [4f64.recip(); 4]];
         let del_prob = vec![[0f64; 4], [1f64; 4], [0f64; 4]];
+        let init = [1f64, 0f64, 0f64];
+        Self::new(
+            states,
+            &transition_matrix,
+            &match_prob,
+            &del_prob,
+            &ins_prob,
+            &init,
+        )
+    }
+    /// Return a three states pair-HMM for computing conditional likelihood,LK(y|x).
+    /// This function returns an asynmetric pHMM, in other words, the probability of
+    /// insertion is not the same as that of deletion.
+    pub fn new_indel_phmm(
+        del_open: f64,
+        del_ext: f64,
+        ins_open: f64,
+        ins_ext: f64,
+        match_emit: f64,
+    ) -> Self {
+        assert!(del_open + ins_open < 1f64);
+        let states = 3;
+        let match_prob = 1f64 - del_open - ins_open;
+        let transition_matrix = [
+            vec![match_prob, del_open, ins_open],
+            vec![1f64 - del_ext - ins_open, del_ext, ins_open],
+            vec![1f64 - ins_ext - del_open, del_open, ins_ext],
+        ];
+        let (mat, mism) = (match_emit, (1f64 - match_emit) / 3f64);
+        let match_emit = [
+            mat, mism, mism, mism, mism, mat, mism, mism, mism, mism, mat, mism, mism, mism, mism,
+            mat,
+        ];
+        let match_prob = vec![match_emit, [0f64; 16], [0f64; 16]];
+        let del_prob = vec![[0f64; 4], [1f64; 4], [0f64; 4]];
+        let ins_prob = vec![[0f64; 4], [0f64; 4], [4f64.recip(); 4]];
         let init = [1f64, 0f64, 0f64];
         Self::new(
             states,
