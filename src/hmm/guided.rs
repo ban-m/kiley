@@ -49,6 +49,19 @@ fn same(x: f64, y: f64) -> bool {
 }
 
 impl PairHiddenMarkovModel {
+    fn zeros() -> Self {
+        Self {
+            mat_mat: 0f64,
+            mat_ins: 0f64,
+            mat_del: 0f64,
+            ins_mat: 0f64,
+            ins_ins: 0f64,
+            ins_del: 0f64,
+            del_mat: 0f64,
+            del_del: 0f64,
+            mat_emit: [0f64; 16],
+        }
+    }
     // Log
     fn obs(&self, r: u8, q: u8) -> f64 {
         self.mat_emit[((r << 2) | q) as usize]
@@ -297,6 +310,112 @@ impl PairHiddenMarkovModel {
             }
         }
     }
+    fn fill_mod_table(&self, memory: &mut Memory, rs: &[u8], qs: &[u8]) {
+        assert_eq!(memory.fill_ranges.len(), qs.len() + 1);
+        let total_len = NUM_ROW * (rs.len() + 1);
+        memory.mod_table.truncate(total_len);
+        memory.mod_table.iter_mut().for_each(|x| *x = MIN_LK);
+        if memory.mod_table.len() < total_len {
+            let len = total_len - memory.mod_table.len();
+            memory.mod_table.extend(std::iter::repeat(MIN_LK).take(len));
+        }
+        let mut slots = vec![0f64; 8 + COPY_SIZE + DEL_SIZE];
+        for (i, &(start, end)) in memory.fill_ranges.iter().enumerate().take(qs.len()) {
+            let q = qs[i];
+            for j in start..end {
+                let row_start = NUM_ROW * j;
+                // Change the j-th base into...
+                let mutates = b"ACGT".iter().map(|&b| {
+                    let mat_mat = self.mat_mat + self.obs(b, q) + memory.post_mat.get(i + 1, j + 1);
+                    let mat_del = self.mat_del + self.del(b) + memory.post_del.get(i, j + 1);
+                    let mat = memory.pre_mat.get(i, j) + logsumexp2(mat_mat, mat_del);
+                    let del_mat = self.del_mat + self.obs(b, q) + memory.post_mat.get(i + 1, j + 1);
+                    let del_del = self.del_del + self.del(b) + memory.post_del.get(i, j + 1);
+                    let del = memory.pre_del.get(i, j) + logsumexp2(del_mat, del_del);
+                    let ins_mat = self.ins_mat + self.obs(b, q) + memory.post_mat.get(i + 1, j + 1);
+                    let ins_del = self.ins_del + self.del(b) + memory.post_del.get(i, j + 1);
+                    let ins = memory.pre_ins.get(i, j) + logsumexp2(ins_mat, ins_del);
+                    logsumexp3(mat, del, ins)
+                });
+                // Insert before the j-th base ...
+                let inserts = b"ACGT".iter().map(|&b| {
+                    let mat_mat = self.mat_mat + self.obs(b, q) + memory.post_mat.get(i + 1, j);
+                    let mat_del = self.mat_mat + self.del(b) + memory.post_del.get(i, j);
+                    let mat = memory.pre_mat.get(i, j) + logsumexp2(mat_mat, mat_del);
+                    let del_mat = self.del_mat + self.obs(b, q) + memory.post_mat.get(i + 1, j);
+                    let del_del = self.del_del + self.del(b) + memory.post_del.get(i, j);
+                    let del = memory.pre_del.get(i, j) + logsumexp2(del_mat, del_del);
+                    let ins_mat = self.ins_mat + self.obs(b, q) + memory.post_mat.get(i + 1, j);
+                    let ins_del = self.ins_del + self.del(b) + memory.post_del.get(i, j);
+                    let ins = memory.pre_ins.get(i, j) + logsumexp2(ins_mat, ins_del);
+                    logsumexp3(mat, del, ins)
+                });
+                // Copying the j..j+c bases ...
+                let copies = (0..COPY_SIZE).filter(|c| j + c + 1 <= rs.len()).map(|len| {
+                    let mat = memory.pre_mat.get(i, j + len + 1) + memory.post_mat.get(i, j);
+                    let del = memory.pre_del.get(i, j + len + 1) + memory.post_del.get(i, j);
+                    let ins = memory.pre_ins.get(i, j + len + 1) + memory.post_ins.get(i, j);
+                    logsumexp3(mat, del, ins)
+                });
+                // deleting the j..j+d bases..
+                let deletes = (0..DEL_SIZE).filter(|d| j + d + 1 <= rs.len()).map(|len| {
+                    let mat = memory.pre_mat.get(i, j) + memory.post_mat.get(i, j + len + 1);
+                    let del = memory.pre_del.get(i, j) + memory.post_del.get(i, j + len + 1);
+                    let ins = memory.pre_ins.get(i, j) + memory.post_ins.get(i, j + len + 1);
+                    logsumexp3(mat, del, ins)
+                });
+                slots
+                    .iter_mut()
+                    .zip(mutates.chain(inserts).chain(copies).chain(deletes))
+                    .for_each(|(x, y)| *x = y);
+                override_max(memory.mod_table.iter_mut().skip(row_start), slots.iter());
+            }
+        }
+        // Insertion at the last position.
+        if let Some((start, end)) = memory.fill_ranges.last().copied() {
+            let i = memory.fill_ranges.len() - 1;
+            for j in start..end {
+                let row_start = NUM_ROW * j;
+                // Change the j-th base into ...
+                let mutates = b"ACGT".iter().map(|&b| {
+                    let pre = logsumexp3(
+                        memory.pre_mat.get(i, j),
+                        memory.pre_del.get(i, j),
+                        memory.pre_ins.get(i, j),
+                    );
+                    pre + self.del(b) + memory.post_del.get(i, j + 1)
+                });
+                // Insertion before the j-th base ...
+                let inserts = b"ACGT".iter().map(|&b| {
+                    let pre = logsumexp3(
+                        memory.pre_mat.get(i, j),
+                        memory.pre_del.get(i, j),
+                        memory.pre_ins.get(i, j),
+                    );
+                    pre + self.del(b) + memory.post_del.get(i, j)
+                });
+                // Copying the j..j+c bases....
+                let copies = (0..COPY_SIZE).filter(|c| j + c + 1 <= rs.len()).map(|len| {
+                    let mat = memory.pre_mat.get(i, j + len + 1) + memory.post_mat.get(i, j);
+                    let del = memory.pre_del.get(i, j + len + 1) + memory.post_del.get(i, j);
+                    let ins = memory.pre_ins.get(i, j + len + 1) + memory.post_ins.get(i, j);
+                    logsumexp3(mat, del, ins)
+                });
+                // Deleting the j..j+d bases
+                let deletes = (0..DEL_SIZE).filter(|d| j + d + 1 <= rs.len()).map(|len| {
+                    let mat = memory.pre_mat.get(i, j) + memory.post_mat.get(i, j + len + 1);
+                    let del = memory.pre_del.get(i, j) + memory.post_del.get(i, j + len + 1);
+                    let ins = memory.pre_ins.get(i, j) + memory.post_ins.get(i, j + len + 1);
+                    logsumexp3(mat, del, ins)
+                });
+                slots
+                    .iter_mut()
+                    .zip(mutates.chain(inserts).chain(copies).chain(deletes))
+                    .for_each(|(x, y)| *x = y);
+                override_max(memory.mod_table.iter_mut().skip(row_start), slots.iter());
+            }
+        }
+    }
     fn update(
         &self,
         memory: &mut Memory,
@@ -332,20 +451,20 @@ impl PairHiddenMarkovModel {
             .map(|seq| bootstrap_ops(template.len(), seq.borrow().len()))
             .collect();
         let mut modif_table = Vec::new();
-        let mut aligner = Memory::with_capacity(template.len(), radius);
+        let mut memory = Memory::with_capacity(template.len(), radius);
         for inactive in (0..100).map(|x| INACTIVE_TIME + (x * INACTIVE_TIME) % len) {
             modif_table.clear();
             let lk: f64 = ops
                 .iter_mut()
                 .zip(xs.iter())
                 .map(|(ops, seq)| {
-                    let lk = self.update(&mut aligner, &template, seq.borrow(), radius, ops);
+                    let lk = self.update(&mut memory, &template, seq.borrow(), radius, ops);
                     match modif_table.is_empty() {
-                        true => modif_table.extend_from_slice(&aligner.mod_table),
+                        true => modif_table.extend_from_slice(&memory.mod_table),
                         false => {
                             modif_table
                                 .iter_mut()
-                                .zip(aligner.mod_table.iter())
+                                .zip(memory.mod_table.iter())
                                 .for_each(|(x, y)| *x += y);
                         }
                     }
@@ -359,124 +478,54 @@ impl PairHiddenMarkovModel {
         }
         template
     }
-    fn fill_mod_table(&self, memory: &mut Memory, rs: &[u8], qs: &[u8]) {
-        assert_eq!(memory.fill_ranges.len(), qs.len() + 1);
-        let total_len = NUM_ROW * (rs.len() + 1);
-        memory.mod_table.truncate(total_len);
-        memory.mod_table.iter_mut().for_each(|x| *x = MIN_LK);
-        if memory.mod_table.len() < total_len {
-            let len = total_len - memory.mod_table.len();
-            memory.mod_table.extend(std::iter::repeat(MIN_LK).take(len));
-        }
-        let mut slots = vec![0f64; 4.max(DEL_SIZE).max(COPY_SIZE)];
-        for (i, &(start, end)) in memory.fill_ranges.iter().enumerate().take(qs.len()) {
-            let q = qs[i];
-            for j in start..end {
-                let row_start = NUM_ROW * j;
-                // Change the j-th base into...
-                slots.iter_mut().zip(b"ACGT").for_each(|(x, &b)| {
-                    let mat_mat = self.mat_mat + self.obs(b, q) + memory.post_mat.get(i + 1, j + 1);
-                    let mat_del = self.mat_del + self.del(b) + memory.post_del.get(i, j + 1);
-                    let mat = memory.pre_mat.get(i, j) + logsumexp2(mat_mat, mat_del);
-                    let del_mat = self.del_mat + self.obs(b, q) + memory.post_mat.get(i + 1, j + 1);
-                    let del_del = self.del_del + self.del(b) + memory.post_del.get(i, j + 1);
-                    let del = memory.pre_del.get(i, j) + logsumexp2(del_mat, del_del);
-                    let ins_mat = self.ins_mat + self.obs(b, q) + memory.post_mat.get(i + 1, j + 1);
-                    let ins_del = self.ins_del + self.del(b) + memory.post_del.get(i, j + 1);
-                    let ins = memory.pre_ins.get(i, j) + logsumexp2(ins_mat, ins_del);
-                    *x = logsumexp3(mat, del, ins);
-                });
+    pub fn fit<T: std::borrow::Borrow<[u8]>>(&mut self, template: &[u8], xs: &[T], radius: usize) {
+        let rs = template;
+        let mut ops: Vec<_> = xs
+            .iter()
+            .map(|seq| bootstrap_ops(template.len(), seq.borrow().len()))
+            .collect();
+        let mut memory = Memory::with_capacity(template.len(), radius);
+        for _ in 0..10 {
+            let mut next = PairHiddenMarkovModel::zeros();
+            for (ops, seq) in ops.iter_mut().zip(xs.iter()) {
+                let qs = seq.borrow();
+                use crate::bialignment::guided::re_fill_fill_range;
+                memory.fill_ranges.clear();
                 memory
-                    .mod_table
-                    .iter_mut()
-                    .skip(row_start)
-                    .zip(slots.iter().take(4))
-                    .for_each(|(x, &m)| *x = (*x).max(m));
-                // Insert before the j-th base ...
-                slots.iter_mut().zip(b"ACGT").for_each(|(x, &b)| {});
-                override_max(
-                    memory.mod_table.iter_mut().skip(row_start + 4),
-                    slots.iter().take(4),
-                );
-                // Copying the j..j+c bases ...
-                slots
-                    .iter_mut()
-                    .take(COPY_SIZE)
-                    .enumerate()
-                    .filter(|(c, _)| j + c + 1 <= rs.len())
-                    .for_each(|(len, x)| {});
-                override_max(
-                    memory.mod_table.iter_mut().skip(row_start + 8),
-                    slots.iter().take(COPY_SIZE),
-                );
-                // deleting the j..j+d bases..
-                slots
-                    .iter_mut()
-                    .take(DEL_SIZE)
-                    .enumerate()
-                    .filter(|(d, _)| j + d + 1 <= rs.len())
-                    .for_each(|(len, x)| {});
-                override_max(
-                    memory.mod_table.iter_mut().skip(row_start + 8 + COPY_SIZE),
-                    slots.iter().take(DEL_SIZE),
-                );
+                    .fill_ranges
+                    .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
+                re_fill_fill_range(qs.len(), rs.len(), &ops, radius, &mut memory.fill_ranges);
+                memory.initialize();
+                self.update_aln_path(&mut memory, rs, qs, ops);
+                self.fill_pre_dp(&mut memory, rs, qs);
+                self.fill_post_dp(&mut memory, rs, qs);
+                self.register(&memory, rs, qs, &mut next);
             }
-        }
-        // Insertion at the last position.
-        if let Some((start, end)) = memory.fill_ranges.last().copied() {
-            let i = memory.fill_ranges.len() - 1;
-            for j in start..end {
-                let row_start = NUM_ROW * j;
-                // Change the j-th base into ...
-                slots.iter_mut().zip(b"ACGT").for_each(|(x, &b)| {
-                    let mat_del = self.mat_del + self.del(b) + memory.post_del.get(i, j + 1);
-                    let mat = memory.pre_mat.get(i, j) + mat_del;
-                    let del_del = self.del_del + self.del(b) + memory.post_del.get(i, j + 1);
-                    let del = memory.pre_del.get(i, j) + del_del;
-                    *x = logsumexp2(mat, del);
-                });
-                override_max(
-                    memory.mod_table.iter_mut().skip(row_start),
-                    slots.iter().take(4),
-                );
-                // Insertion before the j-th base ...
-                slots.iter_mut().zip(b"ACGT").for_each(|(x, &b)| {});
-                override_max(
-                    memory.mod_table.iter_mut().skip(row_start + 4),
-                    slots.iter().take(4),
-                );
-                // Copying the j..j+c bases....
-                slots
-                    .iter_mut()
-                    .take(COPY_SIZE)
-                    .enumerate()
-                    .filter(|(c, _)| j + c + 1 <= rs.len())
-                    .for_each(|(len, x)| {});
-                override_max(
-                    memory.mod_table.iter_mut().skip(row_start + 8),
-                    slots.iter().take(COPY_SIZE),
-                );
-                // Deleting the j..j+d bases
-                slots
-                    .iter_mut()
-                    .take(DEL_SIZE)
-                    .enumerate()
-                    .filter(|(d, _)| j + d + 1 <= rs.len())
-                    .for_each(|(len, x)| {});
-                override_max(
-                    memory.mod_table.iter_mut().skip(row_start + 8 + COPY_SIZE),
-                    slots.iter().take(DEL_SIZE),
-                );
-            }
+            next.normalize();
+            *self = next;
         }
     }
-    fn fit<T: std::borrow::Borrow<[u8]>>(
-        &mut self,
-        template: &[u8],
-        xs: &[T],
-        radius: usize,
-    ) -> Vec<u8> {
+    fn register(&self, memory: &Memory, rs: &[u8], qs: &[u8], next: &mut Self) {
+        // Transition
+
         todo!()
+    }
+    fn normalize(&mut self) {
+        let mat_sum = self.mat_mat + self.mat_ins + self.mat_del;
+        self.mat_mat /= mat_sum;
+        self.mat_ins /= mat_sum;
+        self.mat_del /= mat_sum;
+        let ins_sum = self.ins_mat + self.ins_del + self.ins_ins;
+        self.ins_mat /= ins_sum;
+        self.ins_del /= ins_sum;
+        self.ins_ins /= ins_sum;
+        let del_sum = self.del_mat + self.del_del;
+        self.del_mat /= del_sum;
+        self.del_del /= del_sum;
+        for obss in self.mat_emit.chunks_mut(4) {
+            let sum: f64 = obss.iter().sum();
+            obss.iter_mut().for_each(|x| *x /= sum);
+        }
     }
 }
 
