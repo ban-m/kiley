@@ -41,7 +41,7 @@ pub struct GeneralizedPairHiddenMarkovModel<T: HMMType> {
 }
 
 pub mod banded;
-use crate::hmm::Op;
+use crate::op::Op;
 use rayon::prelude::*;
 fn get_range(radius: isize, ylen: isize, center: isize) -> std::ops::Range<isize> {
     let start = radius - center;
@@ -823,7 +823,7 @@ impl<M: HMMType> GPHMM<M> {
                 .unwrap();
             state = new_state;
             match op {
-                Op::Match => {
+                Op::Mismatch | Op::Match => {
                     i -= 1;
                     j -= 1;
                 }
@@ -1184,7 +1184,7 @@ impl<M: HMMType> GPHMM<M> {
             .map(|(pos, op, base, _lk)| {
                 let mut template = template.clone();
                 match op {
-                    Op::Match => template[pos as isize] = base,
+                    Op::Mismatch | Op::Match => template[pos as isize] = base,
                     Op::Del => {
                         template.remove(pos as isize);
                     }
@@ -1580,7 +1580,7 @@ impl<'a, 'b, 'c> Profile<'a, 'b, 'c, Cond> {
 mod gphmm {
     // TODO:Write more tests for conditional hidden Markov models.
     use super::*;
-    use crate::hmm::Op;
+    use crate::op::Op;
     use rand::SeedableRng;
     use rand_xoshiro::Xoroshiro128PlusPlus;
     #[test]
@@ -1798,7 +1798,7 @@ mod gphmm {
             let xs = crate::gen_seq::generate_seq(&mut rng, len);
             let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &profile);
             let (_, ops, _) = phmm.align(&xs, &ys);
-            let (xr, opr, yr) = crate::hmm::recover(&xs, &ys, &ops);
+            let (xr, opr, yr) = crate::recover(&xs, &ys, &ops);
             for ((xr, opr), yr) in xr.chunks(200).zip(opr.chunks(200)).zip(yr.chunks(200)) {
                 println!("{}", String::from_utf8_lossy(xr));
                 println!("{}", String::from_utf8_lossy(opr));
@@ -1842,7 +1842,7 @@ mod gphmm {
             let xs = crate::gen_seq::generate_seq(&mut rng, len);
             let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &profile);
             let (_, ops, _) = phmm.align(&xs, &ys);
-            let (xr, opr, yr) = crate::hmm::recover(&xs, &ys, &ops);
+            let (xr, opr, yr) = crate::recover(&xs, &ys, &ops);
             for ((xr, opr), yr) in xr.chunks(200).zip(opr.chunks(200)).zip(yr.chunks(200)) {
                 println!("{}", String::from_utf8_lossy(xr));
                 println!("{}", String::from_utf8_lossy(opr));
@@ -1874,7 +1874,7 @@ mod gphmm {
             let xs = crate::gen_seq::generate_seq(&mut rng, len);
             let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &profile);
             let (_, ops, _) = phmm.align(&xs, &ys);
-            let (xr, opr, yr) = crate::hmm::recover(&xs, &ys, &ops);
+            let (xr, opr, yr) = crate::recover(&xs, &ys, &ops);
             for ((xr, opr), yr) in xr.chunks(200).zip(opr.chunks(200)).zip(yr.chunks(200)) {
                 println!("{}", String::from_utf8_lossy(xr));
                 println!("{}", String::from_utf8_lossy(opr));

@@ -70,7 +70,7 @@ impl GPHMM<ConditionalHiddenMarkovModel> {
                     let (op, base) = (op / 4, (op % 4) as u8);
                     let op = [Op::Match, Op::Ins, Op::Del][op];
                     match op {
-                        Op::Match => improved[pos as isize] = base,
+                        Op::Mismatch | Op::Match => improved[pos as isize] = base,
                         Op::Del => {
                             offset -= 1;
                             improved.remove(pos as isize);
@@ -365,7 +365,7 @@ impl<M: HMMType> GPHMM<M> {
                 .unwrap();
             state = new_state;
             match op {
-                Op::Match => {
+                Op::Mismatch | Op::Match => {
                     j_orig -= 1;
                     i -= 1;
                 }
@@ -679,7 +679,7 @@ impl<M: HMMType> GPHMM<M> {
             .map(|(pos, op, base, _lk)| {
                 let mut template = template.clone();
                 match op {
-                    Op::Match => template[pos as isize] = base,
+                    Op::Mismatch | Op::Match => template[pos as isize] = base,
                     Op::Del => {
                         template.remove(pos as isize);
                     }

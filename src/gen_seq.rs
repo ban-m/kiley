@@ -1,5 +1,6 @@
 //! This module is to generate some random sequence to assess the performance.
 //! Usually, it would not be used in the real-applications.
+use crate::op::Op;
 use rand::seq::SliceRandom;
 #[derive(Debug, Clone, Copy)]
 pub struct Profile {
@@ -40,32 +41,25 @@ pub const CCS_PROFILE: Profile = Profile {
     ins: 0.004,
 };
 
-#[derive(Debug, Clone, Copy)]
-enum Op {
-    Match,
-    MisMatch,
-    Del,
-    In,
-}
 impl Op {
     fn weight(self, p: &Profile) -> f64 {
         match self {
             Op::Match => 1. - p.sub - p.del - p.ins,
-            Op::MisMatch => p.sub,
+            Op::Mismatch => p.sub,
             Op::Del => p.del,
-            Op::In => p.ins,
+            Op::Ins => p.ins,
         }
     }
 }
-const OPERATIONS: [Op; 4] = [Op::Match, Op::MisMatch, Op::Del, Op::In];
+const OPERATIONS: [Op; 4] = [Op::Match, Op::Mismatch, Op::Del, Op::Ins];
 pub fn introduce_randomness<T: rand::Rng>(seq: &[u8], rng: &mut T, p: &Profile) -> Vec<u8> {
     let mut res = vec![];
     let mut remainings: Vec<_> = seq.iter().copied().rev().collect();
     while !remainings.is_empty() {
         match *OPERATIONS.choose_weighted(rng, |e| e.weight(p)).unwrap() {
             Op::Match => res.push(remainings.pop().unwrap()),
-            Op::MisMatch => res.push(choose_base(rng, remainings.pop().unwrap())),
-            Op::In => res.push(random_base(rng)),
+            Op::Mismatch => res.push(choose_base(rng, remainings.pop().unwrap())),
+            Op::Ins => res.push(random_base(rng)),
             Op::Del => {
                 remainings.pop().unwrap();
             }
@@ -83,9 +77,9 @@ pub fn introduce_errors<T: rand::Rng>(
     // Alignment operations.
     let mut operations = vec![
         vec![Op::Match; seq.len() - sub - del],
-        vec![Op::MisMatch; sub],
+        vec![Op::Mismatch; sub],
         vec![Op::Del; del],
-        vec![Op::In; ins],
+        vec![Op::Ins; ins],
     ]
     .concat();
     operations.shuffle(rng);
@@ -94,8 +88,8 @@ pub fn introduce_errors<T: rand::Rng>(
     for op in operations {
         match op {
             Op::Match => res.push(remainings.pop().unwrap()),
-            Op::MisMatch => res.push(choose_base(rng, remainings.pop().unwrap())),
-            Op::In => res.push(random_base(rng)),
+            Op::Mismatch => res.push(choose_base(rng, remainings.pop().unwrap())),
+            Op::Ins => res.push(random_base(rng)),
             Op::Del => {
                 remainings.pop().unwrap();
             }

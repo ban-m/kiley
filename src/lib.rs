@@ -9,14 +9,17 @@ pub mod padseq;
 pub mod sam;
 pub mod trialignment;
 pub use bialignment::polish_until_converge_banded;
+mod dptable;
 pub mod gphmm;
+pub use op::recover;
+mod op;
 use gphmm::{Cond, HMMType, GPHMM};
+use op::Op;
 use rand::seq::*;
 use rand::Rng;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256StarStar;
 use rayon::prelude::*;
-
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct PolishConfig<M: HMMType> {
@@ -232,19 +235,19 @@ fn merge_seq(above: &[u8], below: &[u8]) -> Vec<u8> {
     let mut seq = vec![];
     for op in ops {
         match op {
-            EditOp::Del => {
+            Op::Del => {
                 if a_pos == 0 || a_pos < above.len() / 2 {
                     seq.push(above[a_pos]);
                 }
                 a_pos += 1;
             }
-            EditOp::Ins => {
+            Op::Ins => {
                 if a_pos == above.len() || above.len() / 2 < a_pos {
                     seq.push(below[b_pos]);
                 }
                 b_pos += 1;
             }
-            EditOp::Match => {
+            Op::Mismatch | Op::Match => {
                 if a_pos < above.len() / 2 {
                     seq.push(above[a_pos]);
                 } else {
@@ -260,7 +263,7 @@ fn merge_seq(above: &[u8], below: &[u8]) -> Vec<u8> {
     seq
 }
 
-fn overlap_aln(xs: &[u8], ys: &[u8]) -> (i32, Vec<EditOp>) {
+fn overlap_aln(xs: &[u8], ys: &[u8]) -> (i32, Vec<Op>) {
     let mut dp = vec![vec![0; ys.len() + 1]; xs.len() + 1];
     for (i, x) in xs.iter().enumerate().map(|(i, &x)| (i + 1, x)) {
         for (j, y) in ys.iter().enumerate().map(|(j, &y)| (j + 1, y)) {
@@ -275,34 +278,31 @@ fn overlap_aln(xs: &[u8], ys: &[u8]) -> (i32, Vec<EditOp>) {
         .map(|(i, j)| (dp[i][j], (i, j)))
         .max_by_key(|x| x.0)
         .unwrap();
-    let mut ops: Vec<_> = std::iter::repeat(EditOp::Ins).take(ys.len() - j).collect();
+    let mut ops: Vec<_> = std::iter::repeat(Op::Ins).take(ys.len() - j).collect();
     while 0 < i && 0 < j {
         let mat = if xs[i - 1] == ys[j - 1] { 1 } else { -1 };
         if dp[i][j] == dp[i - 1][j - 1] + mat {
-            ops.push(EditOp::Match);
+            if mat == 1 {
+                ops.push(Op::Match);
+            } else {
+                ops.push(Op::Mismatch);
+            }
             i -= 1;
             j -= 1;
         } else if dp[i][j] == dp[i - 1][j] - 1 {
-            ops.push(EditOp::Del);
+            ops.push(Op::Del);
             i -= 1;
         } else if dp[i][j] == dp[i][j - 1] - 1 {
-            ops.push(EditOp::Ins);
+            ops.push(Op::Ins);
             j -= 1;
         } else {
             unreachable!()
         }
     }
-    ops.extend(std::iter::repeat(EditOp::Del).take(i));
-    ops.extend(std::iter::repeat(EditOp::Ins).take(j));
+    ops.extend(std::iter::repeat(Op::Del).take(i));
+    ops.extend(std::iter::repeat(Op::Ins).take(j));
     ops.reverse();
     (score, ops)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EditOp {
-    Match,
-    Ins,
-    Del,
 }
 
 // Split query into (chunk-id, aligned seq)-array.
@@ -319,11 +319,11 @@ fn split_query<M: HMMType>(
         .iter()
         .rev()
         .flat_map(|&op| match op {
-            sam::Op::Align(l) | sam::Op::Match(l) | sam::Op::Mismatch(l) => vec![EditOp::Match; l],
+            sam::Op::Align(l) | sam::Op::Match(l) | sam::Op::Mismatch(l) => vec![Op::Match; l],
             sam::Op::HardClip(l) | sam::Op::SoftClip(l) | sam::Op::Insertion(l) => {
-                vec![EditOp::Ins; l]
+                vec![Op::Ins; l]
             }
-            sam::Op::Deletion(l) => vec![EditOp::Del; l],
+            sam::Op::Deletion(l) => vec![Op::Del; l],
             _ => unreachable!(),
         })
         .collect();
@@ -344,7 +344,7 @@ fn split_query<M: HMMType>(
     };
     let chunk_start = initial_chunk_id * break_len;
     // Seek by first clippings.
-    while ops.last() == Some(&EditOp::Ins) {
+    while ops.last() == Some(&Op::Ins) {
         query_position += 1;
         ops.pop();
     }
@@ -352,12 +352,12 @@ fn split_query<M: HMMType>(
     while ref_position < chunk_start {
         if let Some(op) = ops.pop() {
             match op {
-                EditOp::Match => {
+                Op::Mismatch | Op::Match => {
                     ref_position += 1;
                     query_position += 1;
                 }
-                EditOp::Ins => query_position += 1,
-                EditOp::Del => ref_position += 1,
+                Op::Ins => query_position += 1,
+                Op::Del => ref_position += 1,
             }
         } else {
             return vec![];
@@ -377,7 +377,7 @@ fn split_query<M: HMMType>(
 fn seq_into_subchunks<M: HMMType>(
     query: &[u8],
     config: &PolishConfig<M>,
-    mut ops: Vec<EditOp>,
+    mut ops: Vec<Op>,
     reflen: usize,
 ) -> Vec<Vec<u8>> {
     let break_len = config.chunk_size - config.overlap;
@@ -391,12 +391,12 @@ fn seq_into_subchunks<M: HMMType>(
     let mut chunk_position: Vec<(usize, usize)> = vec![(0, 0)];
     while let Some(op) = ops.pop() {
         match op {
-            EditOp::Match => {
+            Op::Mismatch | Op::Match => {
                 q_pos += 1;
                 r_pos += 1;
             }
-            EditOp::Ins => q_pos += 1,
-            EditOp::Del => r_pos += 1,
+            Op::Ins => q_pos += 1,
+            Op::Del => r_pos += 1,
         }
         if current_target == r_pos {
             chunk_position.push((current_target, q_pos));
@@ -561,14 +561,13 @@ fn partition_query<'a>(
     query: &'a [u8],
     split_positions: &[usize],
 ) -> Vec<(usize, &'a [u8])> {
-    use bialignment::Op;
     let ops: Vec<_> = edlib_sys::global(draft, query)
         .into_iter()
         .map(|x| match x {
-            0 => Op::Mat,
+            0 => Op::Match,
             1 => Op::Ins,
             2 => Op::Del,
-            3 => Op::Mism,
+            3 => Op::Mismatch,
             _ => unreachable!(),
         })
         .collect();
@@ -578,7 +577,7 @@ fn partition_query<'a>(
     let mut target_pos = *target_poss.next().unwrap();
     for op in ops {
         match op {
-            Op::Mat | Op::Mism => {
+            Op::Match | Op::Mismatch => {
                 if i == target_pos {
                     q_split_position.push(j);
                     target_pos = match target_poss.next() {
@@ -802,11 +801,6 @@ pub fn ternary_consensus_by_chunk<T: std::borrow::Borrow<[u8]>>(
     let max = chunk_size * 2;
     let mut aligner = Aligner::new(max, max, max, chunk_size / 2);
     let draft = seqs[0].borrow();
-    // let draft = seqs
-    //     .iter()
-    //     .map(|x| x.borrow())
-    //     .max_by_key(|x| x.len())
-    //     .unwrap();
     // 1. Partition each reads into `chunk-size`bp.
     // Calculate the range of each window.
     let chunk_start_position: Vec<_> = (0..)
@@ -1019,21 +1013,21 @@ pub fn polish_by_pileup_affine<T: std::borrow::Borrow<[u8]>>(
         let mut ins_buffer = vec![];
         for &op in ops.iter() {
             match op {
-                bialignment::Op::Mat | bialignment::Op::Mism => {
+                Op::Match | Op::Mismatch => {
                     matches[i][padseq::convert_to_twobit(&x[j]) as usize] += 1;
                     i += 1;
                     j += 1;
                 }
-                bialignment::Op::Ins => {
+                Op::Ins => {
                     ins_buffer.push(x[j]);
                     j += 1;
                 }
-                bialignment::Op::Del => {
+                Op::Del => {
                     deletions[i] += 1;
                     i += 1;
                 }
             }
-            if op != bialignment::Op::Ins && !ins_buffer.is_empty() {
+            if op != Op::Ins && !ins_buffer.is_empty() {
                 insertions[i].push(ins_buffer.clone());
                 ins_buffer.clear();
             }

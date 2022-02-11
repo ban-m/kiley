@@ -1,18 +1,31 @@
+use kiley::bialignment::guided::*;
 fn main() {
+    use rand::Rng;
     use rand::SeedableRng;
     use rand_xoshiro::Xoshiro256StarStar;
-    for seed in 0..4 {
-        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
-        let xs = kiley::gen_seq::generate_seq(&mut rng, 200);
+    const SEED: u64 = 1293890;
+    let i = 0;
+    // for i in 66..67 {
+    {
+        let radius = 40;
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED + i);
+        let xslen = rng.gen::<usize>() % 100 + 20;
+        let xs = kiley::gen_seq::generate_seq(&mut rng, xslen);
         let prof = kiley::gen_seq::PROFILE;
-        let ys = kiley::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
-        let (score, ops) = kiley::bialignment::global(&xs, &ys, 1, -2, -4, -1);
-        let (xa, oa, ya) = kiley::bialignment::recover(&xs, &ys, &ops);
-        println!("{}", score);
-        println!("{}", String::from_utf8_lossy(&xa));
-        println!("{}", String::from_utf8_lossy(&oa));
-        println!("{}", String::from_utf8_lossy(&ya));
+        let yss: Vec<_> = (0..30)
+            .map(|_| kiley::gen_seq::introduce_randomness(&xs, &mut rng, &prof))
+            .collect();
+        let template = kiley::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+        let consed = polish_until_converge(&template, &yss, radius);
+        let sum: u32 = yss
+            .iter()
+            .map(|ys| kiley::bialignment::edit_dist(&consed, ys))
+            .sum();
+        let dist = kiley::bialignment::edit_dist(&xs, &consed);
+        let prev = kiley::bialignment::edit_dist(&xs, &template);
+        eprintln!("RESULT\t{}\t{}\t{}\t{}", i, prev, dist, sum);
     }
+    panic!();
 }
 
 // use kiley::gphmm::*;

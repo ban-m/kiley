@@ -1,4 +1,5 @@
 //! An tiny implementation of pair hidden Markov models.
+use crate::op::Op;
 use crate::padseq;
 use rand::Rng;
 /// A pair hidden Markov model.
@@ -1150,13 +1151,13 @@ pub fn logsumexp(xs: &[f64]) -> f64 {
     max + sum
 }
 
-/// Operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Op {
-    Match,
-    Del,
-    Ins,
-}
+// /// Operations.
+// #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// pub enum Op {
+//     Match,
+//     Del,
+//     Ins,
+// }
 
 /// A summary of comparison of two sequence.
 #[derive(Debug, Clone)]
@@ -1231,47 +1232,8 @@ impl LikelihoodSummary {
                 })
                 .max_by(|x, y| (x.1).partial_cmp(&y.1).unwrap())
                 .unwrap();
-            // let sum = self
-            //     .deletion_prob
-            //     .iter()
-            //     .filter(|&&x| x > THRESHOLD)
-            //     .sum::<f64>();
-            // let probe = rng.gen_range(0f64, sum);
-            // let (mut acc, mut position) = (0f64, 0);
-            // for &x in self.deletion_prob.iter() {
-            //     if THRESHOLD < x {
-            //         acc += x;
-            //         if probe < acc {
-            //             break;
-            //         }
-            //     }
-            //     position += 1;
-            // }
-            // let (position, _) = self
-            //     .deletion_prob
-            //     .iter()
-            //     .enumerate()
-            //     .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
-            //     .unwrap();
             template.remove(position);
         } else {
-            // const THRESHOLD: f64 = 0.2;
-            // let sum = self
-            //     .insertion_prob
-            //     .iter()
-            //     .filter(|&&x| x > THRESHOLD)
-            //     .sum::<f64>();
-            // let probe = rng.gen_range(0f64, sum);
-            // let (mut acc, mut position) = (0f64, 0);
-            // for &x in self.insertion_prob.iter() {
-            //     if THRESHOLD < x {
-            //         acc += x;
-            //         if probe < acc {
-            //             break;
-            //         }
-            //     }
-            //     position += 1;
-            // }
             let (start, end, _) = chunks
                 .iter()
                 .map(|&(start, end)| {
@@ -1295,36 +1257,8 @@ impl LikelihoodSummary {
                     .map(|(idx, _)| b"ACGT"[idx])
                     .unwrap();
                 (position, base)
-                // self.insertion_bases[start..end]
-                //     .iter()
-                //     .fold(vec![0; 4], |mut xs, ys| {
-                //         for i in 0..4 {
-                //             xs[i] += ys[i];
-                //         }
-                //         xs
-                //     })
-                //     .into_iter()
-                //     .enumerate()
-                //     .max_by_key(|x| x.1)
-                //     .map(|(idx, _)| b"ACGT"[idx])
-                //     .unwrap()
             };
             template.insert(position, base);
-            // let (position, _) = self
-            //     .insertion_prob
-            //     .iter()
-            //     .enumerate()
-            //     .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
-            //     .unwrap();
-            // let base = {
-            //     let (index, _) = self.insertion_bases[position]
-            //         .iter()
-            //         .enumerate()
-            //         .max_by_key(|x| x.1)
-            //         .unwrap();
-            //     b"ACGT"[index]
-            // };
-            // template.insert(position + 1, base);
         };
         template
     }
@@ -1348,9 +1282,6 @@ impl LikelihoodSummary {
                 for (&mat, ins) in ziped.take(end).skip(start) {
                     polished_seq.push(mat);
                     polished_seq.push(Self::choose_max_base(ins));
-                    // for (pos, &x) in template.iter().take(end).skip(start).enumerate() {
-                    // polished_seq.push(x);
-                    // polished_seq.push(Self::choose_max_base(&self.insertion_bases[pos]));
                 }
             } else {
                 let del_length =
@@ -1382,39 +1313,6 @@ impl LikelihoodSummary {
         }
         intervals
     }
-}
-
-pub fn recover(xs: &[u8], ys: &[u8], ops: &[Op]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-    let (mut i, mut j) = (0, 0);
-    let (mut xr, mut yr, mut aln) = (vec![], vec![], vec![]);
-    for &op in ops {
-        match op {
-            Op::Match => {
-                xr.push(xs[i]);
-                yr.push(ys[j]);
-                if xs[i] == ys[j] {
-                    aln.push(b'|');
-                } else {
-                    aln.push(b'X');
-                }
-                i += 1;
-                j += 1;
-            }
-            Op::Del => {
-                xr.push(xs[i]);
-                aln.push(b' ');
-                yr.push(b' ');
-                i += 1;
-            }
-            Op::Ins => {
-                xr.push(b' ');
-                aln.push(b' ');
-                yr.push(ys[j]);
-                j += 1;
-            }
-        }
-    }
-    (xr, aln, yr)
 }
 
 #[cfg(test)]
