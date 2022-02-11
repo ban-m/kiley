@@ -2,6 +2,7 @@
 use crate::op::Op;
 use crate::padseq;
 use rand::Rng;
+pub mod guided;
 /// A pair hidden Markov model.
 /// To access the output prbabilities,
 /// call `.prob_of()` instead of direct membership access.
@@ -27,11 +28,11 @@ pub struct PairHiddenMarkovModel {
     pub del_ext: f64,
     /// Pr{Ins->Ins}
     pub ins_ext: f64,
-    /// Pr{(-,base)|Del}. Bases are A,C,G,T, '-' and NULL. The last two "bases" are defined just for convinience.
+    // Pr{(-,base)|Del}. Bases are A,C,G,T, '-' and NULL. The last two "bases" are defined just for convinience.
     del_emit: [f64; 6],
-    /// Pr{(base,-)|Ins}
+    // Pr{(base,-)|Ins}
     ins_emit: [f64; 6],
-    /// Pr{(base,base)|Mat}
+    // Pr{(base,base)|Mat}
     mat_emit: [f64; 64],
 }
 

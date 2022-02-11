@@ -16,7 +16,7 @@ fn convert_to_fill_range(
     ranges
 }
 
-fn re_fill_fill_range(
+pub fn re_fill_fill_range(
     qlen: usize,
     rlen: usize,
     ops: &[Op],
@@ -171,13 +171,13 @@ pub fn global_guided(
     // 1. Initialization
     for i in 1..qs.len() + 1 {
         mat.set(i, 0, lower);
-        ins.set(i, 0, open + i.saturating_sub(1) as i32 * ext);
+        ins.set(i, 0, open + (i - 1) as i32 * ext);
         del.set(i, 0, lower);
     }
     for j in 1..rs.len() + 1 {
         mat.set(0, j, lower);
         ins.set(0, j, lower);
-        del.set(0, j, open + j.saturating_sub(1) as i32 * ext);
+        del.set(0, j, open + (j - 1) as i32 * ext);
     }
     mat.set(0, 0, 0);
     ins.set(0, 0, lower);
@@ -294,11 +294,13 @@ fn fill_mod_table(
     mod_table.truncate(total_len);
     mod_table.iter_mut().for_each(|x| *x = pre.upperbound());
     if mod_table.len() < total_len {
-        mod_table.extend(std::iter::repeat(pre.upperbound()).take(total_len));
+        let len = total_len - mod_table.len();
+        mod_table.extend(std::iter::repeat(pre.upperbound()).take(len));
     }
     for (i, &(start, end)) in fill_range.iter().enumerate().take(qs.len()) {
         let q = qs[i];
-        for j in start..end.min(rs.len() + 1) {
+        // for j in start..end.min(rs.len() + 1) {
+        for j in start..end {
             let pre_mat = pre.get(i, j);
             let (post_del, post_ins) = (post.get(i, j + 1), post.get(i + 1, j));
             let (post_mat, post_sta) = (post.get(i + 1, j + 1), post.get(i, j));
@@ -343,11 +345,10 @@ fn fill_mod_table(
                 });
         }
     }
-
-    // Insertion at hte last position.
+    // The last position (no base to be aligned!)
     if let Some(&(start, end)) = fill_range.last() {
         let i = fill_range.len() - 1;
-        for j in start..end.min(rs.len() + 1) {
+        for j in start..end {
             let pre_mat = pre.get(i, j);
             let post_sta = post.get(i, j);
             let post_del = post.get(i, j + 1);
@@ -388,6 +389,7 @@ struct Aligner {
     pre_dp: DPTable<u32>,
     post_dp: DPTable<u32>,
     fill_ranges: Vec<(usize, usize)>,
+    mod_table: Vec<u32>,
 }
 
 impl Aligner {
@@ -395,20 +397,15 @@ impl Aligner {
         let pre_dp = DPTable::with_capacity(qlen, radius, 3 * qlen as u32);
         let post_dp = DPTable::with_capacity(qlen, radius, 3 * qlen as u32);
         let fill_ranges = Vec::with_capacity(qlen * 3);
+        let mod_table = Vec::with_capacity(qlen * 3);
         Self {
             pre_dp,
             post_dp,
             fill_ranges,
+            mod_table,
         }
     }
-    fn align(
-        &mut self,
-        rs: &[u8],
-        qs: &[u8],
-        radius: usize,
-        ops: &mut Vec<Op>,
-        table: &mut Vec<u32>,
-    ) -> u32 {
+    fn align(&mut self, rs: &[u8], qs: &[u8], radius: usize, ops: &mut Vec<Op>) -> u32 {
         self.fill_ranges.clear();
         self.fill_ranges
             .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
@@ -419,7 +416,7 @@ impl Aligner {
         Self::fill_pre_dp(&mut self.pre_dp, &self.fill_ranges, rs, qs, ops);
         Self::fill_post_dp(&mut self.post_dp, &self.fill_ranges, rs, qs);
         let fr = &self.fill_ranges;
-        fill_mod_table(table, rs, qs, &self.pre_dp, &self.post_dp, fr);
+        fill_mod_table(&mut self.mod_table, rs, qs, &self.pre_dp, &self.post_dp, fr);
         self.post_dp.get(0, 0)
     }
     fn fill_pre_dp(
@@ -524,171 +521,6 @@ fn bootstrap_ops(rlen: usize, qlen: usize) -> Vec<Op> {
     ops
 }
 
-// struct AlignInfo<'a> {
-//     seq: &'a [u8],
-//     ops: Vec<Op>,
-//     // pre_dp: DPTable<u32>,
-//     // post_dp: DPTable<u32>,
-//     // fill_range: Vec<(usize, usize)>,
-//     mod_table: Vec<u32>,
-//     dist: u32,
-// }
-
-// impl<'a> AlignInfo<'a> {
-//     fn new(template: &[u8], seq: &'a [u8], radius: usize) -> Self {
-//         let (mut qpos, mut rpos) = (0, 0);
-//         let mut ops = Vec::with_capacity(template.len() + seq.len());
-//         let map_coef = template.len() as f64 / seq.len() as f64;
-//         while qpos < seq.len() && rpos < template.len() {
-//             let corresp_rpos = (qpos as f64 * map_coef).round() as usize;
-//             if corresp_rpos < rpos {
-//                 // rpos is too fast. Move qpos only.
-//                 qpos += 1;
-//                 ops.push(Op::Ins);
-//             } else if corresp_rpos == rpos {
-//                 qpos += 1;
-//                 rpos += 1;
-//                 ops.push(Op::Match);
-//             } else {
-//                 rpos += 1;
-//                 ops.push(Op::Del);
-//             }
-//         }
-//         ops.extend(std::iter::repeat(Op::Ins).take(seq.len() - qpos));
-//         ops.extend(std::iter::repeat(Op::Del).take(template.len() - rpos));
-//         AlignInfo::from_aln_path(template, seq, &ops, radius)
-//     }
-//     fn fill_pre_dp(
-//         dp: &mut DPTable<u32>,
-//         fill_range: &[(usize, usize)],
-//         rs: &[u8],
-//         qs: &[u8],
-//         ops: &mut Vec<Op>,
-//     ) {
-//         // 1. Initialization. It is OK to consume O(xs.len() + ys.len()) time.
-//         for i in 0..qs.len() + 1 {
-//             dp.set(i, 0, i as u32);
-//         }
-//         for j in 0..rs.len() + 1 {
-//             dp.set(0, j, j as u32);
-//         }
-//         // Skipping the first element in both i and j.
-//         for (i, &(start, end)) in fill_range.iter().enumerate().skip(1) {
-//             let q = qs[i - 1];
-//             for j in start.max(1)..end {
-//                 let r = rs[j - 1];
-//                 let mat = if q == r { 0 } else { 1 };
-//                 let dist = (dp.get(i - 1, j) + 1)
-//                     .min(dp.get(i, j - 1) + 1)
-//                     .min(dp.get(i - 1, j - 1) + mat);
-//                 dp.set(i, j, dist);
-//             }
-//         }
-//         // Traceback
-//         let mut qpos = qs.len();
-//         let mut rpos = fill_range.last().unwrap().1 - 1;
-//         assert_eq!(rpos, rs.len());
-//         // Init with appropriate number of deletion
-//         //let mut ops = Vec::with_capacity(rs.len() + qs.len());
-//         ops.clear();
-//         while 0 < qpos && 0 < rpos {
-//             let current = dp.get(qpos, rpos);
-//             if current == dp.get(qpos - 1, rpos) + 1 {
-//                 ops.push(Op::Ins);
-//                 qpos -= 1;
-//             } else if current == dp.get(qpos, rpos - 1) + 1 {
-//                 ops.push(Op::Del);
-//                 rpos -= 1;
-//             } else {
-//                 let mat = if qs[qpos - 1] == rs[rpos - 1] { 0 } else { 1 };
-//                 assert_eq!(mat + dp.get(qpos - 1, rpos - 1), current);
-//                 qpos -= 1;
-//                 rpos -= 1;
-//                 if mat == 0 {
-//                     ops.push(Op::Match);
-//                 } else {
-//                     ops.push(Op::Mismatch);
-//                 }
-//             }
-//         }
-//         ops.reverse();
-//     }
-//     fn fill_post_dp(dp: &mut DPTable<u32>, fill_range: &[(usize, usize)], rs: &[u8], qs: &[u8]) {
-//         // 1. Initialization. It is OK to consume O(xs.len() + ys.len()) time.
-//         for i in 0..qs.len() + 1 {
-//             dp.set(i, rs.len(), (qs.len() - i) as u32);
-//         }
-//         for j in 0..rs.len() + 1 {
-//             dp.set(qs.len(), j, (rs.len() - j) as u32);
-//         }
-//         // Skipping the first element in both i and j.
-//         for (i, &(start, end)) in fill_range.iter().enumerate().rev().skip(1) {
-//             let q = qs[i];
-//             for j in (start..end.min(rs.len())).rev() {
-//                 let r = rs[j];
-//                 let mat = if q == r { 0 } else { 1 };
-//                 let dist = (dp.get(i + 1, j) + 1)
-//                     .min(dp.get(i, j + 1) + 1)
-//                     .min(dp.get(i + 1, j + 1) + mat);
-//                 dp.set(i, j, dist);
-//             }
-//         }
-//     }
-// fn from_aln_path(rs: &[u8], qs: &'a [u8], ops: &[Op], radius: usize) -> Self {
-//     let fill_range = convert_to_fill_range(qs.len(), rs.len(), ops, radius);
-//     let upperbound = (qs.len() + rs.len() + 3) as u32;
-//     let (ops, pre_dp) = {
-//         let mut dp = DPTable::new(&fill_range, upperbound);
-//         let mut ops = vec![];
-//         Self::fill_pre_dp(&mut dp, &fill_range, rs, qs, &mut ops);
-//         (ops, dp)
-//     };
-//     let post_dp = {
-//         let mut dp = DPTable::new(&fill_range, upperbound);
-//         Self::fill_post_dp(&mut dp, &fill_range, rs, qs);
-//         dp
-//     };
-//     let dist = post_dp.get(0, 0);
-//     let dist2 = pre_dp.get(qs.len(), rs.len());
-//     assert_eq!(dist, dist2);
-//     let mut mod_table = Vec::with_capacity((rs.len() + 1) * NUM_ROW);
-//     fill_mod_table(&mut mod_table, &rs, &qs, &pre_dp, &post_dp, &fill_range);
-//     AlignInfo {
-//         seq: qs,
-//         ops,
-//         // pre_dp,
-//         // post_dp,
-//         // fill_range,
-//         dist,
-//         mod_table,
-//     }
-// }
-// fn update(&mut self, rs: &[u8], radius: usize) {
-//     let upperbound = (self.seq.len() + rs.len() + 3) as u32;
-//     // Clear the old information.
-//     self.fill_range = convert_to_fill_range(self.seq.len(), rs.len(), &self.ops, radius);
-//     self.pre_dp.clear();
-//     self.pre_dp.initialize(upperbound, &self.fill_range);
-//     self.post_dp.clear();
-//     self.post_dp.initialize(upperbound, &self.fill_range);
-//     self.mod_table.clear();
-//     // Fill new values.
-//     self.ops = Self::fill_pre_dp(&mut self.pre_dp, &self.fill_range, rs, self.seq);
-//     Self::fill_post_dp(&mut self.post_dp, &self.fill_range, rs, self.seq);
-//     self.dist = self.post_dp.get(0, 0);
-//     let dist2 = self.pre_dp.get(self.seq.len(), rs.len());
-//     assert_eq!(self.dist, dist2);
-//     fill_mod_table(
-//         &mut self.mod_table,
-//         &rs,
-//         &self.seq,
-//         &self.pre_dp,
-//         &self.post_dp,
-//         &self.fill_range,
-//     );
-// }
-// }
-
 fn polish_guided(
     template: &[u8],
     modif_table: &[u32],
@@ -751,7 +583,6 @@ pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(
         .map(|seq| bootstrap_ops(template.len(), seq.borrow().len()))
         .collect();
     let mut modif_table = Vec::new();
-    let mut temp_table = Vec::new();
     let mut aligner = Aligner::with_capacity(template.len(), radius);
     for inactive in (0..100).map(|x| INACTIVE_TIME + (x * INACTIVE_TIME) % len) {
         modif_table.clear();
@@ -759,13 +590,13 @@ pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(
             .iter_mut()
             .zip(xs.iter())
             .map(|(ops, seq)| {
-                let dist = aligner.align(&template, seq.borrow(), radius, ops, &mut temp_table);
+                let dist = aligner.align(&template, seq.borrow(), radius, ops);
                 match modif_table.is_empty() {
-                    true => modif_table.extend_from_slice(&temp_table),
+                    true => modif_table.extend_from_slice(&aligner.mod_table),
                     false => {
                         modif_table
                             .iter_mut()
-                            .zip(temp_table.iter())
+                            .zip(aligner.mod_table.iter())
                             .for_each(|(x, y)| *x += y);
                     }
                 }
@@ -881,12 +712,12 @@ pub mod test {
             let prof = crate::gen_seq::PROFILE;
             let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
             let (_dist, ops) = edit_dist_base_ops(&xs, &ys);
-            let mut mod_table = Vec::new();
             let mut aligner = Aligner::with_capacity(xs.len(), radius);
-            {
+            let mod_table = {
                 let mut ops = ops.clone();
-                aligner.align(&xs, &ys, radius, &mut ops, &mut mod_table);
-            }
+                aligner.align(&xs, &ys, radius, &mut ops);
+                aligner.mod_table
+            };
             // Mutation.
             for j in 0..xs.len() {
                 let seek = j * NUM_ROW;
