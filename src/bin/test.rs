@@ -12,23 +12,46 @@ fn main() {
         let xslen = rng.gen::<usize>() % 100 + 20;
         let xs = kiley::gen_seq::generate_seq(&mut rng, xslen);
         let prof = kiley::gen_seq::PROFILE;
-        let yss: Vec<_> = (0..30)
-            .map(|_| kiley::gen_seq::introduce_randomness(&xs, &mut rng, &prof))
-            .collect();
-        let template = kiley::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
-        let consed = polish_until_converge(&template, &yss, radius);
-        let sum: u32 = yss
-            .iter()
-            .map(|ys| kiley::bialignment::edit_dist(&consed, ys))
-            .sum();
-        let dist = kiley::bialignment::edit_dist(&xs, &consed);
-        let prev = kiley::bialignment::edit_dist(&xs, &template);
-        eprintln!("RESULT\t{}\t{}\t{}\t{}", i, prev, dist, sum);
+        let ys = kiley::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+        let (g_lk, g_banded_lk) = {
+            use kiley::gphmm::*;
+            let hmm = GPHMM::<Cond>::new_three_state(0.8, 0.05, 0.15, 0.95);
+            let lk = hmm.likelihood(&xs, &ys);
+            let b_lk = hmm.likelihood_banded(&xs, &ys, radius).unwrap();
+            (lk, b_lk)
+        };
+        let (n_lk, n_banded_lk) = {
+            let gap_output = [(4f64).recip(); 4];
+            let (mat, mism) = (0.95, 0.05 / 3f64);
+            let mut match_output = [[mism; 4]; 4];
+            for i in 0..4 {
+                match_output[i][i] = mat;
+            }
+            let quit_prob = 0.001;
+            let hmm =
+                kiley::hmm::PHMM::as_reversible(0.8, 0.15, &gap_output, &match_output, quit_prob);
+            let naive = hmm.likelihood(&xs, &ys).1;
+            let banded = hmm.likelihood_banded(&xs, &ys, radius).unwrap().1;
+            (naive, banded)
+        };
+        let banded_lk = {
+            let mat = (0.8, 0.1, 0.1);
+            let ins = (0.8, 0.15, 0.05);
+            let del = (0.85, 0.15);
+            let mut emission = [0.05 / 3f64; 16];
+            for i in 0..4 {
+                emission[i * 4 + i] = 0.95;
+            }
+            let hmm = kiley::hmm::guided::PairHiddenMarkovModel::new(mat, ins, del, &emission);
+            hmm.likelihood(&xs, &ys, radius)
+        };
+        eprintln!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            i, g_lk, g_banded_lk, n_lk, n_banded_lk, banded_lk
+        );
     }
-    panic!();
 }
 
-// use kiley::gphmm::*;
 // use std::io::{BufRead, BufReader};
 // fn main() -> std::io::Result<()> {
 //     env_logger::init();

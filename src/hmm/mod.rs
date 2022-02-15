@@ -139,7 +139,7 @@ impl PHMM {
     ) -> Self {
         assert!(mat.is_sign_positive());
         assert!(gap_ext.is_sign_positive());
-        assert!(mat + gap_ext < 1f64);
+        assert!(mat + gap_ext <= 1f64);
         let gap_open = (1f64 - mat) / 2f64;
         let gap_switch = 1f64 - gap_ext - mat;
         // let alive_prob = 1f64 - quit_prob;
