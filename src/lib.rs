@@ -691,10 +691,6 @@ fn polish_multiple(chunks: &[(&[u8], Vec<&[u8]>)], config: &PolishConfig<Cond>) 
                 warn!("CHUNK\tReached max cycle\t{}\t{}", i, config.seed);
                 let draft = String::from_utf8(d.clone().into()).unwrap();
                 warn!("CHUNK\tREF\t{}\t{}\t{}", draft.len(), orig, draft);
-                // for q in qs.iter() {
-                //     let query = String::from_utf8(q.clone().into()).unwrap();
-                //     warn!("CHUNK\tQUERY\t{}\t{}", q.len(), query);
-                // }
                 break;
             }
         }

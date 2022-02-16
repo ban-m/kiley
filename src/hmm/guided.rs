@@ -1,3 +1,4 @@
+use crate::bialignment::guided::re_fill_fill_range;
 use crate::dptable::DPTable;
 use crate::op::Op;
 
@@ -139,17 +140,24 @@ impl PairHiddenMarkovModel {
     pub fn align(&self, rs: &[u8], qs: &[u8], radius: usize) -> (f64, Vec<Op>) {
         let mut ops = bootstrap_ops(rs.len(), qs.len());
         let mut memory = Memory::with_capacity(rs.len(), radius);
-        memory
-            .fill_ranges
-            .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
-        use crate::bialignment::guided::re_fill_fill_range;
-        re_fill_fill_range(qs.len(), rs.len(), &ops, radius, &mut memory.fill_ranges);
-        memory.initialize();
-        let lk = self.update_aln_path(&mut memory, rs, qs, &mut ops);
+        let lk = self.update_aln_path(&mut memory, rs, qs, radius, &mut ops);
         assert!(lk <= 0.0, "{},{:?}", lk, self);
         (lk, ops)
     }
-    fn update_aln_path(&self, memory: &mut Memory, rs: &[u8], qs: &[u8], ops: &mut Vec<Op>) -> f64 {
+    fn update_aln_path(
+        &self,
+        memory: &mut Memory,
+        rs: &[u8],
+        qs: &[u8],
+        radius: usize,
+        ops: &mut Vec<Op>,
+    ) -> f64 {
+        memory.fill_ranges.clear();
+        memory
+            .fill_ranges
+            .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
+        re_fill_fill_range(qs.len(), rs.len(), &ops, radius, &mut memory.fill_ranges);
+        memory.initialize();
         self.fill_viterbi(memory, rs, qs);
         ops.clear();
         let mut qpos = qs.len();
@@ -633,7 +641,6 @@ impl PairHiddenMarkovModel {
         radius: usize,
         ops: &mut Vec<Op>,
     ) -> f64 {
-        use crate::bialignment::guided::re_fill_fill_range;
         memory.fill_ranges.clear();
         memory
             .fill_ranges
@@ -652,14 +659,22 @@ impl PairHiddenMarkovModel {
             (mat + del + ins).ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
         };
         assert!((lk - lk2).abs() < 0.0001, "{},{}", lk, lk2,);
-        memory.initialize();
-        self.update_aln_path(memory, rs, qs, ops);
         lk
     }
     pub fn likelihood(&self, rs: &[u8], qs: &[u8], radius: usize) -> f64 {
         let mut memory = Memory::with_capacity(rs.len(), radius);
-        let mut ops = bootstrap_ops(rs.len(), qs.len());
-        self.update(&mut memory, rs, qs, radius, &mut ops)
+        let ops = bootstrap_ops(rs.len(), qs.len());
+        memory.fill_ranges.clear();
+        memory
+            .fill_ranges
+            .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
+        re_fill_fill_range(qs.len(), rs.len(), &ops, radius, &mut memory.fill_ranges);
+        memory.initialize();
+        self.fill_pre_dp(&mut memory, rs, qs);
+        let mat = memory.pre_mat.get(qs.len(), rs.len());
+        let del = memory.pre_del.get(qs.len(), rs.len());
+        let ins = memory.pre_ins.get(qs.len(), rs.len());
+        (mat + del + ins).ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
     }
     pub fn modification_table(
         &self,
@@ -691,6 +706,7 @@ impl PairHiddenMarkovModel {
                 .iter_mut()
                 .zip(xs.iter())
                 .map(|(ops, seq)| {
+                    self.update_aln_path(&mut memory, &template, seq.borrow(), radius, ops);
                     let lk = self.update(&mut memory, &template, seq.borrow(), radius, ops);
                     match modif_table.is_empty() {
                         true => modif_table.extend_from_slice(&memory.mod_table),
@@ -704,9 +720,8 @@ impl PairHiddenMarkovModel {
                     lk
                 })
                 .sum();
-            match polish_guided(&template, &modif_table, lk, inactive) {
-                Some(next) => template = next,
-                None => break,
+            if !polish_guided(&mut template, &modif_table, lk, inactive) {
+                break;
             }
         }
         template
@@ -734,14 +749,7 @@ impl PairHiddenMarkovModel {
             let mut next = PairHiddenMarkovModel::zeros();
             for (ops, seq) in ops.iter_mut().zip(xs.iter()) {
                 let qs = seq.borrow();
-                use crate::bialignment::guided::re_fill_fill_range;
-                memory.fill_ranges.clear();
-                memory
-                    .fill_ranges
-                    .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
-                re_fill_fill_range(qs.len(), rs.len(), &ops, radius, &mut memory.fill_ranges);
-                memory.initialize();
-                self.update_aln_path(&mut memory, rs, qs, ops);
+                self.update_aln_path(&mut memory, rs, qs, radius, ops);
                 self.fill_pre_dp(&mut memory, rs, qs);
                 self.fill_post_dp(&mut memory, rs, qs);
                 self.register(&memory, rs, qs, radius, &mut next);
@@ -839,36 +847,47 @@ fn bootstrap_ops(rlen: usize, qlen: usize) -> Vec<Op> {
     ops
 }
 
+// Minimum required improvement on the likelihood.
+// In a desirable case, it is exactly zero, but as a matter of fact,
+// the likelihood is sometimes wobble between very small values,
+// so this "min-requirement" is nessesarry.
+const MIN_UP: f64 = 0.00001;
+
 fn polish_guided(
-    template: &[u8],
+    template: &mut Vec<u8>,
     modif_table: &[f64],
     current_lk: f64,
     inactive: usize,
-) -> Option<Vec<u8>> {
-    let mut improved = Vec::with_capacity(template.len() * 11 / 10);
+) -> bool {
+    let orig_len = template.len();
+    // let mut improved = Vec::with_capacity(template.len() * 11 / 10);
+    let mut is_updated = false;
     let mut modif_table = modif_table.chunks_exact(NUM_ROW);
     let mut pos = 0;
     while let Some(row) = modif_table.next() {
         let (op, &lk) = row
             .iter()
             .enumerate()
-            .min_by(|x, y| (x.1).partial_cmp(&y.1).unwrap())
+            .max_by(|x, y| (x.1).partial_cmp(&y.1).unwrap())
             .unwrap();
-        if current_lk < lk && pos < template.len() {
+        if current_lk + MIN_UP < lk && pos < orig_len {
+            is_updated = true;
             if op < 4 {
                 // Mutateion.
-                improved.push(b"ACGT"[op]);
+                template.push(b"ACGT"[op]);
                 pos += 1;
             } else if op < 8 {
                 // Insertion before this base.
-                improved.push(b"ACGT"[op - 4]);
-                improved.push(template[pos]);
+                template.push(b"ACGT"[op - 4]);
+                template.push(template[pos]);
                 pos += 1;
             } else if op < 8 + COPY_SIZE {
-                // copy from here to here + 1 + (op - 8) base
+                // copy from here to here + (op - 8) + 1 base
                 let len = (op - 8) + 1;
-                improved.extend(&template[pos..pos + len]);
-                improved.push(template[pos]);
+                for i in pos..pos + len {
+                    template.push(template[i]);
+                }
+                template.push(template[pos]);
                 pos += 1;
             } else if op < NUM_ROW {
                 // Delete from here to here + 1 + (op - 8 - COPY_SIZE).
@@ -878,19 +897,27 @@ fn polish_guided(
             } else {
                 unreachable!()
             }
-            improved.extend(template.iter().skip(pos).take(inactive));
-            pos = (pos + inactive).min(template.len());
+            for i in pos..(pos + inactive).min(orig_len) {
+                template.push(template[i]);
+            }
+            pos = (pos + inactive).min(orig_len);
             (0..inactive).filter_map(|_| modif_table.next()).count();
-        } else if pos < template.len() {
-            improved.push(template[pos]);
+        } else if pos < orig_len {
+            template.push(template[pos]);
             pos += 1;
-        } else if current_lk < lk && 4 <= op && op < 8 {
+        } else if current_lk + MIN_UP < lk && 4 <= op && op < 8 {
             // Here, we need to consider the last insertion...
-            improved.push(b"ACGT"[op - 4]);
+            is_updated = true;
+            template.push(b"ACGT"[op - 4]);
         }
     }
-    assert_eq!(pos, template.len());
-    (improved != template).then(|| improved)
+    assert_eq!(pos, orig_len);
+    let mut idx = 0;
+    template.retain(|_| {
+        idx += 1;
+        orig_len < idx
+    });
+    is_updated
 }
 
 #[cfg(test)]
@@ -1090,6 +1117,43 @@ pub mod tests {
                 let lk = hmm.update(&mut memory, &mod_version, &query, radius, &mut ops);
                 assert!((lk - lk_m).abs() < 1.0001);
                 mod_version.pop();
+            }
+        }
+    }
+    #[test]
+    fn polish_test() {
+        let hmm = PHMM::default();
+        let radius = 50;
+        for seed in 0..10 {
+            let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198 + seed);
+            let template = gen_seq::generate_seq(&mut rng, 70);
+            let diff = gen_seq::introduce_errors(&template, &mut rng, 2, 2, 2);
+            let polished = hmm.polish_until_converge(&diff, &[template.as_slice()], radius);
+            if polished != template {
+                println!("{}", String::from_utf8_lossy(&polished));
+                println!("{}", String::from_utf8_lossy(&template));
+                let prev = crate::bialignment::edit_dist(&template, &diff);
+                let now = crate::bialignment::edit_dist(&template, &polished);
+                println!("{},{}", prev, now);
+                panic!()
+            }
+        }
+        for seed in 0..10 {
+            let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198 + seed);
+            let template = gen_seq::generate_seq(&mut rng, 70);
+            let diff = gen_seq::introduce_errors(&template, &mut rng, 2, 2, 2);
+            let profile = gen_seq::PROFILE;
+            let seqs: Vec<_> = (0..20)
+                .map(|_| gen_seq::introduce_randomness(&template, &mut rng, &profile))
+                .collect();
+            let polished = hmm.polish_until_converge(&diff, &seqs, radius);
+            if polished != template {
+                println!("{}", String::from_utf8_lossy(&polished));
+                println!("{}", String::from_utf8_lossy(&template));
+                let prev = crate::bialignment::edit_dist(&template, &diff);
+                let now = crate::bialignment::edit_dist(&template, &polished);
+                println!("{},{}", prev, now);
+                panic!()
             }
         }
     }
