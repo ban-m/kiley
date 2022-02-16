@@ -14,7 +14,7 @@ pub mod gphmm;
 pub use op::recover;
 mod op;
 use gphmm::{Cond, HMMType, GPHMM};
-use op::Op;
+pub use op::Op;
 use rand::seq::*;
 use rand::Rng;
 use rand::SeedableRng;

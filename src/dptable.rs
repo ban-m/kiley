@@ -24,6 +24,12 @@ impl<T: Copy> DPTable<T> {
             _ => self.upperbound,
         }
     }
+    pub fn get_mut(&mut self, i: usize, j: usize) -> Option<&mut T> {
+        match self.offsets.get(i) {
+            Some(&(ofs, s, e)) if (s..e).contains(&j) => self.mem.get_mut(ofs + j - s),
+            _ => None,
+        }
+    }
     // Strip line from [i][j..j+len].
     // It would be truncated appropriately with respect to the band in it.
     pub fn get_line(&self, i: usize, j_start: usize, len: usize) -> &[T] {

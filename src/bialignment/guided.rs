@@ -371,7 +371,7 @@ fn fill_mod_table(
                 .skip(row_start + 8)
                 .take(COPY_SIZE)
                 .enumerate()
-                .filter(|(c, _)| j + c + 1 <= rs.len())
+                .filter(|(c, _)| j + c < rs.len())
                 .for_each(|(len, x)| *x = (*x).min(pre.get(i, j + len + 1) + post_sta));
             // Deleting the j..j+d bases...
             mod_table
@@ -379,7 +379,7 @@ fn fill_mod_table(
                 .skip(row_start + 8 + COPY_SIZE)
                 .take(DEL_SIZE)
                 .enumerate()
-                .filter(|(d, _)| j + d + 1 <= rs.len())
+                .filter(|(d, _)| j + d < rs.len())
                 .for_each(|(len, x)| *x = (*x).min(pre_mat + post.get(i, j + len + 1)));
         }
     }
