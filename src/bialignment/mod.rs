@@ -1032,7 +1032,6 @@ pub fn polish_by_focused_banded<T: std::borrow::Borrow<PadSeq>>(
             }
         }
         windows.push((start, end));
-        // debug!("Window:{:?}", windows);
         let windows: Vec<_> = windows
             .iter()
             .flat_map(|&(s, e): &(usize, usize)| {
@@ -1053,10 +1052,7 @@ pub fn polish_by_focused_banded<T: std::borrow::Borrow<PadSeq>>(
                 }
             })
             .collect();
-        // debug!("Window:{:?}", windows);
         let polished = polish_in_windows(template, queries, &alignments, &windows);
-        // let end2 = std::time::Instant::now();
-        // debug!("Windowed:{}", (end2 - profiled).as_millis());
         (polished, current_edit_distance)
     })
 }

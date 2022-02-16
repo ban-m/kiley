@@ -525,31 +525,35 @@ fn bootstrap_ops(rlen: usize, qlen: usize) -> Vec<Op> {
 }
 
 fn polish_guided(
-    template: &[u8],
+    template: &mut Vec<u8>,
     modif_table: &[u32],
     current_dist: u32,
     inactive: usize,
-) -> Option<Vec<u8>> {
-    let mut improved = Vec::with_capacity(template.len() * 11 / 10);
+) -> bool {
+    let orig_len = template.len();
+    let mut is_updated = false;
     let mut modif_table = modif_table.chunks_exact(NUM_ROW);
     let mut pos = 0;
     while let Some(row) = modif_table.next() {
         let (op, &dist) = row.iter().enumerate().min_by_key(|x| x.1).unwrap();
-        if dist < current_dist && pos < template.len() {
+        if dist < current_dist && pos < orig_len {
+            is_updated = true;
             if op < 4 {
                 // Mutateion.
-                improved.push(b"ACGT"[op]);
+                template.push(b"ACGT"[op]);
                 pos += 1;
             } else if op < 8 {
                 // Insertion before this base.
-                improved.push(b"ACGT"[op - 4]);
-                improved.push(template[pos]);
+                template.push(b"ACGT"[op - 4]);
+                template.push(template[pos]);
                 pos += 1;
             } else if op < 8 + COPY_SIZE {
                 // copy from here to here + 1 + (op - 8) base
                 let len = (op - 8) + 1;
-                improved.extend(&template[pos..pos + len]);
-                improved.push(template[pos]);
+                for i in pos..(pos + len).min(orig_len) {
+                    template.push(template[i]);
+                }
+                template.push(template[pos]);
                 pos += 1;
             } else if op < NUM_ROW {
                 // Delete from here to here + 1 + (op - 8 - COPY_SIZE).
@@ -559,19 +563,26 @@ fn polish_guided(
             } else {
                 unreachable!()
             }
-            improved.extend(template.iter().skip(pos).take(inactive));
-            pos = (pos + inactive).min(template.len());
+            for i in pos..(pos + inactive).min(orig_len) {
+                template.push(template[i]);
+            }
+            pos = (pos + inactive).min(orig_len);
             (0..inactive).filter_map(|_| modif_table.next()).count();
-        } else if pos < template.len() {
-            improved.push(template[pos]);
+        } else if pos < orig_len {
+            template.push(template[pos]);
             pos += 1;
         } else if dist < current_dist && 4 <= op && op < 8 {
             // Here, we need to consider the last insertion...
-            improved.push(b"ACGT"[op - 4]);
+            is_updated = true;
+            template.push(b"ACGT"[op - 4]);
         }
     }
-    assert_eq!(pos, template.len());
-    (improved != template).then(|| improved)
+    let mut idx = 0;
+    template.retain(|_| {
+        idx += 1;
+        orig_len < idx
+    });
+    is_updated
 }
 
 pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(
@@ -606,9 +617,8 @@ pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(
                 dist
             })
             .sum();
-        match polish_guided(&template, &modif_table, dist, inactive) {
-            Some(next) => template = next,
-            None => break,
+        if !polish_guided(&mut template, &modif_table, dist, inactive) {
+            break;
         }
     }
     template
