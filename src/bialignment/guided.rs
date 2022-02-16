@@ -409,7 +409,7 @@ impl Aligner {
         self.fill_ranges.clear();
         self.fill_ranges
             .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
-        re_fill_fill_range(qs.len(), rs.len(), &ops, radius, &mut self.fill_ranges);
+        re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut self.fill_ranges);
         let upperbound = (rs.len() + qs.len() + 3) as u32;
         self.pre_dp.initialize(upperbound, &self.fill_ranges);
         self.post_dp.initialize(upperbound, &self.fill_ranges);
@@ -503,17 +503,20 @@ fn bootstrap_ops(rlen: usize, qlen: usize) -> Vec<Op> {
     let map_coef = rlen as f64 / qlen as f64;
     while qpos < qlen && rpos < rlen {
         let corresp_rpos = (qpos as f64 * map_coef).round() as usize;
-        if corresp_rpos < rpos {
-            // rpos is too fast. Move qpos only.
-            qpos += 1;
-            ops.push(Op::Ins);
-        } else if corresp_rpos == rpos {
-            qpos += 1;
-            rpos += 1;
-            ops.push(Op::Match);
-        } else {
-            rpos += 1;
-            ops.push(Op::Del);
+        match corresp_rpos.cmp(&rpos) {
+            std::cmp::Ordering::Less => {
+                qpos += 1;
+                ops.push(Op::Ins);
+            }
+            std::cmp::Ordering::Equal => {
+                qpos += 1;
+                rpos += 1;
+                ops.push(Op::Match);
+            }
+            std::cmp::Ordering::Greater => {
+                rpos += 1;
+                ops.push(Op::Del);
+            }
         }
     }
     ops.extend(std::iter::repeat(Op::Ins).take(qlen - qpos));

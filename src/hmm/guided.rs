@@ -156,50 +156,40 @@ impl PairHiddenMarkovModel {
         memory
             .fill_ranges
             .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
-        re_fill_fill_range(qs.len(), rs.len(), &ops, radius, &mut memory.fill_ranges);
+        re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut memory.fill_ranges);
         memory.initialize();
         self.fill_viterbi(memory, rs, qs);
         ops.clear();
         let mut qpos = qs.len();
-        let mut rpos = memory.fill_ranges.last().unwrap().1 - 1;
+        let mut rpos = rs.len();
         assert_eq!(rpos, rs.len());
         let (mut state, score) = {
-            let mat = memory.pre_mat.get(qpos, rpos);
-            let ins = memory.pre_ins.get(qpos, rpos);
-            let del = memory.pre_del.get(qpos, rpos);
+            let (mat, ins, del) = memory.pre.get(qpos, rpos);
             if ins <= mat && del <= mat {
                 (State::Match, mat)
             } else if ins <= del && mat <= del {
                 (State::Del, del)
             } else {
-                assert!(del <= ins && mat <= ins);
+                assert!(del <= ins && mat <= ins, "{},{},{}", mat, ins, del);
                 (State::Ins, ins)
             }
         };
         while 0 < qpos && 0 < rpos {
             let (r, q) = (rs[rpos - 1], qs[qpos - 1]);
+            let (prev_mat, prev_ins, prev_del) = memory.pre.get(qpos, rpos);
             match state {
                 State::Match => {
-                    let prev_lk = memory.pre_mat.get(qpos, rpos) * memory.pre_scl[qpos];
-                    let mat_mat =
-                        memory.pre_mat.get(qpos - 1, rpos - 1) * self.mat_mat * self.obs(r, q);
-                    let del_mat =
-                        memory.pre_del.get(qpos - 1, rpos - 1) * self.del_mat * self.obs(r, q);
-                    let ins_mat =
-                        memory.pre_ins.get(qpos - 1, rpos - 1) * self.ins_mat * self.obs(r, q);
+                    let prev_lk = prev_mat * memory.pre_scl[qpos];
+                    let (mat, ins, del) = memory.pre.get(qpos - 1, rpos - 1);
+                    let mat_mat = mat * self.mat_mat * self.obs(r, q);
+                    let del_mat = del * self.del_mat * self.obs(r, q);
+                    let ins_mat = ins * self.ins_mat * self.obs(r, q);
                     state = if same(prev_lk, mat_mat) {
                         State::Match
                     } else if same(prev_lk, ins_mat) {
                         State::Ins
                     } else {
-                        assert!(
-                            same(prev_lk, del_mat),
-                            "{},{},{},{}",
-                            prev_lk,
-                            ins_mat,
-                            mat_mat,
-                            del_mat,
-                        );
+                        assert!(same(prev_lk, del_mat),);
                         State::Del
                     };
                     qpos -= 1;
@@ -210,13 +200,14 @@ impl PairHiddenMarkovModel {
                     }
                 }
                 State::Ins => {
-                    let prev_lk = memory.pre_ins.get(qpos, rpos) * memory.pre_scl[qpos];
-                    let mat_ins = memory.pre_mat.get(qpos - 1, rpos) * self.mat_ins * self.ins(q);
-                    let ins_ins = memory.pre_ins.get(qpos - 1, rpos) * self.ins_ins * self.ins(q);
+                    let prev_lk = prev_ins * memory.pre_scl[qpos];
+                    let (mat, ins, _) = memory.pre.get(qpos - 1, rpos);
+                    let mat_ins = mat * self.mat_ins * self.ins(q);
+                    let ins_ins = ins * self.ins_ins * self.ins(q);
                     state = if same(prev_lk, mat_ins) {
                         State::Match
                     } else {
-                        assert!(same(prev_lk, ins_ins));
+                        assert!(same(prev_lk, ins_ins),);
                         State::Ins
                     };
                     qpos -= 1;
@@ -224,10 +215,11 @@ impl PairHiddenMarkovModel {
                 }
                 State::Del => {
                     // No scaling factor needed.
-                    let prev_lk = memory.pre_del.get(qpos, rpos);
-                    let mat_del = memory.pre_mat.get(qpos, rpos - 1) * self.mat_del * self.del(r);
-                    let del_del = memory.pre_del.get(qpos, rpos - 1) * self.del_del * self.del(r);
-                    let ins_del = memory.pre_ins.get(qpos, rpos - 1) * self.ins_del * self.del(r);
+                    let prev_lk = prev_del;
+                    let (mat, ins, del) = memory.pre.get(qpos, rpos - 1);
+                    let mat_del = mat * self.mat_del * self.del(r);
+                    let ins_del = ins * self.ins_del * self.del(r);
+                    let del_del = del * self.del_del * self.del(r);
                     state = if same(prev_lk, mat_del) {
                         State::Match
                     } else if same(prev_lk, del_del) {
@@ -252,60 +244,59 @@ impl PairHiddenMarkovModel {
         // 1. Initialize.
         {
             let mut del_cum = self.mat_del / self.del_del;
+            memory.pre.set(0, 0, (1f64, 0f64, 0f64));
             for j in 1..rs.len() + 1 {
                 del_cum *= self.del(rs[j - 1]) * self.del_del;
-                memory.pre_mat.set(0, j, 0f64);
-                memory.pre_ins.set(0, j, 0f64);
-                memory.pre_del.set(0, j, del_cum);
+                memory.pre.set(0, j, (0f64, 0f64, del_cum));
             }
-            memory.pre_mat.set(0, 0, 1f64);
-            memory.pre_del.set(0, 0, 0f64);
-            memory.pre_ins.set(0, 0, 0f64);
             memory.pre_scl.push(1f64);
         }
         // 2. Recur.
         for (i, &(start, end)) in memory.fill_ranges.iter().enumerate().skip(1) {
             let q = qs[i - 1];
             // Ins & Matches first.
+            // Scaling parameter.
+            let mut sum = 0f64;
             if start == 0 {
-                memory.pre_mat.set(i, 0, 0f64);
-                memory.pre_del.set(i, 0, 0f64);
-                let mat_ins = memory.pre_mat.get(i - 1, 0) * self.mat_ins * self.ins(q);
-                let ins_ins = memory.pre_ins.get(i - 1, 0) * self.ins_ins * self.ins(q);
-                memory.pre_ins.set(i, 0, mat_ins.max(ins_ins));
+                let (mat, ins, _) = memory.pre.get(i - 1, 0);
+                let mat_ins = mat * self.mat_ins * self.ins(q);
+                let ins_ins = ins * self.ins_ins * self.ins(q);
+                memory.pre.set(i, 0, (0f64, mat_ins.max(ins_ins), 0f64));
+                sum += mat_ins.max(ins_ins);
             }
             for j in start.max(1)..end {
                 let r = rs[j - 1];
-                let mat = (memory.pre_mat.get(i - 1, j - 1) * self.mat_mat)
-                    .max(memory.pre_del.get(i - 1, j - 1) * self.del_mat)
-                    .max(memory.pre_ins.get(i - 1, j - 1) * self.ins_mat);
-                memory.pre_mat.set(i, j, mat * self.obs(r, q));
-                let ins = (memory.pre_mat.get(i - 1, j) * self.mat_ins)
-                    .max(memory.pre_ins.get(i - 1, j) * self.ins_ins);
-                memory.pre_ins.set(i, j, ins * self.ins(q));
+                let (mat, ins, del) = memory.pre.get(i - 1, j - 1);
+                let now_mat = (mat * self.mat_mat)
+                    .max(del * self.del_mat)
+                    .max(ins * self.ins_mat)
+                    * self.obs(r, q);
+                let (mat, ins, _) = memory.pre.get(i - 1, j);
+                let now_ins = (mat * self.mat_ins).max(ins * self.ins_ins) * self.ins(q);
+                memory.pre.set(i, j, (now_mat, now_ins, 0f64));
+                sum += now_mat + now_ins;
             }
-            // Scaling .
-            let sum: f64 = (start..end)
-                .map(|j| memory.pre_mat.get(i, j) + memory.pre_ins.get(i, j))
-                .sum();
             memory.pre_scl.push(sum);
-            for j in start..end {
-                if let Some(mat) = memory.pre_mat.get_mut(i, j) {
-                    *mat /= sum;
-                }
-                if let Some(ins) = memory.pre_ins.get_mut(i, j) {
-                    *ins /= sum;
-                }
+            if start == 0 {
+                let slot = memory.pre.get_mut(i, 0).unwrap();
+                slot.0 /= sum;
+                slot.1 /= sum;
             }
-            // Deletion.
+            // Scaling and deletion.
             for j in start.max(1)..end {
                 let r = rs[j - 1];
-                let del = (memory.pre_mat.get(i, j - 1) * self.mat_del)
-                    .max(memory.pre_ins.get(i, j - 1) * self.ins_del)
-                    .max(memory.pre_del.get(i, j - 1) * self.del_del);
-                memory.pre_del.set(i, j, del * self.del(r));
+                let (mat, ins, del) = memory.pre.get(i, j - 1);
+                let del = (mat * self.mat_del)
+                    .max(ins * self.ins_del)
+                    .max(del * self.del_del);
+                if let Some((m, i, d)) = memory.pre.get_mut(i, j) {
+                    *m /= sum;
+                    *i /= sum;
+                    *d = del * self.del(r);
+                }
             }
         }
+        assert_eq!(memory.pre_scl.len(), qs.len() + 1);
     }
     fn fill_pre_dp(&self, memory: &mut Memory, rs: &[u8], qs: &[u8]) {
         assert!(memory.pre_scl.is_empty());
@@ -314,58 +305,50 @@ impl PairHiddenMarkovModel {
             let mut del_cum = self.mat_del / self.del_del;
             for j in 1..rs.len() + 1 {
                 del_cum *= self.del(rs[j - 1]) * self.del_del;
-                memory.pre_mat.set(0, j, 0f64);
-                memory.pre_ins.set(0, j, 0f64);
-                memory.pre_del.set(0, j, del_cum);
+                memory.pre.set(0, j, (0f64, 0f64, del_cum));
             }
-            memory.pre_mat.set(0, 0, 1f64);
-            memory.pre_del.set(0, 0, 0f64);
-            memory.pre_ins.set(0, 0, 0f64);
+            memory.pre.set(0, 0, (1f64, 0f64, 0f64));
             memory.pre_scl.push(1f64);
         }
         // 2. Recur
         for (i, &(start, end)) in memory.fill_ranges.iter().enumerate().skip(1) {
             let q = qs[i - 1];
+            // Scaling
+            let mut sum = 0f64;
             if start == 0 {
-                let mat_ins = memory.pre_mat.get(i - 1, 0) * self.mat_ins;
-                let ins_ins = memory.pre_ins.get(i - 1, 0) * self.ins_ins;
-                memory.pre_ins.set(i, 0, (mat_ins + ins_ins) * self.ins(q));
-                memory.pre_mat.set(i, 0, 0f64);
-                memory.pre_del.set(i, 0, 0f64);
+                let (mat, ins, _) = memory.pre.get(i - 1, 0);
+                let ins = (mat * self.mat_ins + ins * self.ins_ins) * self.ins(q);
+                memory.pre.set(i, 0, (0f64, ins, 0f64));
+                sum += ins;
             }
             // Match/Insertion first.
             for j in start.max(1)..end {
                 let r = rs[j - 1];
-                let mat_mat = memory.pre_mat.get(i - 1, j - 1) * self.mat_mat;
-                let del_mat = memory.pre_del.get(i - 1, j - 1) * self.del_mat;
-                let ins_mat = memory.pre_ins.get(i - 1, j - 1) * self.ins_mat;
-                let lk = (mat_mat + del_mat + ins_mat) * self.obs(r, q);
-                memory.pre_mat.set(i, j, lk);
-                let mat_ins = memory.pre_mat.get(i - 1, j) * self.mat_ins;
-                let ins_ins = memory.pre_ins.get(i - 1, j) * self.ins_ins;
-                memory.pre_ins.set(i, j, (mat_ins + ins_ins) * self.ins(q));
+                let (mat_mat, ins_mat, del_mat) = memory.pre.get(i - 1, j - 1);
+                let mat = mat_mat * self.mat_mat + ins_mat * self.ins_mat + del_mat * self.del_mat;
+                let mat = mat * self.obs(r, q);
+                let (mat_ins, ins_ins, _) = memory.pre.get(i - 1, j);
+                let ins = (mat_ins * self.mat_ins + ins_ins * self.ins_ins) * self.ins(q);
+                memory.pre.set(i, j, (mat, ins, 0f64));
+                sum += mat + ins;
             }
-            // Scaling
-            let sum: f64 = (start..end)
-                .map(|j| memory.pre_mat.get(i, j) + memory.pre_ins.get(i, j))
-                .sum();
             memory.pre_scl.push(sum);
-            for j in start..end {
-                if let Some(mat) = memory.pre_mat.get_mut(i, j) {
-                    *mat /= sum;
-                }
-                if let Some(ins) = memory.pre_ins.get_mut(i, j) {
-                    *ins /= sum;
-                }
+            if start == 0 {
+                let (m, i, _) = memory.pre.get_mut(i, 0).unwrap();
+                *m /= sum;
+                *i /= sum;
             }
             // deletion last.
             for j in start.max(1)..end {
                 let r = rs[j - 1];
-                let mat_del = memory.pre_mat.get(i, j - 1) * self.mat_del;
-                let del_del = memory.pre_del.get(i, j - 1) * self.del_del;
-                let ins_del = memory.pre_ins.get(i, j - 1) * self.ins_del;
-                let lk = (mat_del + ins_del + del_del) * self.del(r);
-                memory.pre_del.set(i, j, lk);
+                let (mat_del, ins_del, del_del) = memory.pre.get(i, j - 1);
+                let del = mat_del * self.mat_del + ins_del * self.ins_del + del_del * self.del_del;
+                let del = del * self.del(r);
+                if let Some((m, i, d)) = memory.pre.get_mut(i, j) {
+                    *m /= sum;
+                    *i /= sum;
+                    *d = del;
+                }
             }
         }
         assert_eq!(memory.pre_scl.len(), qs.len() + 1);
@@ -374,69 +357,54 @@ impl PairHiddenMarkovModel {
         assert!(memory.post_scl.is_empty());
         // 1. Initialization
         {
-            let mut del_acc = 1f64;
+            let mut acc = 1f64;
             for j in (0..rs.len()).rev() {
-                del_acc *= self.del(rs[j]);
-                memory.post_mat.set(qs.len(), j, self.mat_del * del_acc);
-                memory.post_ins.set(qs.len(), j, self.ins_del * del_acc);
-                del_acc *= self.del_del;
-                memory.post_del.set(qs.len(), j, del_acc);
+                acc *= self.del(rs[j]);
+                let elm = (self.mat_del * acc, self.ins_del * acc, self.del_del * acc);
+                memory.post.set(qs.len(), j, elm);
+                acc *= self.del_del;
             }
-            memory.post_del.set(qs.len(), rs.len(), 1f64);
-            memory.post_mat.set(qs.len(), rs.len(), 1f64);
-            memory.post_ins.set(qs.len(), rs.len(), 1f64);
+            memory.post.set(qs.len(), rs.len(), (1f64, 1f64, 1f64));
             memory.post_scl.push(1f64);
         }
         // 2. Recur
         for (i, &(start, end)) in memory.fill_ranges.iter().enumerate().rev().skip(1) {
             let q = qs[i];
+            let mut sum = 0f64;
             if end == rs.len() + 1 {
-                let after = self.ins(q) * memory.post_ins.get(i + 1, rs.len());
-                memory.post_mat.set(i, rs.len(), self.mat_ins * after);
-                memory.post_del.set(i, rs.len(), 0f64);
-                memory.post_ins.set(i, rs.len(), self.ins_ins * after);
+                let after = self.ins(q) * memory.post.get(i + 1, rs.len()).1;
+                let elm = (self.mat_ins * after, self.ins_ins * after, 0f64);
+                sum += elm.0 + elm.1 + elm.2;
+                memory.post.set(i, rs.len(), elm);
             }
             // Match/Ins first.
             for j in (start..end.min(rs.len())).rev() {
                 let r = rs[j];
-                let mat = self.obs(r, q) * memory.post_mat.get(i + 1, j + 1);
-                let ins = self.ins(q) * memory.post_ins.get(i + 1, j);
-                memory
-                    .post_mat
-                    .set(i, j, self.mat_mat * mat + self.mat_ins * ins);
-                memory
-                    .post_ins
-                    .set(i, j, self.ins_mat * mat + self.ins_ins * ins);
-                memory.post_del.set(i, j, self.del_mat * mat);
+                let af_mat = self.obs(r, q) * memory.post.get(i + 1, j + 1).0;
+                let af_ins = self.ins(q) * memory.post.get(i + 1, j).1;
+                let mat = self.mat_mat * af_mat + self.mat_ins * af_ins;
+                let ins = self.ins_mat * af_mat + self.ins_ins * af_ins;
+                let del = self.del_mat * af_mat;
+                sum += mat + ins + del;
+                memory.post.set(i, j, (mat, ins, del));
             }
             // Scaling.
-            let sum: f64 = (start..end)
-                .map(|j| memory.post_ins.get(i, j) + memory.post_mat.get(i, j))
-                .sum();
             for j in start..end {
-                if let Some(mat) = memory.post_mat.get_mut(i, j) {
-                    *mat /= sum;
-                }
-                if let Some(ins) = memory.post_ins.get_mut(i, j) {
-                    *ins /= sum;
-                }
-                if let Some(del) = memory.post_del.get_mut(i, j) {
-                    *del /= sum;
+                if let Some((m, i, d)) = memory.post.get_mut(i, j) {
+                    *m /= sum;
+                    *i /= sum;
+                    *d /= sum;
                 }
             }
             memory.post_scl.push(sum);
             // Deletion.
             for j in (start..end.min(rs.len())).rev() {
                 let r = rs[j];
-                let del = self.del(r) * memory.post_del.get(i, j + 1);
-                if let Some(mat) = memory.post_mat.get_mut(i, j) {
-                    *mat += self.mat_del * del;
-                }
-                if let Some(ins) = memory.post_ins.get_mut(i, j) {
-                    *ins += self.ins_del * del;
-                }
-                if let Some(del_m) = memory.post_del.get_mut(i, j) {
-                    *del_m += self.del_del * del;
+                let del = self.del(r) * memory.post.get(i, j + 1).2;
+                if let Some((m, i, d)) = memory.post.get_mut(i, j) {
+                    *m += self.mat_del * del;
+                    *i += self.ins_del * del;
+                    *d += self.del_del * del;
                 }
             }
         }
@@ -467,92 +435,92 @@ impl PairHiddenMarkovModel {
             let len = memory.pre_scl.len();
             (max / len as f64).exp()
         };
+        assert_eq!(memory.post_scl.len(), qs.len() + 1);
+        assert_eq!(memory.pre_scl.len(), qs.len() + 1);
+        assert_eq!(memory.pre_scl.len() + 1, qs.len() + 2);
         // i-> prod_{t=0}^{i} scale[t]/scaling
-        let forward_scl: Vec<_> = memory
-            .pre_scl
-            .iter()
-            .scan(1f64, |acc, &scl| {
-                assert!(0f64 < scl);
-                *acc *= scl / scaling;
-                Some(*acc)
-            })
-            .collect();
+        let forward_scl = {
+            let len = memory.pre_scl.len();
+            let mut acc = 1f64;
+            for i in 0..len {
+                acc *= memory.pre_scl[i] / scaling;
+                memory.pre_scl.push(acc);
+            }
+            &memory.pre_scl[len..]
+        };
         // i -> prod_{t=i}^{N+1} scale[t]/scaling
         let backward_scl = {
-            let mut temp: Vec<_> = memory
-                .post_scl
-                .iter()
-                .rev()
-                .scan(1f64, |acc, &scl| {
-                    assert!(0f64 < scl);
-                    *acc *= scl / scaling;
-                    Some(*acc)
-                })
-                .collect();
-            temp.reverse();
-            temp
+            let len = memory.post_scl.len();
+            let mut acc = 1f64;
+            for i in (0..len).rev() {
+                acc *= memory.post_scl[i] / scaling;
+                memory.post_scl.push(acc);
+            }
+            memory.post_scl[len..].reverse();
+            &memory.post_scl[len..]
         };
         let mut slots = [0f64; 8 + COPY_SIZE + DEL_SIZE];
-        for (i, &(start, end)) in memory.fill_ranges.iter().enumerate().take(qs.len()) {
-            let q = qs[i];
+        for ((i, &(start, end)), &q) in memory.fill_ranges.iter().enumerate().zip(qs.iter()) {
             for j in start..end {
                 slots.iter_mut().for_each(|x| *x = 0f64);
-                {
-                    let post_mat_get =
-                        |i: usize, j: usize| memory.post_mat.get(i, j) * backward_scl[i];
-                    let post_del_get =
-                        |i: usize, j: usize| memory.post_del.get(i, j) * backward_scl[i];
-                    let pre_mat_get =
-                        |i: usize, j: usize| memory.pre_mat.get(i, j) * forward_scl[i];
-                    let pre_del_get =
-                        |i: usize, j: usize| memory.pre_del.get(i, j) * forward_scl[i];
-                    let pre_ins_get =
-                        |i: usize, j: usize| memory.pre_ins.get(i, j) * forward_scl[i];
-                    // Change the j-th base into...
-                    let mutates = b"ACGT".iter().map(|&b| {
-                        let mat = self.obs(b, q) * post_mat_get(i + 1, j + 1) / scaling;
-                        let del = self.del(b) * post_del_get(i, j + 1);
-                        pre_mat_get(i, j) * (self.mat_mat * mat + self.mat_del * del)
-                            + pre_ins_get(i, j) * (self.ins_mat * mat + self.ins_del * del)
-                            + pre_del_get(i, j) * (self.del_mat * mat + self.del_del * del)
+                let (pre_mat, pre_ins, pre_del) = {
+                    let (mat, ins, del) = memory.pre.get(i, j);
+                    let scl = forward_scl[i];
+                    (mat * scl, ins * scl, del * scl)
+                };
+                let post_no_del = memory.post.get(i, j).2 * backward_scl[i];
+                let post_del_del = memory.post.get(i, j + 1).2 * backward_scl[i];
+                let post_mat_mat = memory.post.get(i + 1, j + 1).0 * backward_scl[i + 1] / scaling;
+                let post_ins_mat = memory.post.get(i + 1, j).0 * backward_scl[i + 1] / scaling;
+                let to_mat =
+                    pre_mat * self.mat_mat + pre_del * self.del_mat + pre_ins * self.ins_mat;
+                let to_del =
+                    pre_mat * self.mat_del + pre_del * self.del_del + pre_ins * self.ins_del;
+                b"ACGT".iter().zip(slots.iter_mut()).for_each(|(&b, y)| {
+                    let mat = self.obs(b, q) * post_mat_mat;
+                    let del = self.del(b) * post_del_del;
+                    *y = to_mat * mat + to_del * del;
+                });
+                b"ACGT"
+                    .iter()
+                    .zip(slots.iter_mut().skip(4))
+                    .for_each(|(&b, s)| {
+                        let mat = self.obs(b, q) * post_ins_mat;
+                        let del = self.del(b) * post_no_del;
+                        *s = to_mat * mat + to_del * del;
                     });
-                    // Insert before the j-th base ...
-                    let inserts = b"ACGT".iter().map(|&b| {
-                        let mat = self.obs(b, q) * post_mat_get(i + 1, j) / scaling;
-                        let del = self.del(b) * post_del_get(i, j);
-                        pre_mat_get(i, j) * (self.mat_mat * mat + self.mat_del * del)
-                            + pre_ins_get(i, j) * (self.ins_mat * mat + self.ins_del * del)
-                            + pre_del_get(i, j) * (self.del_mat * mat + self.del_del * del)
+                // Copying the j..j+c bases ...
+                (0..COPY_SIZE)
+                    .filter(|len| j + len < rs.len())
+                    .zip(slots.iter_mut().skip(8))
+                    .for_each(|(len, y)| {
+                        let pos = j + len + 1;
+                        let r = rs[j];
+                        let mat = self.obs(r, q) * post_mat_mat;
+                        let del = self.del(r) * post_del_del;
+                        let (pre_mat, pre_ins, pre_del) = {
+                            let (mat, ins, del) = memory.pre.get(i, pos);
+                            let scl = forward_scl[i];
+                            (mat * scl, ins * scl, del * scl)
+                        };
+                        *y = pre_mat * (self.mat_mat * mat + self.mat_del * del)
+                            + pre_ins * (self.ins_mat * mat + self.ins_del * del)
+                            + pre_del * (self.del_mat * mat + self.del_del * del);
                     });
-                    // Copying the j..j+c bases ...
-                    let copies = (0..COPY_SIZE).map(|len| {
-                        if j + len + 1 <= rs.len() {
-                            let pos = j + len + 1;
-                            let r = rs[j];
-                            let mat = self.obs(r, q) * post_mat_get(i + 1, j + 1) / scaling;
-                            let del = self.del(r) * post_del_get(i, j + 1);
-                            pre_mat_get(i, pos) * (self.mat_mat * mat + self.mat_del * del)
-                                + pre_ins_get(i, pos) * (self.ins_mat * mat + self.ins_del * del)
-                                + pre_del_get(i, pos) * (self.del_mat * mat + self.del_del * del)
-                        } else {
-                            0f64
-                        }
-                    });
-                    // deleting the j..j+d bases..
-                    let deletes = (0..DEL_SIZE).filter(|d| j + d + 1 < rs.len()).map(|len| {
+                // deleting the j..j+d bases..
+                (0..DEL_SIZE)
+                    .filter(|d| j + d + 1 < rs.len())
+                    .zip(slots.iter_mut().skip(8 + COPY_SIZE))
+                    .for_each(|(len, y)| {
                         let post = j + len + 1;
                         let r = rs[post];
-                        let mat = self.obs(r, q) * post_mat_get(i + 1, post + 1) / scaling;
-                        let del = self.del(r) * post_del_get(i, post + 1);
-                        pre_mat_get(i, j) * (self.mat_mat * mat + self.mat_del * del)
-                            + pre_ins_get(i, j) * (self.ins_mat * mat + self.ins_del * del)
-                            + pre_del_get(i, j) * (self.del_mat * mat + self.del_del * del)
+                        let post_mat_mat =
+                            memory.post.get(i + 1, post + 1).0 * backward_scl[i + 1] / scaling;
+                        let mat = self.obs(r, q) * post_mat_mat;
+                        let post_del_del = memory.post.get(i, post + 1).2 * backward_scl[i];
+                        let del = self.del(r) * post_del_del;
+                        *y = to_mat * mat + to_del * del;
                     });
-                    slots
-                        .iter_mut()
-                        .zip(mutates.chain(inserts).chain(copies).chain(deletes))
-                        .for_each(|(x, y)| *x += y);
-                }
                 let row_start = NUM_ROW * j;
                 memory
                     .mod_table
@@ -563,61 +531,67 @@ impl PairHiddenMarkovModel {
             }
         }
         if let Some((start, end)) = memory.fill_ranges.last().copied() {
+            slots.iter_mut().for_each(|x| *x = 0.0);
             let i = memory.fill_ranges.len() - 1;
             for j in start..end {
-                {
-                    let post_del_get =
-                        |i: usize, j: usize| memory.post_del.get(i, j) * backward_scl[i];
-                    let pre_mat_get =
-                        |i: usize, j: usize| memory.pre_mat.get(i, j) * forward_scl[i];
-                    let pre_del_get =
-                        |i: usize, j: usize| memory.pre_del.get(i, j) * forward_scl[i];
-                    let pre_ins_get =
-                        |i: usize, j: usize| memory.pre_ins.get(i, j) * forward_scl[i];
-                    slots.iter_mut().for_each(|x| *x = 0f64);
-                    // Change the j-th base into ...
-                    let mutates = b"ACGT".iter().map(|&b| {
-                        let mat = pre_mat_get(i, j) * self.mat_del;
-                        let del = pre_del_get(i, j) * self.del_del;
-                        let ins = pre_ins_get(i, j) * self.ins_del;
-                        (mat + del + ins) * self.del(b) * post_del_get(i, j + 1)
+                let (pre_mat, pre_ins, pre_del) = {
+                    let (mat, ins, del) = memory.pre.get(i, j);
+                    let scl = forward_scl[i];
+                    (mat * scl, ins * scl, del * scl)
+                };
+                let post_del_del = memory.post.get(i, j + 1).2 * backward_scl[i];
+                let post_no_del = memory.post.get(i, j).2 * backward_scl[i];
+                slots.iter_mut().for_each(|x| *x = 0f64);
+                // Change the j-th base into ...
+                b"ACGT".iter().zip(slots.iter_mut()).for_each(|(&b, y)| {
+                    let mat = pre_mat * self.mat_del;
+                    let del = pre_del * self.del_del;
+                    let ins = pre_ins * self.ins_del;
+                    *y = (mat + del + ins) * post_del_del * self.del(b);
+                });
+                // Insertion before the j-th base ...
+                b"ACGT"
+                    .iter()
+                    .zip(slots.iter_mut().skip(4))
+                    .for_each(|(&b, y)| {
+                        let mat = pre_mat * self.mat_del;
+                        let del = pre_del * self.del_del;
+                        let ins = pre_ins * self.ins_del;
+                        *y = (mat + del + ins) * self.del(b) * post_no_del;
                     });
-                    // Insertion before the j-th base ...
-                    let inserts = b"ACGT".iter().map(|&b| {
-                        let mat = pre_mat_get(i, j) * self.mat_del;
-                        let del = pre_del_get(i, j) * self.del_del;
-                        let ins = pre_ins_get(i, j) * self.ins_del;
-                        (mat + del + ins) * self.del(b) * post_del_get(i, j)
+                // Copying the j..j+c bases....
+                (0..COPY_SIZE)
+                    .filter(|len| j + len < rs.len())
+                    .zip(slots.iter_mut().skip(8))
+                    .for_each(|(len, y)| {
+                        let r = rs[j];
+                        let (pre_mat, pre_ins, pre_del) = {
+                            let (mat, ins, del) = memory.pre.get(i, j + len + 1);
+                            let scl = forward_scl[i];
+                            (mat * scl, ins * scl, del * scl)
+                        };
+                        let mat = pre_mat * self.mat_del;
+                        let del = pre_del * self.del_del;
+                        let ins = pre_ins * self.ins_del;
+                        *y = (mat + del + ins) * self.del(r) * post_del_del;
                     });
-                    // Copying the j..j+c bases....
-                    let copies = (0..COPY_SIZE).map(|len| {
-                        if j + len + 1 <= rs.len() {
-                            let r = rs[j];
-                            let mat = pre_mat_get(i, j + len + 1) * self.mat_del;
-                            let del = pre_del_get(i, j + len + 1) * self.del_del;
-                            let ins = pre_ins_get(i, j + len + 1) * self.ins_del;
-                            (mat + del + ins) * self.del(r) * post_del_get(i, j + 1)
-                        } else {
-                            0f64
-                        }
-                    });
-                    // Deleting the j..j+d bases
-                    let deletes = (0..DEL_SIZE).map(|len| {
+                // Deleting the j..j+d bases
+                (0..DEL_SIZE)
+                    .filter(|len| j + len < rs.len())
+                    .zip(slots.iter_mut().skip(8 + COPY_SIZE))
+                    .for_each(|(len, y)| {
                         let post = j + len + 1;
-                        if let Some(&r) = rs.get(post) {
-                            let mat = pre_mat_get(i, j) * self.mat_del;
-                            let del = pre_del_get(i, j) * self.del_del;
-                            let ins = pre_ins_get(i, j) * self.ins_del;
-                            (mat + del + ins) * self.del(r) * post_del_get(i, post + 1)
-                        } else {
-                            (pre_mat_get(i, j) + pre_del_get(i, j) + pre_ins_get(i, j)) / scaling
-                        }
+                        *y = match rs.get(post) {
+                            Some(&r) => {
+                                let post_del_del = memory.post.get(i, post + 1).2 * backward_scl[i];
+                                let mat = pre_mat * self.mat_del;
+                                let del = pre_del * self.del_del;
+                                let ins = pre_ins * self.ins_del;
+                                (mat + del + ins) * self.del(r) * post_del_del
+                            }
+                            None => (pre_mat + pre_del + pre_ins) / scaling,
+                        };
                     });
-                    slots
-                        .iter_mut()
-                        .zip(mutates.chain(inserts).chain(copies).chain(deletes))
-                        .for_each(|(x, y)| *x += y);
-                }
                 let row_start = NUM_ROW * j;
                 memory
                     .mod_table
@@ -627,7 +601,10 @@ impl PairHiddenMarkovModel {
                     .for_each(|(x, y)| *x += y);
             }
         }
-        let len = (memory.pre_scl.len() + 1) as f64;
+        // let len = (memory.pre_scl.len() + 1) as f64;
+        memory.pre_scl.truncate(qs.len() + 1);
+        memory.post_scl.truncate(qs.len() + 1);
+        let len = (qs.len() + 2) as f64;
         memory
             .mod_table
             .iter_mut()
@@ -639,23 +616,20 @@ impl PairHiddenMarkovModel {
         rs: &[u8],
         qs: &[u8],
         radius: usize,
-        ops: &mut Vec<Op>,
+        ops: &mut [Op],
     ) -> f64 {
         memory.fill_ranges.clear();
         memory
             .fill_ranges
             .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
-        re_fill_fill_range(qs.len(), rs.len(), &ops, radius, &mut memory.fill_ranges);
+        re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut memory.fill_ranges);
         memory.initialize();
         self.fill_pre_dp(memory, rs, qs);
         self.fill_post_dp(memory, rs, qs);
         self.fill_mod_table(memory, rs, qs);
-        let lk =
-            memory.post_mat.get(0, 0).ln() + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>();
+        let lk = memory.post.get(0, 0).0.ln() + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>();
         let lk2 = {
-            let mat = memory.pre_mat.get(qs.len(), rs.len());
-            let del = memory.pre_del.get(qs.len(), rs.len());
-            let ins = memory.pre_ins.get(qs.len(), rs.len());
+            let (mat, ins, del) = memory.pre.get(qs.len(), rs.len());
             (mat + del + ins).ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
         };
         assert!((lk - lk2).abs() < 0.0001, "{},{}", lk, lk2,);
@@ -671,9 +645,7 @@ impl PairHiddenMarkovModel {
         re_fill_fill_range(qs.len(), rs.len(), &ops, radius, &mut memory.fill_ranges);
         memory.initialize();
         self.fill_pre_dp(&mut memory, rs, qs);
-        let mat = memory.pre_mat.get(qs.len(), rs.len());
-        let del = memory.pre_del.get(qs.len(), rs.len());
-        let ins = memory.pre_ins.get(qs.len(), rs.len());
+        let (mat, ins, del) = memory.pre.get(qs.len(), rs.len());
         (mat + del + ins).ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
     }
     pub fn modification_table(
@@ -681,7 +653,7 @@ impl PairHiddenMarkovModel {
         rs: &[u8],
         qs: &[u8],
         radius: usize,
-        ops: &mut Vec<Op>,
+        ops: &mut [Op],
     ) -> Vec<f64> {
         let mut memory = Memory::with_capacity(rs.len(), radius);
         let _lk = self.update(&mut memory, rs, qs, radius, ops);
@@ -781,14 +753,10 @@ impl PairHiddenMarkovModel {
 }
 
 struct Memory {
-    pre_mat: DPTable<f64>,
-    pre_del: DPTable<f64>,
-    pre_ins: DPTable<f64>,
+    pre: DPTable<(f64, f64, f64)>,
+    post: DPTable<(f64, f64, f64)>,
     // Scaling factor.
     pre_scl: Vec<f64>,
-    post_mat: DPTable<f64>,
-    post_del: DPTable<f64>,
-    post_ins: DPTable<f64>,
     post_scl: Vec<f64>,
     fill_ranges: Vec<(usize, usize)>,
     mod_table: Vec<f64>,
@@ -796,29 +764,21 @@ struct Memory {
 
 impl Memory {
     fn with_capacity(rlen: usize, radius: usize) -> Self {
-        let fill_ranges = Vec::with_capacity(rlen * 3);
-        let mod_table = Vec::with_capacity(rlen * 3);
+        let fill_ranges = Vec::with_capacity(radius * rlen * 3);
+        let mod_table = Vec::with_capacity(radius * rlen * 3);
         Self {
             fill_ranges,
             mod_table,
-            pre_mat: DPTable::with_capacity(rlen, radius, 0f64),
-            pre_del: DPTable::with_capacity(rlen, radius, 0f64),
-            pre_ins: DPTable::with_capacity(rlen, radius, 0f64),
-            pre_scl: Vec::with_capacity(3 * rlen / 2),
-            post_mat: DPTable::with_capacity(rlen, radius, 0f64),
-            post_del: DPTable::with_capacity(rlen, radius, 0f64),
-            post_ins: DPTable::with_capacity(rlen, radius, 0f64),
-            post_scl: Vec::with_capacity(3 * rlen / 2),
+            pre: DPTable::with_capacity(rlen, radius, (0f64, 0f64, 0f64)),
+            post: DPTable::with_capacity(rlen, radius, (0f64, 0f64, 0f64)),
+            pre_scl: Vec::with_capacity(5 * rlen / 2),
+            post_scl: Vec::with_capacity(5 * rlen / 2),
         }
     }
     fn initialize(&mut self) {
-        self.pre_mat.initialize(0f64, &self.fill_ranges);
-        self.pre_ins.initialize(0f64, &self.fill_ranges);
-        self.pre_del.initialize(0f64, &self.fill_ranges);
+        self.pre.initialize((0.0, 0.0, 0.0), &self.fill_ranges);
+        self.post.initialize((0.0, 0.0, 0.0), &self.fill_ranges);
         self.pre_scl.clear();
-        self.post_mat.initialize(0f64, &self.fill_ranges);
-        self.post_del.initialize(0f64, &self.fill_ranges);
-        self.post_ins.initialize(0f64, &self.fill_ranges);
         self.post_scl.clear();
     }
 }
@@ -829,17 +789,20 @@ fn bootstrap_ops(rlen: usize, qlen: usize) -> Vec<Op> {
     let map_coef = rlen as f64 / qlen as f64;
     while qpos < qlen && rpos < rlen {
         let corresp_rpos = (qpos as f64 * map_coef).round() as usize;
-        if corresp_rpos < rpos {
-            // rpos is too fast. Move qpos only.
-            qpos += 1;
-            ops.push(Op::Ins);
-        } else if corresp_rpos == rpos {
-            qpos += 1;
-            rpos += 1;
-            ops.push(Op::Match);
-        } else {
-            rpos += 1;
-            ops.push(Op::Del);
+        match corresp_rpos.cmp(&rpos) {
+            std::cmp::Ordering::Less => {
+                qpos += 1;
+                ops.push(Op::Ins);
+            }
+            std::cmp::Ordering::Equal => {
+                qpos += 1;
+                rpos += 1;
+                ops.push(Op::Match);
+            }
+            std::cmp::Ordering::Greater => {
+                rpos += 1;
+                ops.push(Op::Del);
+            }
         }
     }
     ops.extend(std::iter::repeat(Op::Ins).take(qlen - qpos));
@@ -868,7 +831,7 @@ fn polish_guided(
         let (op, &lk) = row
             .iter()
             .enumerate()
-            .max_by(|x, y| (x.1).partial_cmp(&y.1).unwrap())
+            .max_by(|x, y| (x.1).partial_cmp(y.1).unwrap())
             .unwrap();
         if current_lk + MIN_UP < lk && pos < orig_len {
             is_updated = true;
@@ -944,6 +907,13 @@ pub mod tests {
         use Op::*;
         let answer = vec![vec![Match; 2], vec![Del], vec![Match; 4], vec![Del; 9]].concat();
         assert_eq!(ops, answer);
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198);
+        let template = gen_seq::generate_seq(&mut rng, 300);
+        let profile = gen_seq::PROFILE;
+        let hmm = PHMM::default();
+        let radius = 50;
+        let seq = gen_seq::introduce_randomness(&template, &mut rng, &profile);
+        hmm.align(&template, &seq, radius);
     }
     #[test]
     fn likelihood() {

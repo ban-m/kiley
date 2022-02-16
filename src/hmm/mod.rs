@@ -1126,17 +1126,17 @@ impl DPTable {
         let mat: Vec<_> = self
             .mat_dp
             .chunks_exact(self.column)
-            .map(|xs| logsumexp(xs))
+            .map(logsumexp)
             .collect();
         let ins: Vec<_> = self
             .ins_dp
             .chunks_exact(self.column)
-            .map(|xs| logsumexp(xs))
+            .map(logsumexp)
             .collect();
         let del: Vec<_> = self
             .del_dp
             .chunks_exact(self.column)
-            .map(|xs| logsumexp(xs))
+            .map(logsumexp)
             .collect();
         (mat, del, ins)
     }

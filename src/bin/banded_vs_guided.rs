@@ -29,13 +29,8 @@ fn main() {
         }
     }
 }
-fn run_bench(
-    len: usize,
-    coverage: usize,
-    error_rate: f64,
-    rad: usize,
-    seed: u64,
-) -> (f64, usize, Vec<(u128, u32, u128, u32)>) {
+type BenchResult = (f64, usize, Vec<(u128, u32, u128, u32)>);
+fn run_bench(len: usize, coverage: usize, error_rate: f64, rad: usize, seed: u64) -> BenchResult {
     let seed = seed + (rad + coverage) as u64;
     use kiley::gen_seq;
     let prof = gen_seq::PROFILE.norm().mul(error_rate);
