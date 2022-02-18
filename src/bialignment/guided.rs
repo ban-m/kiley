@@ -1,6 +1,33 @@
 use crate::dptable::DPTable;
 use crate::op::Op;
 
+pub fn bootstrap_ops(rlen: usize, qlen: usize) -> Vec<Op> {
+    let (mut qpos, mut rpos) = (0, 0);
+    let mut ops = Vec::with_capacity(rlen + qlen);
+    let map_coef = rlen as f64 / qlen as f64;
+    while qpos < qlen && rpos < rlen {
+        let corresp_rpos = (qpos as f64 * map_coef).round() as usize;
+        match corresp_rpos.cmp(&rpos) {
+            std::cmp::Ordering::Less => {
+                qpos += 1;
+                ops.push(Op::Ins);
+            }
+            std::cmp::Ordering::Equal => {
+                qpos += 1;
+                rpos += 1;
+                ops.push(Op::Match);
+            }
+            std::cmp::Ordering::Greater => {
+                rpos += 1;
+                ops.push(Op::Del);
+            }
+        }
+    }
+    ops.extend(std::iter::repeat(Op::Ins).take(qlen - qpos));
+    ops.extend(std::iter::repeat(Op::Del).take(rlen - rpos));
+    ops
+}
+
 // Return vector of (start,end) D' = D + E, where
 // D = { (i,j) | 0 <= i <= qlen , s[i] <= j < e[i] } is equal to
 // { (i,j) | there exists (a,b) in the alignment path such that |a-i| + |b-j| <= radius.
@@ -78,7 +105,7 @@ fn update_range(
     let qstart = qpos.saturating_sub(radius);
     let qend = (qpos + radius + 1).min(qlen + 1);
     for i in qstart..qend {
-        let v_dist = i.max(qpos) - i.min(qpos);
+        let v_dist = if i < qpos { qpos - i } else { i - qpos };
         assert!(v_dist <= radius);
         let rem = radius - v_dist;
         let rstart = rpos.saturating_sub(rem);
@@ -151,6 +178,8 @@ pub fn edit_dist_guided(
             }
         }
     }
+    ops.extend(std::iter::repeat(Op::Del).take(rpos));
+    ops.extend(std::iter::repeat(Op::Ins).take(qpos));
     ops.reverse();
     (score, ops)
 }
@@ -165,41 +194,34 @@ pub fn global_guided(
     let (qs, rs) = (query, reference);
     let fill_range = convert_to_fill_range(qs.len(), rs.len(), ops, radius);
     let lower = (reference.len() + query.len()) as i32 * open;
-    let mut mat = DPTable::new(&fill_range, lower);
-    let mut del = DPTable::new(&fill_range, lower);
-    let mut ins = DPTable::new(&fill_range, lower);
+    let mut dp = DPTable::new(&fill_range, (lower, lower, lower));
     // 1. Initialization
-    for i in 1..qs.len() + 1 {
-        mat.set(i, 0, lower);
-        ins.set(i, 0, open + (i - 1) as i32 * ext);
-        del.set(i, 0, lower);
-    }
+    dp.set(0, 0, (0, lower, lower));
     for j in 1..rs.len() + 1 {
-        mat.set(0, j, lower);
-        ins.set(0, j, lower);
-        del.set(0, j, open + (j - 1) as i32 * ext);
+        dp.set(0, j, (lower, lower, open + (j - 1) as i32 * ext));
     }
-    mat.set(0, 0, 0);
-    ins.set(0, 0, lower);
-    del.set(0, 0, lower);
+    for i in 1..qs.len() + 1 {
+        dp.set(i, 0, (lower, open + (i - 1) as i32 * ext, lower));
+    }
     // 2. Recur.
-    for (i, &(start, end)) in fill_range.iter().enumerate().skip(1) {
-        let q = qs[i - 1];
+    let rows = fill_range.iter().enumerate().skip(1).zip(qs.iter());
+    for ((i, &(start, end)), &q) in rows {
         for j in start.max(1)..end {
             let r = rs[j - 1];
             let aln = if q == r { match_score } else { mism };
-            let mat_next = mat
-                .get(i - 1, j - 1)
-                .max(del.get(i - 1, j - 1))
-                .max(ins.get(i - 1, j - 1))
-                + aln;
-            mat.set(i, j, mat_next);
-            let ins_next = (mat.get(i - 1, j) + open).max(ins.get(i - 1, j) + ext);
-            ins.set(i, j, ins_next);
-            let del_next = (mat.get(i, j - 1) + open)
-                .max(del.get(i, j - 1) + ext)
-                .max(ins.get(i, j - 1) + open);
-            del.set(i, j, del_next);
+            let mat_next = {
+                let (mat, ins, del) = dp.get(i - 1, j - 1);
+                mat.max(ins).max(del) + aln
+            };
+            let ins_next = {
+                let (mat, ins, _) = dp.get(i - 1, j);
+                (mat + open).max(ins + ext)
+            };
+            let del_next = {
+                let (mat, ins, del) = dp.get(i, j - 1);
+                (mat + open).max(del + ext).max(ins + open)
+            };
+            dp.set(i, j, (mat_next, ins_next, del_next));
         }
     }
     // Traceback.
@@ -207,62 +229,64 @@ pub fn global_guided(
     let mut rpos = fill_range.last().unwrap().1 - 1;
     assert_eq!(rpos, rs.len());
     let (mut state, score) = {
-        let mat_to_fin = mat.get(qpos, rpos);
-        let ins_to_fin = ins.get(qpos, rpos);
-        let del_to_fin = del.get(qpos, rpos);
-        if ins_to_fin <= mat_to_fin && del_to_fin <= mat_to_fin {
-            (0, mat_to_fin)
-        } else if mat_to_fin <= ins_to_fin && del_to_fin <= ins_to_fin {
-            (1, ins_to_fin)
+        let (mat, ins, del) = dp.get(qpos, rpos);
+        if ins <= mat && del <= mat {
+            (0, mat)
+        } else if mat <= ins && del <= ins {
+            (1, ins)
         } else {
-            assert!(mat_to_fin <= del_to_fin && ins_to_fin <= del_to_fin,);
-            (2, del_to_fin)
+            assert!(mat <= del && ins <= del);
+            (2, del)
         }
     };
     let mut ops = Vec::with_capacity(qs.len() + rs.len());
     while 0 < qpos && 0 < rpos {
+        let (mat, ins, del) = dp.get(qpos, rpos);
         if state == 0 {
             let is_mat = qs[qpos - 1] == rs[rpos - 1];
-            let aln = if is_mat { match_score } else { mism };
-            let current = mat.get(qpos, rpos) - aln;
-            if current == mat.get(qpos - 1, rpos - 1) {
-                state = 0;
-            } else if current == ins.get(qpos - 1, rpos - 1) {
-                state = 1;
-            } else {
-                assert_eq!(current, del.get(qpos - 1, rpos - 1));
-                state = 2;
-            }
-            qpos -= 1;
-            rpos -= 1;
             if is_mat {
                 ops.push(Op::Match)
             } else {
                 ops.push(Op::Mismatch)
             };
+            let aln = if is_mat { match_score } else { mism };
+            let current = mat - aln;
+            let (m_prev, i_prev, d_prev) = dp.get(qpos - 1, rpos - 1);
+            if current == m_prev {
+                state = 0;
+            } else if current == i_prev {
+                state = 1;
+            } else {
+                assert_eq!(current, d_prev);
+                state = 2;
+            }
+            qpos -= 1;
+            rpos -= 1;
         } else if state == 1 {
-            let current = ins.get(qpos, rpos);
-            if current == mat.get(qpos - 1, rpos) + open {
+            ops.push(Op::Ins);
+            let current = ins;
+            let (m_prev, i_prev, _) = dp.get(qpos - 1, rpos);
+            if current == m_prev + open {
                 state = 0;
             } else {
-                assert_eq!(current, ins.get(qpos - 1, rpos) + ext);
+                assert_eq!(current, i_prev + ext);
                 state = 1;
             }
             qpos -= 1;
-            ops.push(Op::Ins);
         } else {
+            ops.push(Op::Del);
             assert_eq!(state, 2);
-            let current = del.get(qpos, rpos);
-            if current == mat.get(qpos, rpos - 1) + open {
+            let current = del;
+            let (m_prev, i_prev, d_prev) = dp.get(qpos, rpos - 1);
+            if current == m_prev + open {
                 state = 0;
-            } else if current == ins.get(qpos, rpos - 1) + open {
+            } else if current == i_prev + open {
                 state = 1;
             } else {
-                assert_eq!(current, del.get(qpos, rpos - 1) + ext);
+                assert_eq!(current, d_prev + ext);
                 state = 2;
             }
             rpos -= 1;
-            ops.push(Op::Del);
         }
     }
     ops.extend(std::iter::repeat(Op::Del).take(rpos));
@@ -297,32 +321,32 @@ fn fill_mod_table(
         let len = total_len - mod_table.len();
         mod_table.extend(std::iter::repeat(pre.upperbound()).take(len));
     }
-    for (i, &(start, end)) in fill_range.iter().enumerate().take(qs.len()) {
-        let q = qs[i];
-        // for j in start..end.min(rs.len() + 1) {
-        for j in start..end {
+    let fills = fill_range.iter().enumerate().zip(qs.iter());
+    for ((i, &(start, end)), &q) in fills {
+        for (j, mod_table) in mod_table
+            .chunks_exact_mut(NUM_ROW)
+            .enumerate()
+            .take(end)
+            .skip(start)
+        {
+            // for j in start..end {
             let pre_mat = pre.get(i, j);
             let (post_del, post_ins) = (post.get(i, j + 1), post.get(i + 1, j));
             let (post_mat, post_sta) = (post.get(i + 1, j + 1), post.get(i, j));
             let pre_copy_line = pre.get_line(i, j + 1, (rs.len() - j).min(COPY_SIZE));
             let post_del_line = post.get_line(i, j + 1, (rs.len() - j).min(DEL_SIZE));
-            let row_start = NUM_ROW * j;
             // change the j-th base into ...
             let mat_pattern = pre_mat + post_mat;
             let del_pattern = pre_mat + post_del + 1;
-            mod_table
-                .iter_mut()
-                .skip(row_start)
-                .zip(b"ACGT")
-                .for_each(|(x, &base)| {
-                    *x = (*x).min(mat_pattern + (q != base) as u32).min(del_pattern);
-                });
+            mod_table.iter_mut().zip(b"ACGT").for_each(|(x, &base)| {
+                *x = (*x).min(mat_pattern + (q != base) as u32).min(del_pattern);
+            });
             // insert before the j-th base...
             let mat_pattern = pre_mat + post_ins;
             let del_pattern = pre_mat + post_sta + 1;
             mod_table
                 .iter_mut()
-                .skip(row_start + 4)
+                .skip(4)
                 .zip(b"ACGT")
                 .for_each(|(x, &base)| {
                     *x = (*x).min(mat_pattern + (base != q) as u32).min(del_pattern);
@@ -330,7 +354,7 @@ fn fill_mod_table(
             // Copying the j..j+c bases..
             mod_table
                 .iter_mut()
-                .skip(row_start + 8)
+                .skip(8)
                 .zip(pre_copy_line)
                 .for_each(|(x, pre_c)| {
                     *x = (*x).min(pre_c + post_sta);
@@ -338,7 +362,7 @@ fn fill_mod_table(
             // Deleting the j..j+d bases...
             mod_table
                 .iter_mut()
-                .skip(row_start + 8 + COPY_SIZE)
+                .skip(8 + COPY_SIZE)
                 .zip(post_del_line)
                 .for_each(|(x, post_d)| {
                     *x = (*x).min(pre_mat + post_d);
@@ -348,27 +372,30 @@ fn fill_mod_table(
     // The last position (no base to be aligned!)
     if let Some(&(start, end)) = fill_range.last() {
         let i = fill_range.len() - 1;
-        for j in start..end {
+        for (j, mod_table) in mod_table
+            .chunks_exact_mut(NUM_ROW)
+            .enumerate()
+            .take(end)
+            .skip(start)
+        {
             let pre_mat = pre.get(i, j);
             let post_sta = post.get(i, j);
             let post_del = post.get(i, j + 1);
-            let row_start = NUM_ROW * j;
             // change the j-th base into ...
             mod_table
                 .iter_mut()
-                .skip(row_start)
                 .take(4)
                 .for_each(|x| *x = (*x).min(pre_mat + post_del + 1));
             // insert before the j-th base...
             mod_table
                 .iter_mut()
-                .skip(row_start + 4)
+                .skip(4)
                 .take(4)
                 .for_each(|x| *x = (*x).min(pre_mat + post_sta + 1));
             // Copying the j..j+c bases..
             mod_table
                 .iter_mut()
-                .skip(row_start + 8)
+                .skip(8)
                 .take(COPY_SIZE)
                 .enumerate()
                 .filter(|(c, _)| j + c < rs.len())
@@ -376,7 +403,7 @@ fn fill_mod_table(
             // Deleting the j..j+d bases...
             mod_table
                 .iter_mut()
-                .skip(row_start + 8 + COPY_SIZE)
+                .skip(8 + COPY_SIZE)
                 .take(DEL_SIZE)
                 .enumerate()
                 .filter(|(d, _)| j + d < rs.len())
@@ -388,28 +415,84 @@ fn fill_mod_table(
 struct Aligner {
     pre_dp: DPTable<u32>,
     post_dp: DPTable<u32>,
+    default_radius: usize,
+    radius: Vec<usize>,
     fill_ranges: Vec<(usize, usize)>,
     mod_table: Vec<u32>,
 }
 
 impl Aligner {
+    const MIN_RADIUS: usize = 4;
     fn with_capacity(qlen: usize, radius: usize) -> Self {
-        let pre_dp = DPTable::with_capacity(qlen, radius, 3 * qlen as u32);
-        let post_dp = DPTable::with_capacity(qlen, radius, 3 * qlen as u32);
-        let fill_ranges = Vec::with_capacity(qlen * 3);
-        let mod_table = Vec::with_capacity(qlen * 3);
         Self {
-            pre_dp,
-            post_dp,
-            fill_ranges,
-            mod_table,
+            pre_dp: DPTable::with_capacity(qlen, radius, 3 * qlen as u32),
+            post_dp: DPTable::with_capacity(qlen, radius, 3 * qlen as u32),
+            fill_ranges: Vec::with_capacity(qlen * 3),
+            mod_table: Vec::with_capacity(qlen * 3),
+            radius: Vec::with_capacity(qlen * 3),
+            default_radius: radius,
         }
     }
-    fn align(&mut self, rs: &[u8], qs: &[u8], radius: usize, ops: &mut Vec<Op>) -> u32 {
+    fn re_define_fill_range(&mut self, qlen: usize, rlen: usize, ops: &[Op]) {
+        let (mut qpos, mut rpos) = (0, 0);
+        let radius = self.radius[rpos];
+        let ranges = &mut self.fill_ranges;
+        update_range(ranges, qpos, rpos, qlen, rlen, radius);
+        for op in ops.iter() {
+            match op {
+                Op::Del => rpos += 1,
+                Op::Ins => qpos += 1,
+                Op::Match | Op::Mismatch => {
+                    qpos += 1;
+                    rpos += 1;
+                }
+            }
+            let radius = self.radius[rpos];
+            update_range(ranges, qpos, rpos, qlen, rlen, radius);
+            if qpos == qlen || rpos == rlen {
+                break;
+            }
+        }
+        // Follow through.
+        let map_coef = rlen as f64 / qlen as f64;
+        while qpos < qlen && rpos < rlen {
+            let corresp_rpos = (qpos as f64 * map_coef).round() as usize;
+            match corresp_rpos.cmp(&rpos) {
+                std::cmp::Ordering::Less => qpos += 1,
+                std::cmp::Ordering::Equal => {
+                    qpos += 1;
+                    rpos += 1;
+                }
+                std::cmp::Ordering::Greater => rpos += 1,
+            }
+            let radius = self.radius[rpos];
+            update_range(ranges, qpos, rpos, qlen, rlen, radius);
+        }
+        while qpos < qlen {
+            qpos += 1;
+            let radius = self.radius[rpos];
+            update_range(ranges, qpos, rpos, qlen, rlen, radius);
+        }
+        while rpos < rlen {
+            rpos += 1;
+            let radius = self.radius[rpos];
+            update_range(ranges, qpos, rpos, qlen, rlen, radius);
+        }
+        assert_eq!(qpos, qlen);
+        assert_eq!(rpos, rlen);
+        ranges[qlen].1 = rlen + 1;
+    }
+    fn set_fill_ranges(&mut self, rlen: usize, qlen: usize, ops: &[Op]) {
         self.fill_ranges.clear();
         self.fill_ranges
-            .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
-        re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut self.fill_ranges);
+            .extend(std::iter::repeat((rlen + 1, 0)).take(qlen + 1));
+        let fill_len = (rlen + 1).saturating_sub(self.radius.len());
+        self.radius
+            .extend(std::iter::repeat(self.default_radius).take(fill_len));
+        self.re_define_fill_range(qlen, rlen, ops);
+    }
+    fn align(&mut self, rs: &[u8], qs: &[u8], ops: &mut Vec<Op>) -> u32 {
+        self.set_fill_ranges(rs.len(), qs.len(), ops);
         let upperbound = (rs.len() + qs.len() + 3) as u32;
         self.pre_dp.initialize(upperbound, &self.fill_ranges);
         self.post_dp.initialize(upperbound, &self.fill_ranges);
@@ -427,21 +510,21 @@ impl Aligner {
         ops: &mut Vec<Op>,
     ) {
         // 1. Initialization. It is OK to consume O(xs.len() + ys.len()) time.
-        for i in 0..qs.len() + 1 {
-            dp.set(i, 0, i as u32);
-        }
-        for j in 0..rs.len() + 1 {
+        let &(s, e) = fill_range.first().unwrap();
+        for j in s..e {
             dp.set(0, j, j as u32);
         }
         // Skipping the first element in both i and j.
-        for (i, &(start, end)) in fill_range.iter().enumerate().skip(1) {
-            let q = qs[i - 1];
-            for j in start.max(1)..end {
-                let r = rs[j - 1];
-                let mat = if q == r { 0 } else { 1 };
-                let dist = (dp.get(i - 1, j) + 1)
+        for ((i, &(start, end)), &q) in fill_range.iter().enumerate().skip(1).zip(qs.iter()) {
+            if start == 0 {
+                dp.set(i, 0, i as u32);
+            }
+            for (j, &r) in rs.iter().enumerate().take(end - 1).skip(start.max(1) - 1) {
+                let j = j + 1;
+                let mat = if q != r { 1 } else { 0 };
+                let dist = (dp.get(i - 1, j - 1) + mat)
                     .min(dp.get(i, j - 1) + 1)
-                    .min(dp.get(i - 1, j - 1) + mat);
+                    .min(dp.get(i - 1, j) + 1);
                 dp.set(i, j, dist);
             }
         }
@@ -449,8 +532,6 @@ impl Aligner {
         let mut qpos = qs.len();
         let mut rpos = fill_range.last().unwrap().1 - 1;
         assert_eq!(rpos, rs.len());
-        // Init with appropriate number of deletion
-        //let mut ops = Vec::with_capacity(rs.len() + qs.len());
         ops.clear();
         while 0 < qpos && 0 < rpos {
             let current = dp.get(qpos, rpos);
@@ -472,21 +553,23 @@ impl Aligner {
                 }
             }
         }
+        ops.extend(std::iter::repeat(Op::Del).take(rpos));
+        ops.extend(std::iter::repeat(Op::Ins).take(qpos));
         ops.reverse();
     }
     fn fill_post_dp(dp: &mut DPTable<u32>, fill_range: &[(usize, usize)], rs: &[u8], qs: &[u8]) {
         // 1. Initialization. It is OK to consume O(xs.len() + ys.len()) time.
-        for i in 0..qs.len() + 1 {
-            dp.set(i, rs.len(), (qs.len() - i) as u32);
-        }
-        for j in 0..rs.len() + 1 {
+        let &(s, e) = fill_range.last().unwrap();
+        for j in s..e {
             dp.set(qs.len(), j, (rs.len() - j) as u32);
         }
         // Skipping the first element in both i and j.
-        for (i, &(start, end)) in fill_range.iter().enumerate().rev().skip(1) {
-            let q = qs[i];
-            for j in (start..end.min(rs.len())).rev() {
-                let r = rs[j];
+        let fills = fill_range.iter().enumerate().zip(qs.iter()).rev();
+        for ((i, &(start, end)), &q) in fills {
+            if end == rs.len() + 1 {
+                dp.set(i, rs.len(), (qs.len() - i) as u32);
+            }
+            for (j, &r) in rs.iter().enumerate().take(end).skip(start).rev() {
                 let mat = if q == r { 0 } else { 1 };
                 let dist = (dp.get(i + 1, j) + 1)
                     .min(dp.get(i, j + 1) + 1)
@@ -495,49 +578,63 @@ impl Aligner {
             }
         }
     }
-}
-
-fn bootstrap_ops(rlen: usize, qlen: usize) -> Vec<Op> {
-    let (mut qpos, mut rpos) = (0, 0);
-    let mut ops = Vec::with_capacity(rlen + qlen);
-    let map_coef = rlen as f64 / qlen as f64;
-    while qpos < qlen && rpos < rlen {
-        let corresp_rpos = (qpos as f64 * map_coef).round() as usize;
-        match corresp_rpos.cmp(&rpos) {
-            std::cmp::Ordering::Less => {
-                qpos += 1;
-                ops.push(Op::Ins);
+    fn update_radius(&mut self, updated_position: &[(usize, usize)], len: usize) {
+        let orig_len = self.radius.len();
+        let mut prev_pos = 0;
+        for &(position, op) in updated_position.iter() {
+            for pos in prev_pos..position {
+                self.radius
+                    .push((self.radius[pos] / 2).max(Self::MIN_RADIUS));
             }
-            std::cmp::Ordering::Equal => {
-                qpos += 1;
-                rpos += 1;
-                ops.push(Op::Match);
-            }
-            std::cmp::Ordering::Greater => {
-                rpos += 1;
-                ops.push(Op::Del);
-            }
+            prev_pos = if op < 4 {
+                // Mism
+                self.radius.push(self.default_radius);
+                position + 1
+            } else if op < 8 {
+                // Insertion
+                self.radius.push(self.default_radius);
+                self.radius.push(self.default_radius);
+                position + 1
+            } else if op < 8 + COPY_SIZE {
+                // Copying.
+                let len = op - 8 + 2;
+                self.radius
+                    .extend(std::iter::repeat(self.default_radius).take(len));
+                position + 1
+            } else {
+                // Deletion
+                position + op - 8 - COPY_SIZE + 1
+            };
         }
+        // Finally, prev_pos -> prev_len, exact matches.
+        for pos in prev_pos..orig_len {
+            self.radius
+                .push((self.radius[pos] / 2).max(Self::MIN_RADIUS));
+        }
+        let mut idx = 0;
+        self.radius.retain(|_| {
+            idx += 1;
+            orig_len < idx
+        });
+        assert_eq!(self.radius.len(), len + 1);
     }
-    ops.extend(std::iter::repeat(Op::Ins).take(qlen - qpos));
-    ops.extend(std::iter::repeat(Op::Del).take(rlen - rpos));
-    ops
 }
 
 fn polish_guided(
     template: &mut Vec<u8>,
+    changed_positions: &mut Vec<(usize, usize)>,
     modif_table: &[u32],
     current_dist: u32,
     inactive: usize,
-) -> bool {
+) {
+    changed_positions.clear();
     let orig_len = template.len();
-    let mut is_updated = false;
     let mut modif_table = modif_table.chunks_exact(NUM_ROW);
     let mut pos = 0;
     while let Some(row) = modif_table.next() {
         let (op, &dist) = row.iter().enumerate().min_by_key(|x| x.1).unwrap();
         if dist < current_dist && pos < orig_len {
-            is_updated = true;
+            changed_positions.push((pos, op));
             if op < 4 {
                 // Mutateion.
                 template.push(b"ACGT"[op]);
@@ -573,7 +670,7 @@ fn polish_guided(
             pos += 1;
         } else if dist < current_dist && 4 <= op && op < 8 {
             // Here, we need to consider the last insertion...
-            is_updated = true;
+            changed_positions.push((pos, op));
             template.push(b"ACGT"[op - 4]);
         }
     }
@@ -582,7 +679,6 @@ fn polish_guided(
         idx += 1;
         orig_len < idx
     });
-    is_updated
 }
 
 pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(
@@ -597,14 +693,16 @@ pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(
         .map(|seq| bootstrap_ops(template.len(), seq.borrow().len()))
         .collect();
     let mut modif_table = Vec::new();
+    let mut changed_pos = Vec::new();
     let mut aligner = Aligner::with_capacity(template.len(), radius);
-    for inactive in (0..100).map(|x| INACTIVE_TIME + (x * INACTIVE_TIME) % len) {
+    for t in 0..100 {
+        let inactive = INACTIVE_TIME + t % len;
         modif_table.clear();
         let dist: u32 = ops
             .iter_mut()
             .zip(xs.iter())
             .map(|(ops, seq)| {
-                let dist = aligner.align(&template, seq.borrow(), radius, ops);
+                let dist = aligner.align(&template, seq.borrow(), ops);
                 match modif_table.is_empty() {
                     true => modif_table.extend_from_slice(&aligner.mod_table),
                     false => {
@@ -617,7 +715,11 @@ pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(
                 dist
             })
             .sum();
-        if !polish_guided(&mut template, &modif_table, dist, inactive) {
+        assert_eq!(template.len() + 1, aligner.radius.len());
+        let (temp, cpos) = (&mut template, &mut changed_pos);
+        polish_guided(temp, cpos, &modif_table, dist, inactive);
+        aligner.update_radius(cpos, temp.len());
+        if changed_pos.is_empty() {
             break;
         }
     }
@@ -717,7 +819,7 @@ pub mod test {
     #[test]
     fn modification_table_check() {
         let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
-        for i in 0..100 {
+        for i in 0..50 {
             println!("{}", i);
             let radius = 20;
             let xslen = rng.gen::<usize>() % 100 + 20;
@@ -725,56 +827,58 @@ pub mod test {
             let prof = crate::gen_seq::PROFILE;
             let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
             let (_dist, ops) = edit_dist_base_ops(&xs, &ys);
+            let mut al_ops = ops.clone();
             let mut aligner = Aligner::with_capacity(xs.len(), radius);
-            let mod_table = {
-                let mut ops = ops.clone();
-                aligner.align(&xs, &ys, radius, &mut ops);
-                aligner.mod_table
-            };
-            // Mutation.
-            for j in 0..xs.len() {
-                let seek = j * NUM_ROW;
-                let orig = xs[j];
-                for (pos, &base) in b"ACGT".iter().enumerate() {
-                    xs[j] = base;
-                    let (dist, _) = edit_dist_guided(&xs, &ys, &ops, radius);
-                    assert_eq!(dist, mod_table[seek + pos],);
-                    xs[j] = orig;
+            for _ in 0..4 {
+                aligner.align(&xs, &ys, &mut al_ops);
+                let mod_table = &aligner.mod_table;
+                // Mutation.
+                for j in 0..xs.len() {
+                    let seek = j * NUM_ROW;
+                    let orig = xs[j];
+                    for (pos, &base) in b"ACGT".iter().enumerate() {
+                        xs[j] = base;
+                        let (dist, _) = edit_dist_guided(&xs, &ys, &ops, radius);
+                        assert_eq!(dist, mod_table[seek + pos],);
+                        xs[j] = orig;
+                    }
                 }
-            }
-            // Insertion
-            for j in 0..xs.len() {
-                let seek = j * NUM_ROW + 4;
+                // Insertion
+                for j in 0..xs.len() {
+                    let seek = j * NUM_ROW + 4;
+                    for (pos, &base) in b"ACGT".iter().enumerate() {
+                        xs.insert(j, base);
+                        let (dist, _) = edit_dist_guided(&xs, &ys, &ops, radius);
+                        assert_eq!(dist, mod_table[seek + pos]);
+                        xs.remove(j);
+                    }
+                }
                 for (pos, &base) in b"ACGT".iter().enumerate() {
-                    xs.insert(j, base);
+                    let seek = xs.len() * NUM_ROW + 4;
+                    xs.push(base);
                     let (dist, _) = edit_dist_guided(&xs, &ys, &ops, radius);
                     assert_eq!(dist, mod_table[seek + pos]);
-                    xs.remove(j);
+                    xs.pop();
                 }
-            }
-            for (pos, &base) in b"ACGT".iter().enumerate() {
-                let seek = xs.len() * NUM_ROW + 4;
-                xs.push(base);
-                let (dist, _) = edit_dist_guided(&xs, &ys, &ops, radius);
-                assert_eq!(dist, mod_table[seek + pos]);
-                xs.pop();
-            }
-            // Copy region.
-            for j in 0..xs.len() {
-                let seek = j * NUM_ROW + 8;
-                for len in (0..COPY_SIZE).filter(|c| j + c + 1 <= xs.len()) {
-                    let xs: Vec<_> = xs[..j + len + 1].iter().chain(&xs[j..]).copied().collect();
-                    let (dist, _) = edit_dist_guided(&xs, &ys, &ops, radius);
-                    assert_eq!(dist, mod_table[seek + len], "{},{},{}", xs.len(), j, len);
+                // Copy region.
+                for j in 0..xs.len() {
+                    let seek = j * NUM_ROW + 8;
+                    for len in (0..COPY_SIZE).filter(|c| j + c + 1 <= xs.len()) {
+                        let xs: Vec<_> =
+                            xs[..j + len + 1].iter().chain(&xs[j..]).copied().collect();
+                        let (dist, _) = edit_dist_guided(&xs, &ys, &ops, radius);
+                        assert_eq!(dist, mod_table[seek + len], "{},{},{}", xs.len(), j, len);
+                    }
                 }
-            }
-            // Delete region.
-            for j in 0..xs.len() {
-                let seek = j * NUM_ROW + 8 + COPY_SIZE;
-                for len in (0..DEL_SIZE).filter(|d| j + d + 1 <= xs.len()) {
-                    let xs: Vec<_> = xs[..j].iter().chain(&xs[j + len + 1..]).copied().collect();
-                    let (dist, _) = edit_dist_guided(&xs, &ys, &ops, radius);
-                    assert_eq!(dist, mod_table[seek + len]);
+                // Delete region.
+                for j in 0..xs.len() {
+                    let seek = j * NUM_ROW + 8 + COPY_SIZE;
+                    for len in (0..DEL_SIZE).filter(|d| j + d + 1 <= xs.len()) {
+                        let xs: Vec<_> =
+                            xs[..j].iter().chain(&xs[j + len + 1..]).copied().collect();
+                        let (dist, _) = edit_dist_guided(&xs, &ys, &ops, radius);
+                        assert_eq!(dist, mod_table[seek + len]);
+                    }
                 }
             }
         }

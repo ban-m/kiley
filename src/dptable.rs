@@ -13,9 +13,12 @@ impl<T: Copy> DPTable<T> {
     }
     // Set the [i,j] to target, here i and j are the original corrdinte.
     pub fn set(&mut self, i: usize, j: usize, target: T) {
-        match self.offsets.get(i) {
-            Some(&(ofs, s, e)) if (s..e).contains(&j) => self.mem[ofs + j - s] = target,
-            _ => {}
+        if let Some(&(ofs, s, e)) = self.offsets.get(i) {
+            if (s..e).contains(&j) {
+                if let Some(slot) = self.mem.get_mut(ofs + j - s) {
+                    *slot = target;
+                }
+            }
         }
     }
     pub fn get(&self, i: usize, j: usize) -> T {

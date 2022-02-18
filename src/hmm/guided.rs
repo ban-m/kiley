@@ -1,3 +1,4 @@
+use crate::bialignment::guided::bootstrap_ops;
 use crate::bialignment::guided::re_fill_fill_range;
 use crate::dptable::DPTable;
 use crate::op::Op;
@@ -710,25 +711,36 @@ impl PairHiddenMarkovModel {
             .collect();
         self.polish_until_converge_with(template, xs, &mut ops, radius)
     }
-    pub fn fit<T: std::borrow::Borrow<[u8]>>(&mut self, template: &[u8], xs: &[T], radius: usize) {
+    pub fn fit_guided<T, O>(&mut self, template: &[u8], xss: &[T], ops: &[O], radius: usize)
+    where
+        T: std::borrow::Borrow<[u8]>,
+        O: std::borrow::Borrow<[Op]>,
+    {
         let rs = template;
-        let mut ops: Vec<_> = xs
-            .iter()
-            .map(|seq| bootstrap_ops(template.len(), seq.borrow().len()))
-            .collect();
         let mut memory = Memory::with_capacity(template.len(), radius);
         for _ in 0..10 {
             let mut next = PairHiddenMarkovModel::zeros();
-            for (ops, seq) in ops.iter_mut().zip(xs.iter()) {
-                let qs = seq.borrow();
-                self.update_aln_path(&mut memory, rs, qs, radius, ops);
-                self.fill_pre_dp(&mut memory, rs, qs);
+            for (ops, seq) in ops.iter().zip(xss.iter()) {
+                let (ops, qs) = (ops.borrow(), seq.borrow());
+                memory.fill_ranges.clear();
+                memory
+                    .fill_ranges
+                    .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
+                re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut memory.fill_ranges);
+                memory.initialize();
                 self.fill_post_dp(&mut memory, rs, qs);
                 self.register(&memory, rs, qs, radius, &mut next);
             }
             next.normalize();
             *self = next;
         }
+    }
+    pub fn fit<T: std::borrow::Borrow<[u8]>>(&mut self, template: &[u8], xss: &[T], radius: usize) {
+        let ops: Vec<_> = xss
+            .iter()
+            .map(|seq| bootstrap_ops(template.len(), seq.borrow().len()))
+            .collect();
+        self.fit_guided(template, xss, &ops, radius);
     }
     fn register(&self, _: &Memory, _: &[u8], _: &[u8], _: usize, _next: &mut Self) {
         todo!()
@@ -783,32 +795,32 @@ impl Memory {
     }
 }
 
-fn bootstrap_ops(rlen: usize, qlen: usize) -> Vec<Op> {
-    let (mut qpos, mut rpos) = (0, 0);
-    let mut ops = Vec::with_capacity(rlen + qlen);
-    let map_coef = rlen as f64 / qlen as f64;
-    while qpos < qlen && rpos < rlen {
-        let corresp_rpos = (qpos as f64 * map_coef).round() as usize;
-        match corresp_rpos.cmp(&rpos) {
-            std::cmp::Ordering::Less => {
-                qpos += 1;
-                ops.push(Op::Ins);
-            }
-            std::cmp::Ordering::Equal => {
-                qpos += 1;
-                rpos += 1;
-                ops.push(Op::Match);
-            }
-            std::cmp::Ordering::Greater => {
-                rpos += 1;
-                ops.push(Op::Del);
-            }
-        }
-    }
-    ops.extend(std::iter::repeat(Op::Ins).take(qlen - qpos));
-    ops.extend(std::iter::repeat(Op::Del).take(rlen - rpos));
-    ops
-}
+// fn bootstrap_ops(rlen: usize, qlen: usize) -> Vec<Op> {
+//     let (mut qpos, mut rpos) = (0, 0);
+//     let mut ops = Vec::with_capacity(rlen + qlen);
+//     let map_coef = rlen as f64 / qlen as f64;
+//     while qpos < qlen && rpos < rlen {
+//         let corresp_rpos = (qpos as f64 * map_coef).round() as usize;
+//         match corresp_rpos.cmp(&rpos) {
+//             std::cmp::Ordering::Less => {
+//                 qpos += 1;
+//                 ops.push(Op::Ins);
+//             }
+//             std::cmp::Ordering::Equal => {
+//                 qpos += 1;
+//                 rpos += 1;
+//                 ops.push(Op::Match);
+//             }
+//             std::cmp::Ordering::Greater => {
+//                 rpos += 1;
+//                 ops.push(Op::Del);
+//             }
+//         }
+//     }
+//     ops.extend(std::iter::repeat(Op::Ins).take(qlen - qpos));
+//     ops.extend(std::iter::repeat(Op::Del).take(rlen - rpos));
+//     ops
+// }
 
 // Minimum required improvement on the likelihood.
 // In a desirable case, it is exactly zero, but as a matter of fact,

@@ -6,6 +6,59 @@ use rand_xoshiro::Xoshiro256StarStar;
 const SEED: u64 = 1293890;
 const SHORT_LEN: usize = 200;
 
+const GLOBAL_BAND: usize = 50;
+
+#[bench]
+fn edit_dist_guided(b: &mut test::Bencher) {
+    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+    let template = kiley::gen_seq::generate_seq(&mut rng, SHORT_LEN);
+    let prof = &kiley::gen_seq::PROFILE;
+    b.iter(|| {
+        let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        let ops = kiley::bialignment::guided::bootstrap_ops(xs.len(), ys.len());
+        kiley::bialignment::guided::edit_dist_guided(&xs, &ys, &ops, GLOBAL_BAND)
+    });
+}
+
+#[bench]
+fn edit_dist(b: &mut test::Bencher) {
+    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+    let template = kiley::gen_seq::generate_seq(&mut rng, SHORT_LEN);
+    let prof = &kiley::gen_seq::PROFILE;
+    b.iter(|| {
+        let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        kiley::bialignment::edit_dist(&xs, &ys)
+    });
+}
+
+#[bench]
+fn global_banded(b: &mut test::Bencher) {
+    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+    let template = kiley::gen_seq::generate_seq(&mut rng, SHORT_LEN);
+    let prof = &kiley::gen_seq::PROFILE;
+    b.iter(|| {
+        let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        kiley::bialignment::global_banded(&xs, &ys, 2, -6, -5, -1, GLOBAL_BAND)
+    });
+}
+
+#[bench]
+fn global_guided(b: &mut test::Bencher) {
+    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+    let template = kiley::gen_seq::generate_seq(&mut rng, SHORT_LEN);
+    let prof = &kiley::gen_seq::PROFILE;
+    b.iter(|| {
+        let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
+        use kiley::bialignment::guided::*;
+        let ops = bootstrap_ops(xs.len(), ys.len());
+        global_guided(&xs, &ys, &ops, GLOBAL_BAND, (2, -6, -5, -1))
+    });
+}
+
 #[bench]
 fn naive_aln(b: &mut test::Bencher) {
     let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
@@ -137,14 +190,16 @@ fn polish_hmm(b: &mut test::Bencher) {
 }
 
 #[bench]
-fn edit_dist(b: &mut test::Bencher) {
+fn polish_edit_dist_p_guided(b: &mut test::Bencher) {
     let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
     let prof = &kiley::gen_seq::PROFILE;
     b.iter(|| {
-        let template = kiley::gen_seq::generate_seq(&mut rng, 2_000);
-        let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
-        let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
-        kiley::bialignment::edit_dist(&xs, &ys)
+        let template = kiley::gen_seq::generate_seq(&mut rng, CONS_LEN);
+        let draft = kiley::gen_seq::introduce_randomness(&template, &mut rng, &DRAFT);
+        let xss: Vec<_> = (0..CONS_COV)
+            .map(|_| kiley::gen_seq::introduce_randomness(&template, &mut rng, prof))
+            .collect();
+        kiley::bialignment::guided::polish_until_converge(&draft, &xss, CONS_RAD)
     });
 }
 
