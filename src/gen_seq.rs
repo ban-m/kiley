@@ -8,6 +8,7 @@ pub struct Profile {
     pub del: f64,
     pub ins: f64,
 }
+
 impl Profile {
     pub fn sum(&self) -> f64 {
         self.sub + self.del + self.ins
@@ -67,6 +68,69 @@ pub fn introduce_randomness<T: rand::Rng>(seq: &[u8], rng: &mut T, p: &Profile) 
     }
     res
 }
+
+#[derive(Debug, Clone)]
+pub struct ProfileWithContext {
+    subst: f64,
+    mat_mat: f64,
+    mat_del: f64,
+    mat_ins: f64,
+    ins_mat: f64,
+    ins_ins: f64,
+    ins_del: f64,
+    del_mat: f64,
+    del_ins: f64,
+    del_del: f64,
+}
+
+impl std::default::Default for ProfileWithContext {
+    fn default() -> Self {
+        Self {
+            subst: 0.02,
+            mat_mat: 0.90,
+            mat_del: 0.05,
+            mat_ins: 0.05,
+            ins_mat: 0.5,
+            ins_ins: 0.49,
+            ins_del: 0.01,
+            del_mat: 0.5,
+            del_ins: 0.01,
+            del_del: 0.49,
+        }
+    }
+}
+
+pub fn introduce_randomness_with_context<R: rand::Rng>(
+    seq: &[u8],
+    rng: &mut R,
+    p: &ProfileWithContext,
+) -> Vec<u8> {
+    // 0->Mat,1->Ins,2->Del
+    let mut state = 0;
+    let mut idx = 0;
+    let states = [0, 1, 2];
+    let mut res = vec![];
+    while idx < seq.len() {
+        let weights = match state {
+            0 => [p.mat_mat, p.mat_ins, p.mat_del],
+            1 => [p.ins_mat, p.ins_ins, p.ins_del],
+            _ => [p.del_mat, p.del_ins, p.del_del],
+        };
+        state = *states.choose_weighted(rng, |&s| weights[s]).unwrap();
+        match state {
+            0 if rng.gen_bool(p.subst) => res.push(choose_base(rng, seq[idx])),
+            0 => res.push(seq[idx]),
+            1 => res.push(random_base(rng)),
+            _ => {}
+        }
+        idx += match state {
+            0 | 1 => 1,
+            _ => 0,
+        };
+    }
+    res
+}
+
 pub fn introduce_errors<T: rand::Rng>(
     seq: &[u8],
     rng: &mut T,
@@ -97,6 +161,7 @@ pub fn introduce_errors<T: rand::Rng>(
     }
     res
 }
+
 pub fn generate_seq<T: rand::Rng>(rng: &mut T, len: usize) -> Vec<u8> {
     let bases = b"ACTG";
     (0..len)

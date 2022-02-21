@@ -1,3 +1,4 @@
+#[derive(Debug, Clone)]
 pub struct DPTable<T> {
     // Total memory
     mem: Vec<T>,
@@ -82,5 +83,15 @@ impl<T: Copy> DPTable<T> {
             self.mem.extend(std::iter::repeat(ub).take(len));
         }
         self.upperbound = ub;
+    }
+    pub fn reset(&mut self) {
+        self.mem.fill(self.upperbound);
+    }
+    pub fn as_raw_mut(&mut self) -> &mut [T] {
+        &mut self.mem
+    }
+    #[allow(dead_code)]
+    pub fn as_raw(&mut self) -> &[T] {
+        &self.mem
     }
 }

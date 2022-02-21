@@ -681,20 +681,24 @@ fn polish_guided(
     });
 }
 
-pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(
+pub fn polish_until_converge_with<T>(
     template: &[u8],
     xs: &[T],
+    ops: &mut [Vec<Op>],
     radius: usize,
-) -> Vec<u8> {
+) -> Vec<u8>
+where
+    T: std::borrow::Borrow<[u8]>,
+{
     let mut template = template.to_vec();
     let len = template.len().min(21);
-    let mut ops: Vec<_> = xs
-        .iter()
-        .map(|seq| bootstrap_ops(template.len(), seq.borrow().len()))
-        .collect();
     let mut modif_table = Vec::new();
     let mut changed_pos = Vec::new();
     let mut aligner = Aligner::with_capacity(template.len(), radius);
+    let first_dist: Vec<_> = ops
+        .iter()
+        .map(|ops| ops.iter().filter(|&&op| op != Op::Match).count())
+        .collect();
     for t in 0..100 {
         let inactive = INACTIVE_TIME + t % len;
         modif_table.clear();
@@ -718,12 +722,46 @@ pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(
         assert_eq!(template.len() + 1, aligner.radius.len());
         let (temp, cpos) = (&mut template, &mut changed_pos);
         polish_guided(temp, cpos, &modif_table, dist, inactive);
+        let edit_path = cpos.iter().map(|&(pos, op)| {
+            if op < 4 {
+                (pos, crate::op::Edit::Subst)
+            } else if op < 8 {
+                (pos, crate::op::Edit::Insertion)
+            } else if op < 8 + COPY_SIZE {
+                (pos, crate::op::Edit::Copy(op - 8 + 1))
+            } else {
+                (pos, crate::op::Edit::Deletion(op - 8 - COPY_SIZE + 1))
+            }
+        });
+        for ((ops, seq), first_dist) in ops.iter_mut().zip(xs.iter()).zip(first_dist.iter()) {
+            let seq = seq.borrow();
+            let dist = ops.iter().filter(|&&op| op != Op::Match).count();
+            if dist < 2 * first_dist {
+                crate::op::fix_alignment_path(ops, edit_path.clone(), seq.len(), temp.len());
+            } else {
+                // If the alignment is too diverged, fallback to the default method.
+                *ops = bootstrap_ops(temp.len(), seq.len());
+                *ops = edit_dist_guided(temp, seq, &ops, radius).1;
+            }
+        }
         aligner.update_radius(cpos, temp.len());
         if changed_pos.is_empty() {
             break;
         }
     }
     template
+}
+
+pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(
+    template: &[u8],
+    xs: &[T],
+    radius: usize,
+) -> Vec<u8> {
+    let mut ops: Vec<_> = xs
+        .iter()
+        .map(|seq| bootstrap_ops(template.len(), seq.borrow().len()))
+        .collect();
+    polish_until_converge_with(template, xs, &mut ops, radius)
 }
 
 #[cfg(test)]

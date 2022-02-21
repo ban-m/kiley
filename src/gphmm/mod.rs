@@ -1218,13 +1218,6 @@ impl<M: HMMType> GPHMM<M> {
             row.iter_mut().for_each(|x| *x /= sum);
         }
         buffer
-        // Transpose. [to * states + from] = Pr{from->to}.
-        // (0..states * states)
-        //     .map(|idx| {
-        //         let (to, from) = (idx / states, idx % states);
-        //         buffer[from * states + to]
-        //     })
-        //     .collect()
     }
 }
 
