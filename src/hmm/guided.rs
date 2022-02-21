@@ -1,9 +1,8 @@
-use std::f64::MIN_POSITIVE;
-
 use crate::bialignment::guided::bootstrap_ops;
 use crate::bialignment::guided::re_fill_fill_range;
 use crate::dptable::DPTable;
 use crate::op::Op;
+use std::f64::MIN_POSITIVE;
 
 fn mul((m1, i1, d1): (f64, f64, f64), (m2, i2, d2): (f64, f64, f64)) -> (f64, f64, f64) {
     (m1 * m2, i1 * i2, d1 * d2)
@@ -110,11 +109,6 @@ enum State {
     Del,
     Ins,
 }
-
-// Equallity check for f64.
-// fn same(x: f64, y: f64) -> bool {
-//     (x - y).abs() < 0.000000000001
-// }
 
 impl std::default::Default for PairHiddenMarkovModel {
     fn default() -> Self {
@@ -287,7 +281,7 @@ impl PairHiddenMarkovModel {
     pub fn align(&self, rs: &[u8], qs: &[u8], radius: usize) -> (f64, Vec<Op>) {
         let mut ops = bootstrap_ops(rs.len(), qs.len());
         let mut memory = Memory::with_capacity(rs.len(), radius);
-        let lk = self.update_aln_path(&mut memory, rs, qs, radius, &mut ops);
+        let lk = self.update_aln_path(&mut memory, rs, qs, &mut ops);
         assert!(lk <= 0.0, "{},{:?}", lk, self);
         (lk, ops)
     }
@@ -296,14 +290,9 @@ impl PairHiddenMarkovModel {
         memory: &mut Memory,
         rs: &[u8],
         qs: &[u8],
-        radius: usize,
         ops: &mut Vec<Op>,
     ) -> f64 {
-        memory.fill_ranges.clear();
-        memory
-            .fill_ranges
-            .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
-        re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut memory.fill_ranges);
+        memory.set_fill_ranges(rs.len(), qs.len(), ops);
         memory.initialize();
         self.fill_viterbi(memory, rs, qs);
         ops.clear();
@@ -751,19 +740,8 @@ impl PairHiddenMarkovModel {
             .iter_mut()
             .for_each(|x| *x = x.ln() + scaling.ln() * len);
     }
-    fn update(
-        &self,
-        memory: &mut Memory,
-        rs: &[u8],
-        qs: &[u8],
-        radius: usize,
-        ops: &mut [Op],
-    ) -> f64 {
-        memory.fill_ranges.clear();
-        memory
-            .fill_ranges
-            .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
-        re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut memory.fill_ranges);
+    fn update(&self, memory: &mut Memory, rs: &[u8], qs: &[u8], ops: &mut [Op]) -> f64 {
+        memory.set_fill_ranges(rs.len(), qs.len(), ops);
         memory.initialize();
         self.fill_pre_dp(memory, rs, qs);
         self.fill_post_dp(memory, rs, qs);
@@ -798,7 +776,7 @@ impl PairHiddenMarkovModel {
         ops: &mut [Op],
     ) -> (Vec<f64>, f64) {
         let mut memory = Memory::with_capacity(rs.len(), radius);
-        let lk = self.update(&mut memory, rs, qs, radius, ops);
+        let lk = self.update(&mut memory, rs, qs, ops);
         (memory.mod_table, lk)
     }
     /// With bootstrap operations. The returned operations would be
@@ -814,15 +792,24 @@ impl PairHiddenMarkovModel {
         let len = template.len().min(21);
         let mut modif_table = Vec::new();
         let mut memory = Memory::with_capacity(template.len(), radius);
+        let first_lks: Vec<_> = xs
+            .iter()
+            .zip(ops.iter())
+            .map(|(seq, ops)| self.eval_ln(&template, seq.borrow(), ops))
+            .collect();
         for t in 0..100 {
             let inactive = INACTIVE_TIME + (t * INACTIVE_TIME) % len;
             modif_table.clear();
             let lk: f64 = ops
                 .iter_mut()
                 .zip(xs.iter())
-                .map(|(ops, seq)| {
-                    self.update_aln_path(&mut memory, &template, seq.borrow(), radius, ops);
-                    let lk = self.update(&mut memory, &template, seq.borrow(), radius, ops);
+                .zip(first_lks.iter())
+                .map(|((ops, seq), first_lk)| {
+                    let lk = self.update_aln_path(&mut memory, &template, seq.borrow(), ops);
+                    if lk < 2f64 * first_lk {
+                        *ops = self.align(&template, seq.borrow(), memory.default_radius).1;
+                    }
+                    let lk = self.update(&mut memory, &template, seq.borrow(), ops);
                     match modif_table.is_empty() {
                         true => modif_table.extend_from_slice(&memory.mod_table),
                         false => {
@@ -835,7 +822,25 @@ impl PairHiddenMarkovModel {
                     lk
                 })
                 .sum();
-            if !polish_guided(&mut template, &modif_table, lk, inactive) {
+            let changed_pos = polish_guided(&mut template, &modif_table, lk, inactive);
+            let edit_path = changed_pos.iter().map(|&(pos, op)| {
+                if op < 4 {
+                    (pos, crate::op::Edit::Subst)
+                } else if op < 8 {
+                    (pos, crate::op::Edit::Insertion)
+                } else if op < 8 + COPY_SIZE {
+                    (pos, crate::op::Edit::Copy(op - 8 + 1))
+                } else {
+                    (pos, crate::op::Edit::Deletion(op - 8 - COPY_SIZE + 1))
+                }
+            });
+            for (ops, seq) in ops.iter_mut().zip(xs.iter()) {
+                let seq = seq.borrow();
+                let (qlen, rlen) = (seq.len(), template.len());
+                crate::op::fix_alignment_path(ops, edit_path.clone(), qlen, rlen);
+            }
+            memory.update_radius(&changed_pos, template.len());
+            if changed_pos.is_empty() {
                 break;
             }
         }
@@ -870,15 +875,6 @@ impl PairHiddenMarkovModel {
             re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut memory.fill_ranges);
             memory.initialize();
             self.fill_post_dp(&mut memory, rs, qs);
-            // eprintln!("---------------");
-            // for i in 0..qs.len() + 1 {
-            //     for j in 0..rs.len() + 1 {
-            //         let (mat, del, ins) = memory.post.get(i, j);
-            //         eprint!("[{:.2},{:.2},{:.2}] ", mat, del, ins);
-            //     }
-            //     eprintln!();
-            // }
-            // eprintln!("---------------");
             memory.pre.set(0, 0, (1f64, 0f64, 0f64));
             self.register(&mut memory, rs, qs, radius, &mut next);
         }
@@ -908,30 +904,6 @@ impl PairHiddenMarkovModel {
         let mut dead_prob = 0f64;
         for _t in 0..qs.len() + rs.len() {
             let (obss, trans) = self.summarize(mem, rs, qs, &backward, dead_prob);
-            // let (mat, del, ins) = mem
-            //     .pre
-            //     .as_raw()
-            //     .iter()
-            //     .fold((0f64, 0f64, 0f64), |(mat, ins, del), (m, i, d)| {
-            //         (mat + m, ins + i, del + d)
-            //     });
-            // eprintln!(
-            //     "STATE\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}",
-            //     t, mat, del, ins, dead_prob
-            // );
-            // let sum: f64 = trans.iter().flatten().sum();
-            // let mat: Vec<_> = trans[0].iter().map(|x| format!("{:.2}", x)).collect();
-            // let ins: Vec<_> = trans[1].iter().map(|x| format!("{:.2}", x)).collect();
-            // let del: Vec<_> = trans[2].iter().map(|x| format!("{:.2}", x)).collect();
-            // eprintln!(
-            //     "DUMP\t{}\t{:.2}\t{:.2}\t[{}]\t[{}]\t[{}]",
-            //     t,
-            //     dead_prob,
-            //     sum,
-            //     mat.join(","),
-            //     ins.join(","),
-            //     del.join(",")
-            // );
             next.mat_emit
                 .iter_mut()
                 .zip(obss)
@@ -1377,11 +1349,15 @@ pub struct Memory {
     // Scaling factor.
     pre_scl: Vec<f64>,
     post_scl: Vec<f64>,
+    // Radius parameters.
+    default_radius: usize,
+    radius: Vec<usize>,
     fill_ranges: Vec<(usize, usize)>,
     mod_table: Vec<f64>,
 }
 
 impl Memory {
+    const MIN_RADIUS: usize = 4;
     pub fn with_capacity(rlen: usize, radius: usize) -> Self {
         let fill_ranges = Vec::with_capacity(radius * rlen * 3);
         let mod_table = Vec::with_capacity(radius * rlen * 3);
@@ -1392,6 +1368,8 @@ impl Memory {
             post: DPTable::with_capacity(rlen, radius, (0f64, 0f64, 0f64)),
             pre_scl: Vec::with_capacity(5 * rlen / 2),
             post_scl: Vec::with_capacity(5 * rlen / 2),
+            default_radius: radius,
+            radius: Vec::with_capacity(5 * rlen / 2),
         }
     }
     fn initialize(&mut self) {
@@ -1399,6 +1377,56 @@ impl Memory {
         self.post.initialize((0.0, 0.0, 0.0), &self.fill_ranges);
         self.pre_scl.clear();
         self.post_scl.clear();
+    }
+    fn set_fill_ranges(&mut self, rlen: usize, qlen: usize, ops: &[Op]) {
+        self.fill_ranges.clear();
+        self.fill_ranges
+            .extend(std::iter::repeat((rlen + 1, 0)).take(qlen + 1));
+        let fill_len = (rlen + 1).saturating_sub(self.radius.len());
+        self.radius
+            .extend(std::iter::repeat(self.default_radius).take(fill_len));
+        re_fill_fill_range(qlen, rlen, ops, self.default_radius, &mut self.fill_ranges);
+    }
+    fn update_radius(&mut self, updated_position: &[(usize, usize)], len: usize) {
+        let orig_len = self.radius.len();
+        let mut prev_pos = 0;
+        const SCALE: usize = 1;
+        for &(position, op) in updated_position.iter() {
+            for pos in prev_pos..position {
+                self.radius
+                    .push((self.radius[pos] / SCALE).max(Self::MIN_RADIUS));
+            }
+            prev_pos = if op < 4 {
+                // Mism
+                self.radius.push(self.default_radius);
+                position + 1
+            } else if op < 8 {
+                // Insertion
+                self.radius.push(self.default_radius);
+                self.radius.push(self.default_radius);
+                position + 1
+            } else if op < 8 + COPY_SIZE {
+                // Copying.
+                let len = op - 8 + 2;
+                self.radius
+                    .extend(std::iter::repeat(self.default_radius).take(len));
+                position + 1
+            } else {
+                // Deletion
+                position + op - 8 - COPY_SIZE + 1
+            };
+        }
+        // Finally, prev_pos -> prev_len, exact matches.
+        for pos in prev_pos..orig_len {
+            self.radius
+                .push((self.radius[pos] / SCALE).max(Self::MIN_RADIUS));
+        }
+        let mut idx = 0;
+        self.radius.retain(|_| {
+            idx += 1;
+            orig_len < idx
+        });
+        assert_eq!(self.radius.len(), len + 1);
     }
 }
 
@@ -1413,10 +1441,9 @@ fn polish_guided(
     modif_table: &[f64],
     current_lk: f64,
     inactive: usize,
-) -> bool {
+) -> Vec<(usize, usize)> {
     let orig_len = template.len();
-    // let mut improved = Vec::with_capacity(template.len() * 11 / 10);
-    let mut is_updated = false;
+    let mut changed_positions = vec![];
     let mut modif_table = modif_table.chunks_exact(NUM_ROW);
     let mut pos = 0;
     while let Some(row) = modif_table.next() {
@@ -1429,7 +1456,7 @@ fn polish_guided(
             .max_by(|x, y| (x.1).partial_cmp(y.1).unwrap())
             .unwrap();
         if current_lk + MIN_UP < lk && pos < orig_len {
-            is_updated = true;
+            changed_positions.push((pos, op));
             if op < 4 {
                 // Mutateion.
                 template.push(b"ACGT"[op]);
@@ -1464,8 +1491,8 @@ fn polish_guided(
             template.push(template[pos]);
             pos += 1;
         } else if current_lk + MIN_UP < lk && 4 <= op && op < 8 {
+            changed_positions.push((pos, op));
             // Here, we need to consider the last insertion...
-            is_updated = true;
             template.push(b"ACGT"[op - 4]);
         }
     }
@@ -1475,7 +1502,7 @@ fn polish_guided(
         idx += 1;
         orig_len < idx
     });
-    is_updated
+    changed_positions
 }
 
 #[cfg(test)]
@@ -1573,7 +1600,7 @@ pub mod tests {
             let (modif_table, mut ops) = {
                 let mut memory = Memory::with_capacity(template.len(), radius);
                 let mut ops = bootstrap_ops(template.len(), query.len());
-                let lk = hmm.update(&mut memory, &template, &query, radius, &mut ops);
+                let lk = hmm.update(&mut memory, &template, &query, &mut ops);
                 println!("LK\t{}", lk);
                 (memory.mod_table, ops)
             };
@@ -1590,7 +1617,7 @@ pub mod tests {
                 let orig = mod_version[j];
                 for (&base, lk_m) in b"ACGT".iter().zip(modif_table) {
                     mod_version[j] = base;
-                    let lk = hmm.update(&mut memory, &mod_version, &query, radius, &mut ops);
+                    let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
                     assert!((lk - lk_m).abs() < 0.0001, "{},{},mod", lk, lk_m);
                     println!("M\t{}\t{}", j, (lk - lk_m).abs());
                     mod_version[j] = orig;
@@ -1598,7 +1625,7 @@ pub mod tests {
                 // Insertion error
                 for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
                     mod_version.insert(j, base);
-                    let lk = hmm.update(&mut memory, &mod_version, &query, radius, &mut ops);
+                    let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
                     assert!((lk - lk_m).abs() < 0.0001, "{},{}", lk, lk_m);
                     println!("I\t{}\t{}", j, (lk - lk_m).abs());
                     mod_version.remove(j);
@@ -1611,7 +1638,7 @@ pub mod tests {
                         .chain(template[j..].iter())
                         .copied()
                         .collect();
-                    let lk = hmm.update(&mut memory, &mod_version, &query, radius, &mut ops);
+                    let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
                     println!("C\t{}\t{}\t{}", j, len, (lk - lk_m).abs());
                     assert!((lk - lk_m).abs() < 0.0001, "{},{}", lk, lk_m);
                 }
@@ -1623,7 +1650,7 @@ pub mod tests {
                         .chain(template[j + len + 1..].iter())
                         .copied()
                         .collect();
-                    let lk = hmm.update(&mut memory, &mod_version, &query, radius, &mut ops);
+                    let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
                     println!("D\t{}\t{}\t{}", j, len, lk - lk_m);
                     assert!(
                         (lk - lk_m).abs() < 0.01,
@@ -1640,7 +1667,7 @@ pub mod tests {
                 .unwrap();
             for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
                 mod_version.push(base);
-                let lk = hmm.update(&mut memory, &mod_version, &query, radius, &mut ops);
+                let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
                 assert!((lk - lk_m).abs() < 1.0001);
                 mod_version.pop();
             }
@@ -1693,7 +1720,7 @@ pub mod tests {
             let mut memory = Memory::with_capacity(template.len(), radius);
             let diff = gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE);
             let mut ops = bootstrap_ops(template.len(), diff.len());
-            hmm.update_aln_path(&mut memory, &template, &diff, radius, &mut ops);
+            hmm.update_aln_path(&mut memory, &template, &diff, &mut ops);
         }
     }
 }

@@ -47,7 +47,7 @@ fn main() {
     }
     eprintln!("------------------");
     let old_lk = hmm.eval_ln(&template, &seq, &ops);
-    let lk = hmm.update_aln_path(&mut memory, &template, &seq, radius, &mut ops);
+    let lk = hmm.update_aln_path(&mut memory, &template, &seq, &mut ops);
     println!("{},{}", old_lk, lk);
     let (refr, aln, query) = kiley::recover(&template, &seq, &ops);
     for ((refr, aln), query) in refr.chunks(150).zip(aln.chunks(150)).zip(query.chunks(150)) {
