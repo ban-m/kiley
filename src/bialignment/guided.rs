@@ -291,6 +291,7 @@ pub fn global_guided(
     }
     ops.extend(std::iter::repeat(Op::Del).take(rpos));
     ops.extend(std::iter::repeat(Op::Ins).take(qpos));
+    ops.reverse();
     (score, ops)
 }
 

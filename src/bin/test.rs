@@ -6,7 +6,7 @@ fn main() {
     let rad = 20;
     let prof = gen_seq::ProfileWithContext::default();
     let seed = 36;
-    let len = 1000;
+    let len = 2000;
     let mut rng: rand_xoshiro::Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(seed);
     let template: Vec<_> = gen_seq::generate_seq(&mut rng, len);
     let seqs: Vec<_> = (0..coverage)
