@@ -692,7 +692,7 @@ where
     T: std::borrow::Borrow<[u8]>,
 {
     let mut template = template.to_vec();
-    let len = template.len().min(21);
+    let len = template.len().min(200);
     let mut modif_table = Vec::new();
     let mut changed_pos = Vec::new();
     let mut aligner = Aligner::with_capacity(template.len(), radius);

@@ -3,4 +3,5 @@
 /result
 .*
 /scripts
-/png
+/png/script
+/script

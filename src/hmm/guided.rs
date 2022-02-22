@@ -161,6 +161,12 @@ impl PairHiddenMarkovModel {
             mat_emit: mat_emit_norm,
         }
     }
+    fn uniform() -> Self {
+        let unif = (3f64.recip(), 3f64.recip(), 3f64.recip());
+        let obs = vec![0.25; 4];
+        Self::new(unif, unif, unif, &obs)
+    }
+    #[allow(dead_code)]
     fn zeros() -> Self {
         Self {
             mat_mat: 0f64,
@@ -566,6 +572,13 @@ impl PairHiddenMarkovModel {
             let len = memory.pre_scl.len();
             (max / len as f64).exp()
         };
+        assert!(
+            !scaling.is_nan() && scaling > 0f64,
+            "{}\n{:?}\n{:?}",
+            scaling,
+            memory.pre_scl,
+            memory.post_scl
+        );
         assert_eq!(memory.post_scl.len(), qs.len() + 1);
         assert_eq!(memory.pre_scl.len(), qs.len() + 1);
         assert_eq!(memory.pre_scl.len() + 1, qs.len() + 2);
@@ -738,7 +751,7 @@ impl PairHiddenMarkovModel {
         memory
             .mod_table
             .iter_mut()
-            .for_each(|x| *x = x.ln() + scaling.ln() * len);
+            .for_each(|x| *x = x.max(MIN_POSITIVE).ln() + scaling.ln() * len);
     }
     fn update(&self, memory: &mut Memory, rs: &[u8], qs: &[u8], ops: &mut [Op]) -> f64 {
         memory.set_fill_ranges(rs.len(), qs.len(), ops);
@@ -783,13 +796,13 @@ impl PairHiddenMarkovModel {
     /// consistent with the returned sequence.
     pub fn polish_until_converge_with<T: std::borrow::Borrow<[u8]>>(
         &self,
-        template: &[u8],
+        draft: &[u8],
         xs: &[T],
         ops: &mut [Vec<Op>],
         radius: usize,
     ) -> Vec<u8> {
-        let mut template = template.to_vec();
-        let len = template.len().min(21);
+        let mut template = draft.to_vec();
+        let len = template.len().min(200);
         let mut modif_table = Vec::new();
         let mut memory = Memory::with_capacity(template.len(), radius);
         let first_lks: Vec<_> = xs
@@ -810,6 +823,30 @@ impl PairHiddenMarkovModel {
                         *ops = self.align(&template, seq.borrow(), memory.default_radius).1;
                     }
                     let lk = self.update(&mut memory, &template, seq.borrow(), ops);
+                    if log_enabled!(log::Level::Trace) {
+                        let pre_is_nan = memory
+                            .pre
+                            .as_raw()
+                            .iter()
+                            .any(|x| x.0.is_nan() || x.1.is_nan() || x.2.is_nan());
+                        let post_is_nan = memory
+                            .post
+                            .as_raw()
+                            .iter()
+                            .any(|x| x.0.is_nan() || x.1.is_nan() || x.2.is_nan());
+                        let table_is_nan = memory.mod_table.iter().any(|x| x.is_nan());
+                        if lk.is_nan() || pre_is_nan || post_is_nan || table_is_nan {
+                            if let Some((i, row)) = memory
+                                .mod_table
+                                .chunks_exact(NUM_ROW)
+                                .enumerate()
+                                .find(|x| x.1.iter().any(|x| x.is_nan()))
+                            {
+                                eprintln!("{}\t{:?}", i, row);
+                            }
+                            panic!("{},{},{},{}", lk, pre_is_nan, post_is_nan, table_is_nan);
+                        }
+                    }
                     match modif_table.is_empty() {
                         true => modif_table.extend_from_slice(&memory.mod_table),
                         false => {
@@ -840,9 +877,18 @@ impl PairHiddenMarkovModel {
                 crate::op::fix_alignment_path(ops, edit_path.clone(), qlen, rlen);
             }
             memory.update_radius(&changed_pos, template.len());
+            trace!("FIX\t{}\t{:?}", t, changed_pos);
             if changed_pos.is_empty() {
+                if log_enabled!(log::Level::Trace) {
+                    let dist = crate::bialignment::edit_dist(draft, &template);
+                    trace!("POLISHED\t{}\t{}", t, dist);
+                }
                 break;
             }
+        }
+        if log_enabled!(log::Level::Trace) {
+            let dist = crate::bialignment::edit_dist(draft, &template);
+            trace!("POLISHED\t{}\t{}", 101, dist);
         }
         template
     }
@@ -1114,7 +1160,7 @@ impl PairHiddenMarkovModel {
         assert_eq!(xss.len(), ops.len());
         let rs = template;
         let mut memory = Memory::with_capacity(template.len(), radius);
-        let mut next = PairHiddenMarkovModel::zeros();
+        let mut next = PairHiddenMarkovModel::uniform();
         for (ops, seq) in ops.iter().zip(xss.iter()) {
             let qs = seq.borrow();
             let ops = ops.borrow();
@@ -1164,10 +1210,10 @@ impl PairHiddenMarkovModel {
                 x.merge(&y);
                 x
             });
+        next.regularize(0.1);
         next.normalize();
         *self = next;
     }
-
     pub fn fit_naive<T: std::borrow::Borrow<[u8]>>(
         &mut self,
         template: &[u8],
@@ -1296,6 +1342,18 @@ impl PairHiddenMarkovModel {
             .zip(other.mat_emit.iter())
             .for_each(|(x, y)| *x += y);
     }
+    fn regularize(&mut self, weight: f64) {
+        self.mat_mat += weight;
+        self.mat_ins += weight;
+        self.mat_del += weight;
+        self.ins_mat += weight;
+        self.ins_del += weight;
+        self.ins_ins += weight;
+        self.del_mat += weight;
+        self.del_del += weight;
+        self.del_ins += weight;
+        self.mat_emit.iter_mut().for_each(|x| *x += weight);
+    }
     fn normalize(&mut self) {
         let mat_sum = self.mat_mat + self.mat_ins + self.mat_del;
         self.mat_mat /= mat_sum;
@@ -1390,7 +1448,7 @@ impl Memory {
     fn update_radius(&mut self, updated_position: &[(usize, usize)], len: usize) {
         let orig_len = self.radius.len();
         let mut prev_pos = 0;
-        const SCALE: usize = 1;
+        const SCALE: usize = 2;
         for &(position, op) in updated_position.iter() {
             for pos in prev_pos..position {
                 self.radius

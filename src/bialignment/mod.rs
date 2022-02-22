@@ -1410,6 +1410,93 @@ pub fn global(xs: &[u8], ys: &[u8], mat: i32, mism: i32, open: i32, ext: i32) ->
     (score, ops)
 }
 
+/// Local alignment with affine gap score. xs is the reference and ys is the query.
+/// The returned value is (score, xstart, xend, ystart, yend, operations)
+type LocalResult = (i32, usize, usize, usize, usize, Vec<Op>);
+pub fn local(xs: &[u8], ys: &[u8], mat: i32, mism: i32, open: i32, ext: i32) -> LocalResult {
+    // 0->Match, 1-> Del, 2-> Ins phase.
+    // Initialize.
+    let mut dp = vec![vec![vec![0; ys.len() + 1]; xs.len() + 1]; 3];
+    // current max.
+    let mut max = 0;
+    let mut argmax = (0, 0, 0);
+    // Recur.
+    for (i, x) in xs.iter().enumerate() {
+        let i = i + 1;
+        for (j, y) in ys.iter().enumerate() {
+            let j = j + 1;
+            let mat_score = if x == y { mat } else { mism };
+            dp[0][i][j] = (dp[0][i - 1][j - 1] + mat_score)
+                .max(dp[1][i - 1][j - 1] + mat_score)
+                .max(dp[2][i - 1][j - 1] + mat_score)
+                .max(0);
+            dp[1][i][j] = (dp[0][i - 1][j] + open)
+                .max(dp[1][i - 1][j] + ext)
+                .max(dp[2][i - 1][j] + open)
+                .max(0);
+            dp[2][i][j] = (dp[0][i][j - 1] + open).max(dp[2][i][j - 1] + ext).max(0);
+            for s in 0..3 {
+                if max < dp[s][i][j] {
+                    max = dp[s][i][j];
+                    argmax = (s, i, j);
+                }
+            }
+        }
+    }
+    let (mut state, xend, yend) = argmax;
+    let (mut xpos, mut ypos) = (xend, yend);
+    let score = max;
+    let mut ops = vec![];
+    while dp[state][xpos][ypos] != 0 {
+        let current = dp[state][xpos][ypos];
+        let (x, y) = (xs[xpos - 1], ys[ypos - 1]);
+        let mat_score = if x == y { mat } else { mism };
+        let (op, new_state) = if state == 0 {
+            let mat = dp[0][xpos - 1][ypos - 1] + mat_score;
+            let del = dp[1][xpos - 1][ypos - 1] + mat_score;
+            let ins = dp[2][xpos - 1][ypos - 1] + mat_score;
+            let mat_op = if x == y { Op::Match } else { Op::Mismatch };
+            if current == mat {
+                (mat_op, 0)
+            } else if current == del {
+                (mat_op, 1)
+            } else {
+                assert_eq!(current, ins);
+                (mat_op, 2)
+            }
+        } else if state == 1 {
+            if current == dp[0][xpos - 1][ypos] + open {
+                (Op::Del, 0)
+            } else if current == dp[1][xpos - 1][ypos] + ext {
+                (Op::Del, 1)
+            } else {
+                assert_eq!(current, dp[2][xpos - 1][ypos] + open);
+                (Op::Del, 2)
+            }
+        } else {
+            assert_eq!(state, 2);
+            if current == dp[0][xpos][ypos - 1] + open {
+                (Op::Ins, 0)
+            } else {
+                assert_eq!(current, dp[2][xpos][ypos - 1] + ext);
+                (Op::Ins, 2)
+            }
+        };
+        match op {
+            Op::Del => xpos -= 1,
+            Op::Ins => ypos -= 1,
+            Op::Mismatch | Op::Match => {
+                xpos -= 1;
+                ypos -= 1;
+            }
+        }
+        ops.push(op);
+        state = new_state;
+    }
+    ops.reverse();
+    (score, xpos, xend, ypos, yend, ops)
+}
+
 /// Global alignment with banded alignment. In this algorithm, the band is "fixed", not adaptive(currently).
 pub fn global_banded(
     reference: &[u8],
