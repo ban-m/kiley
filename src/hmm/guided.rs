@@ -560,66 +560,72 @@ impl PairHiddenMarkovModel {
         // let X be the maximum of sum_{t=0}^{i} ln(Cf[t]) sum_{t=i}^{|Q|} ln(Cb[t])
         // return (X/|Q|).exp()
         let scaling: f64 = {
-            let mut current: f64 = memory.post_scl.iter().map(|x| x.ln()).sum();
-            current += memory.pre_scl[0].ln();
-            let mut max = current;
-            let forward = memory.pre_scl.iter().skip(1);
-            let backward = memory.post_scl.iter();
-            for (f, b) in forward.zip(backward) {
-                current += f.ln() - b.ln();
-                max = max.max(current);
-            }
-            let len = memory.pre_scl.len();
-            (max / len as f64).exp()
+            let current: f64 = memory.post_scl.iter().map(|x| x.ln()).sum();
+            let max = memory
+                .pre_scl
+                .iter()
+                .zip(memory.post_scl.iter())
+                .scan(current, |current, (f, b)| {
+                    let val = *current + f.ln();
+                    *current -= b.ln();
+                    Some(val)
+                })
+                .max_by(|x, y| x.partial_cmp(&y).unwrap())
+                .unwrap();
+            (max / memory.post_scl.len() as f64).exp()
         };
-        assert!(
-            !scaling.is_nan() && scaling > 0f64,
-            "{}\n{:?}\n{:?}",
-            scaling,
-            memory.pre_scl,
-            memory.post_scl
-        );
+        // i-> prod_{t=0}^{i} scale[t]/scaling * prod_{t=i}^{N+1} scale[t]/scaling
+        let scale_stay: Vec<_> = {
+            let current: f64 = memory.post_scl.iter().map(|x| x / scaling).product();
+            memory
+                .pre_scl
+                .iter()
+                .zip(memory.post_scl.iter())
+                .scan(current / scaling, |current, (f, b)| {
+                    let val = *current * f;
+                    *current = val / b;
+                    Some(val)
+                })
+                .collect()
+        };
+        // i-> prod_{t=0}^{i} scale[t]/scaling * prod_{t=i+1}^{N+1} scale[t]/scaling / scaling.
+        // The last /scaling factor is needed .
+        let scale_proc: Vec<_> = {
+            let current: f64 = memory
+                .post_scl
+                .iter()
+                .skip(1)
+                .map(|x| x / scaling)
+                .product();
+            let current = current / scaling;
+            memory
+                .pre_scl
+                .iter()
+                .zip(memory.post_scl.iter().skip(1))
+                .scan(current / scaling, |current, (f, b)| {
+                    let val = *current * f;
+                    *current = val / b;
+                    Some(val)
+                })
+                .collect()
+        };
+        assert!(scale_proc.iter().all(|x| x.is_finite()), "{:?}", scale_proc);
+        assert!(scale_stay.iter().all(|x| x.is_finite()), "{:?}", scale_stay);
         assert_eq!(memory.post_scl.len(), qs.len() + 1);
         assert_eq!(memory.pre_scl.len(), qs.len() + 1);
         assert_eq!(memory.pre_scl.len() + 1, qs.len() + 2);
-        // i-> prod_{t=0}^{i} scale[t]/scaling
-        let forward_scl = {
-            let len = memory.pre_scl.len();
-            let mut acc = 1f64;
-            for i in 0..len {
-                acc *= memory.pre_scl[i] / scaling;
-                memory.pre_scl.push(acc);
-            }
-            &memory.pre_scl[len..]
-        };
-        // i -> prod_{t=i}^{N+1} scale[t]/scaling
-        let backward_scl = {
-            let len = memory.post_scl.len();
-            let mut acc = 1f64;
-            for i in (0..len).rev() {
-                acc *= memory.post_scl[i] / scaling;
-                memory.post_scl.push(acc);
-            }
-            memory.post_scl[len..].reverse();
-            &memory.post_scl[len..]
-        };
         let mut slots = [0f64; 8 + COPY_SIZE + DEL_SIZE];
         for ((i, &(start, end)), &q) in memory.fill_ranges.iter().enumerate().zip(qs.iter()) {
             for j in start..end {
                 slots.iter_mut().for_each(|x| *x = 0f64);
-                let (pre_mat, pre_ins, pre_del) = {
-                    let (mat, ins, del) = memory.pre.get(i, j);
-                    let scl = forward_scl[i];
-                    (mat * scl, ins * scl, del * scl)
+                let (to_mat, to_del) = {
+                    let prev = memory.pre.get(i, j);
+                    (self.to_mat(prev), self.to_del(prev))
                 };
-                let post_no_del = memory.post.get(i, j).2 * backward_scl[i];
-                let post_del_del = memory.post.get(i, j + 1).2 * backward_scl[i];
-                let post_mat_mat = memory.post.get(i + 1, j + 1).0 * backward_scl[i + 1] / scaling;
-                let post_ins_mat = memory.post.get(i + 1, j).0 * backward_scl[i + 1] / scaling;
-                let to_mat =
-                    pre_mat * self.mat_mat + pre_del * self.del_mat + pre_ins * self.ins_mat;
-                let to_del =
-                    pre_mat * self.mat_del + pre_del * self.del_del + pre_ins * self.ins_del;
+                let post_no_del = memory.post.get(i, j).2 * scale_stay[i];
+                let post_del_del = memory.post.get(i, j + 1).2 * scale_stay[i];
+                let post_mat_mat = memory.post.get(i + 1, j + 1).0 * scale_proc[i];
+                let post_ins_mat = memory.post.get(i + 1, j).0 * scale_proc[i];
                 b"ACGT".iter().zip(slots.iter_mut()).for_each(|(&b, y)| {
                     let mat = self.obs(b, q) * post_mat_mat;
                     let del = self.del(b) * post_del_del;
@@ -642,14 +648,11 @@ impl PairHiddenMarkovModel {
                         let r = rs[j];
                         let mat = self.obs(r, q) * post_mat_mat;
                         let del = self.del(r) * post_del_del;
-                        let (pre_mat, pre_ins, pre_del) = {
-                            let (mat, ins, del) = memory.pre.get(i, pos);
-                            let scl = forward_scl[i];
-                            (mat * scl, ins * scl, del * scl)
+                        let (to_mat, to_del) = {
+                            let prev = memory.pre.get(i, pos);
+                            (self.to_mat(prev), self.to_del(prev))
                         };
-                        *y = pre_mat * (self.mat_mat * mat + self.mat_del * del)
-                            + pre_ins * (self.ins_mat * mat + self.ins_del * del)
-                            + pre_del * (self.del_mat * mat + self.del_del * del);
+                        *y = to_mat * mat + to_del * del;
                     });
                 // deleting the j..j+d bases..
                 (0..DEL_SIZE)
@@ -658,10 +661,9 @@ impl PairHiddenMarkovModel {
                     .for_each(|(len, y)| {
                         let post = j + len + 1;
                         let r = rs[post];
-                        let post_mat_mat =
-                            memory.post.get(i + 1, post + 1).0 * backward_scl[i + 1] / scaling;
+                        let post_mat_mat = memory.post.get(i + 1, post + 1).0 * scale_proc[i];
                         let mat = self.obs(r, q) * post_mat_mat;
-                        let post_del_del = memory.post.get(i, post + 1).2 * backward_scl[i];
+                        let post_del_del = memory.post.get(i, post + 1).2 * scale_stay[i];
                         let del = self.del(r) * post_del_del;
                         *y = to_mat * mat + to_del * del;
                     });
@@ -678,30 +680,20 @@ impl PairHiddenMarkovModel {
             slots.iter_mut().for_each(|x| *x = 0.0);
             let i = memory.fill_ranges.len() - 1;
             for j in start..end {
-                let (pre_mat, pre_ins, pre_del) = {
-                    let (mat, ins, del) = memory.pre.get(i, j);
-                    let scl = forward_scl[i];
-                    (mat * scl, ins * scl, del * scl)
-                };
-                let post_del_del = memory.post.get(i, j + 1).2 * backward_scl[i];
-                let post_no_del = memory.post.get(i, j).2 * backward_scl[i];
+                let to_del = { self.to_del(memory.pre.get(i, j)) };
+                let post_del_del = memory.post.get(i, j + 1).2 * scale_stay[i];
+                let post_no_del = memory.post.get(i, j).2 * scale_stay[i];
                 slots.iter_mut().for_each(|x| *x = 0f64);
                 // Change the j-th base into ...
                 b"ACGT".iter().zip(slots.iter_mut()).for_each(|(&b, y)| {
-                    let mat = pre_mat * self.mat_del;
-                    let del = pre_del * self.del_del;
-                    let ins = pre_ins * self.ins_del;
-                    *y = (mat + del + ins) * post_del_del * self.del(b);
+                    *y = to_del * post_del_del * self.del(b);
                 });
                 // Insertion before the j-th base ...
                 b"ACGT"
                     .iter()
                     .zip(slots.iter_mut().skip(4))
                     .for_each(|(&b, y)| {
-                        let mat = pre_mat * self.mat_del;
-                        let del = pre_del * self.del_del;
-                        let ins = pre_ins * self.ins_del;
-                        *y = (mat + del + ins) * self.del(b) * post_no_del;
+                        *y = to_del * self.del(b) * post_no_del;
                     });
                 // Copying the j..j+c bases....
                 (0..COPY_SIZE)
@@ -709,15 +701,8 @@ impl PairHiddenMarkovModel {
                     .zip(slots.iter_mut().skip(8))
                     .for_each(|(len, y)| {
                         let r = rs[j];
-                        let (pre_mat, pre_ins, pre_del) = {
-                            let (mat, ins, del) = memory.pre.get(i, j + len + 1);
-                            let scl = forward_scl[i];
-                            (mat * scl, ins * scl, del * scl)
-                        };
-                        let mat = pre_mat * self.mat_del;
-                        let del = pre_del * self.del_del;
-                        let ins = pre_ins * self.ins_del;
-                        *y = (mat + del + ins) * self.del(r) * post_del_del;
+                        let to_del = self.to_del(memory.pre.get(i, j + len + 1));
+                        *y = to_del * self.del(r) * post_del_del;
                     });
                 // Deleting the j..j+d bases
                 (0..DEL_SIZE)
@@ -727,13 +712,10 @@ impl PairHiddenMarkovModel {
                         let post = j + len + 1;
                         *y = match rs.get(post) {
                             Some(&r) => {
-                                let post_del_del = memory.post.get(i, post + 1).2 * backward_scl[i];
-                                let mat = pre_mat * self.mat_del;
-                                let del = pre_del * self.del_del;
-                                let ins = pre_ins * self.ins_del;
-                                (mat + del + ins) * self.del(r) * post_del_del
+                                let post_del_del = memory.post.get(i, post + 1).2 * scale_stay[i];
+                                to_del * self.del(r) * post_del_del
                             }
-                            None => (pre_mat + pre_del + pre_ins) / scaling,
+                            None => scale_stay[i] * sum(memory.pre.get(i, j)) * memory.post_scl[i],
                         };
                     });
                 let row_start = NUM_ROW * j;
@@ -748,10 +730,13 @@ impl PairHiddenMarkovModel {
         memory.pre_scl.truncate(qs.len() + 1);
         memory.post_scl.truncate(qs.len() + 1);
         let len = (qs.len() + 2) as f64;
-        memory
-            .mod_table
-            .iter_mut()
-            .for_each(|x| *x = x.max(MIN_POSITIVE).ln() + scaling.ln() * len);
+        memory.mod_table.iter_mut().for_each(|x| {
+            let old = *x;
+            *x = x.max(MIN_POSITIVE).ln() + scaling.ln() * len;
+            if x.is_infinite() {
+                panic!("{}\t{}\t{}\t{}", x, old, scaling, len);
+            }
+        });
     }
     fn update(&self, memory: &mut Memory, rs: &[u8], qs: &[u8], ops: &mut [Op]) -> f64 {
         memory.set_fill_ranges(rs.len(), qs.len(), ops);
@@ -759,6 +744,22 @@ impl PairHiddenMarkovModel {
         self.fill_pre_dp(memory, rs, qs);
         self.fill_post_dp(memory, rs, qs);
         self.fill_mod_table(memory, rs, qs);
+        if log_enabled!(log::Level::Trace) && memory.mod_table.iter().any(|x| !x.is_finite()) {
+            let pre_is_nan = memory
+                .pre
+                .as_raw()
+                .iter()
+                .any(|x| x.0.is_infinite() || x.1.is_infinite() || x.2.is_infinite());
+            let post_is_nan = memory
+                .post
+                .as_raw()
+                .iter()
+                .any(|x| x.0.is_infinite() || x.1.is_infinite() || x.2.is_infinite());
+            let table_is_infinite = memory.mod_table.iter().any(|x| x.is_infinite());
+            eprintln!("{:?}", memory.pre_scl);
+            eprintln!("{:?}", memory.post_scl);
+            panic!("{},{},{}", pre_is_nan, post_is_nan, table_is_infinite);
+        };
         let lk = memory.post.get(0, 0).0.ln() + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>();
         let lk2 = {
             let (mat, ins, del) = memory.pre.get(qs.len(), rs.len());
