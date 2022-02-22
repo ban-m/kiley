@@ -90,12 +90,12 @@ impl std::default::Default for ProfileWithContext {
             mat_mat: 0.90,
             mat_del: 0.05,
             mat_ins: 0.05,
-            ins_mat: 0.04,
-            ins_ins: 0.95,
-            ins_del: 0.01,
-            del_mat: 0.04,
-            del_ins: 0.01,
-            del_del: 0.95,
+            ins_mat: 0.5,
+            ins_ins: 0.46,
+            ins_del: 0.04,
+            del_mat: 0.46,
+            del_ins: 0.04,
+            del_del: 0.5,
         }
     }
 }

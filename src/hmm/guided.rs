@@ -559,58 +559,111 @@ impl PairHiddenMarkovModel {
         }
         // let X be the maximum of sum_{t=0}^{i} ln(Cf[t]) sum_{t=i}^{|Q|} ln(Cb[t])
         // return (X/|Q|).exp()
-        let scaling: f64 = {
+        let max: f64 = {
             let current: f64 = memory.post_scl.iter().map(|x| x.ln()).sum();
-            let max = memory
+            memory
                 .pre_scl
                 .iter()
                 .zip(memory.post_scl.iter())
                 .scan(current, |current, (f, b)| {
                     let val = *current + f.ln();
-                    *current -= b.ln();
+                    *current = val - b.ln();
                     Some(val)
                 })
                 .max_by(|x, y| x.partial_cmp(&y).unwrap())
-                .unwrap();
-            (max / memory.post_scl.len() as f64).exp()
+                .unwrap()
         };
+        let scaling = (max / memory.post_scl.len() as f64).exp();
         // i-> prod_{t=0}^{i} scale[t]/scaling * prod_{t=i}^{N+1} scale[t]/scaling
         let scale_stay: Vec<_> = {
-            let current: f64 = memory.post_scl.iter().map(|x| x / scaling).product();
+            let ln_scale = max / memory.post_scl.len() as f64;
+            let current: f64 = memory.post_scl.iter().map(|x| x.ln() - ln_scale).sum();
             memory
                 .pre_scl
                 .iter()
                 .zip(memory.post_scl.iter())
-                .scan(current / scaling, |current, (f, b)| {
-                    let val = *current * f;
-                    *current = val / b;
+                .scan(current - ln_scale, |current, (f, b)| {
+                    let val = *current + f.ln();
+                    *current = val - b.ln();
                     Some(val)
                 })
+                .map(|lk| lk.exp())
                 .collect()
+            // let current: f64 = memory.post_scl.iter().map(|x| x / scaling).product();
+            // let old: Vec<_> = memory
+            //     .pre_scl
+            //     .iter()
+            //     .zip(memory.post_scl.iter())
+            //     .scan(current / scaling, |current, (f, b)| {
+            //         let val = *current * f;
+            //         *current = val / b;
+            //         Some(val)
+            //     })
+            //     .collect();
+            // let diff: f64 = old
+            //     .iter()
+            //     .zip(temp.iter())
+            //     .map(|(x, y)| (x - y).abs().powi(2))
+            //     .sum();
+            // assert!(diff < 0.0001, "{}", diff);
+            // old
         };
         // i-> prod_{t=0}^{i} scale[t]/scaling * prod_{t=i+1}^{N+1} scale[t]/scaling / scaling.
         // The last /scaling factor is needed .
         let scale_proc: Vec<_> = {
+            let ln_scale = max / memory.post_scl.len() as f64;
             let current: f64 = memory
                 .post_scl
                 .iter()
                 .skip(1)
-                .map(|x| x / scaling)
-                .product();
-            let current = current / scaling;
+                .map(|x| x.ln() - ln_scale)
+                .sum();
             memory
                 .pre_scl
                 .iter()
                 .zip(memory.post_scl.iter().skip(1))
-                .scan(current / scaling, |current, (f, b)| {
-                    let val = *current * f;
-                    *current = val / b;
+                .scan(current - 2f64 * ln_scale, |current, (f, b)| {
+                    let val = *current + f.ln();
+                    *current = val - b.ln();
                     Some(val)
                 })
+                .map(|x| x.exp())
                 .collect()
+            // let current: f64 = memory
+            //     .post_scl
+            //     .iter()
+            //     .skip(1)
+            //     .map(|x| x / scaling)
+            //     .product();
+            // let current = current / scaling;
+            // let old: Vec<_> = memory
+            //     .pre_scl
+            //     .iter()
+            //     .zip(memory.post_scl.iter().skip(1))
+            //     .scan(current / scaling, |current, (f, b)| {
+            //         let val = *current * f;
+            //         *current = val / b;
+            //         Some(val)
+            //     })
+            //     .collect();
+            // let diff: f64 = temp
+            //     .iter()
+            //     .zip(old.iter())
+            //     .map(|(x, y)| (x - y).powi(2))
+            //     .sum();
+            // assert!(diff < 0.0001, "{}", diff);
+            // old
         };
-        assert!(scale_proc.iter().all(|x| x.is_finite()), "{:?}", scale_proc);
+        assert!(
+            scale_proc.iter().all(|x| x.is_finite()),
+            "{:?}\t{}\t{}",
+            scale_proc,
+            scaling,
+            memory.post_scl[0],
+        );
         assert!(scale_stay.iter().all(|x| x.is_finite()), "{:?}", scale_stay);
+        assert!(scale_proc.iter().all(|x| !x.is_nan()), "{:?}", scale_proc);
+        assert!(scale_stay.iter().all(|x| !x.is_nan()), "{:?}", scale_stay);
         assert_eq!(memory.post_scl.len(), qs.len() + 1);
         assert_eq!(memory.pre_scl.len(), qs.len() + 1);
         assert_eq!(memory.pre_scl.len() + 1, qs.len() + 2);
@@ -730,13 +783,10 @@ impl PairHiddenMarkovModel {
         memory.pre_scl.truncate(qs.len() + 1);
         memory.post_scl.truncate(qs.len() + 1);
         let len = (qs.len() + 2) as f64;
-        memory.mod_table.iter_mut().for_each(|x| {
-            let old = *x;
-            *x = x.max(MIN_POSITIVE).ln() + scaling.ln() * len;
-            if x.is_infinite() {
-                panic!("{}\t{}\t{}\t{}", x, old, scaling, len);
-            }
-        });
+        memory
+            .mod_table
+            .iter_mut()
+            .for_each(|x| *x = x.max(MIN_POSITIVE).ln() + scaling.ln() * len);
     }
     fn update(&self, memory: &mut Memory, rs: &[u8], qs: &[u8], ops: &mut [Op]) -> f64 {
         memory.set_fill_ranges(rs.len(), qs.len(), ops);
@@ -756,8 +806,6 @@ impl PairHiddenMarkovModel {
                 .iter()
                 .any(|x| x.0.is_infinite() || x.1.is_infinite() || x.2.is_infinite());
             let table_is_infinite = memory.mod_table.iter().any(|x| x.is_infinite());
-            eprintln!("{:?}", memory.pre_scl);
-            eprintln!("{:?}", memory.post_scl);
             panic!("{},{},{}", pre_is_nan, post_is_nan, table_is_infinite);
         };
         let lk = memory.post.get(0, 0).0.ln() + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>();
@@ -824,30 +872,6 @@ impl PairHiddenMarkovModel {
                         *ops = self.align(&template, seq.borrow(), memory.default_radius).1;
                     }
                     let lk = self.update(&mut memory, &template, seq.borrow(), ops);
-                    if log_enabled!(log::Level::Trace) {
-                        let pre_is_nan = memory
-                            .pre
-                            .as_raw()
-                            .iter()
-                            .any(|x| x.0.is_nan() || x.1.is_nan() || x.2.is_nan());
-                        let post_is_nan = memory
-                            .post
-                            .as_raw()
-                            .iter()
-                            .any(|x| x.0.is_nan() || x.1.is_nan() || x.2.is_nan());
-                        let table_is_nan = memory.mod_table.iter().any(|x| x.is_nan());
-                        if lk.is_nan() || pre_is_nan || post_is_nan || table_is_nan {
-                            if let Some((i, row)) = memory
-                                .mod_table
-                                .chunks_exact(NUM_ROW)
-                                .enumerate()
-                                .find(|x| x.1.iter().any(|x| x.is_nan()))
-                            {
-                                eprintln!("{}\t{:?}", i, row);
-                            }
-                            panic!("{},{},{},{}", lk, pre_is_nan, post_is_nan, table_is_nan);
-                        }
-                    }
                     match modif_table.is_empty() {
                         true => modif_table.extend_from_slice(&memory.mod_table),
                         false => {
@@ -1733,6 +1757,97 @@ pub mod tests {
         }
     }
     #[test]
+    fn modification_table2() {
+        use crate::gen_seq;
+        let coverage = 10;
+        let radius = 20;
+        let prof = gen_seq::ProfileWithContext::default();
+        let seed = 36;
+        let len = 500;
+        let mut rng: rand_xoshiro::Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(seed);
+        let template: Vec<_> = gen_seq::generate_seq(&mut rng, len);
+        let seqs: Vec<_> = (0..coverage)
+            .map(|_| gen_seq::introduce_randomness_with_context(&template, &mut rng, &prof))
+            .collect();
+        let hmm = super::PairHiddenMarkovModel::default();
+        let template = crate::ternary_consensus_by_chunk(&seqs, radius);
+        let query = &seqs[0];
+        let (modif_table, mut ops) = {
+            let mut memory = Memory::with_capacity(template.len(), radius);
+            let mut ops = bootstrap_ops(template.len(), query.len());
+            let lk = hmm.update(&mut memory, &template, &query, &mut ops);
+            println!("LK\t{}", lk);
+            (memory.mod_table, ops)
+        };
+        let mut memory = Memory::with_capacity(template.len(), radius);
+        let mut mod_version = template.clone();
+        println!("{}", seed);
+        // Mutation error
+        for (j, modif_table) in modif_table
+            .chunks_exact(NUM_ROW)
+            .take(template.len())
+            .enumerate()
+        {
+            println!("{}", j);
+            let orig = mod_version[j];
+            for (&base, lk_m) in b"ACGT".iter().zip(modif_table) {
+                mod_version[j] = base;
+                let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
+                assert!((lk - lk_m).abs() < 0.0001, "{},{},mod", lk, lk_m);
+                println!("M\t{}\t{}", j, (lk - lk_m).abs());
+                mod_version[j] = orig;
+            }
+            // Insertion error
+            for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
+                mod_version.insert(j, base);
+                let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
+                assert!((lk - lk_m).abs() < 0.0001, "{},{}", lk, lk_m);
+                println!("I\t{}\t{}", j, (lk - lk_m).abs());
+                mod_version.remove(j);
+            }
+            // Copying mod
+            for len in (0..COPY_SIZE).filter(|c| j + c + 1 <= template.len()) {
+                let lk_m = modif_table[8 + len];
+                let mod_version: Vec<_> = template[..j + len + 1]
+                    .iter()
+                    .chain(template[j..].iter())
+                    .copied()
+                    .collect();
+                let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
+                println!("C\t{}\t{}\t{}", j, len, (lk - lk_m).abs());
+                assert!((lk - lk_m).abs() < 0.0001, "{},{}", lk, lk_m);
+            }
+            // Deletion error
+            for len in (0..DEL_SIZE).filter(|d| j + d + 1 <= template.len()) {
+                let lk_m = modif_table[8 + COPY_SIZE + len];
+                let mod_version: Vec<_> = template[..j]
+                    .iter()
+                    .chain(template[j + len + 1..].iter())
+                    .copied()
+                    .collect();
+                let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
+                println!("D\t{}\t{}\t{}", j, len, lk - lk_m);
+                assert!(
+                    (lk - lk_m).abs() < 0.01,
+                    "{},{},{}",
+                    lk,
+                    lk_m,
+                    String::from_utf8_lossy(&template)
+                );
+            }
+        }
+        let modif_table = modif_table
+            .chunks_exact(NUM_ROW)
+            .nth(template.len())
+            .unwrap();
+        for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
+            mod_version.push(base);
+            let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
+            assert!((lk - lk_m).abs() < 1.0001);
+            mod_version.pop();
+        }
+    }
+    #[test]
     fn polish_test() {
         let hmm = PHMM::default();
         let radius = 50;
@@ -1752,7 +1867,7 @@ pub mod tests {
         }
         for seed in 0..10 {
             let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198 + seed);
-            let template = gen_seq::generate_seq(&mut rng, 70);
+            let template = gen_seq::generate_seq(&mut rng, 700);
             let diff = gen_seq::introduce_errors(&template, &mut rng, 2, 2, 2);
             let profile = gen_seq::PROFILE;
             let seqs: Vec<_> = (0..20)
