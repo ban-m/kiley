@@ -29,13 +29,8 @@ const fn base_table() -> [usize; 256] {
 }
 const BASE_TABLE: [usize; 256] = base_table();
 
-const COPY_SIZE: usize = 3;
-const DEL_SIZE: usize = 3;
-// for each position, four type of mutation,
-// four type of insertion,
-// 1bp, 2bp, 3bp copy,
-// 1bp, 2bp, 3bp deletion,
-// so, in total, there are 4 + 4 + 3 + 3 = 14 patterns of modifications.
+const COPY_SIZE: usize = 5;
+const DEL_SIZE: usize = 5;
 pub const NUM_ROW: usize = 8 + COPY_SIZE + DEL_SIZE;
 // After introducing mutation, we would take INACTIVE_TIME bases just as-is.
 const INACTIVE_TIME: usize = 5;
