@@ -692,7 +692,7 @@ where
     T: std::borrow::Borrow<[u8]>,
 {
     let mut template = template.to_vec();
-    let len = template.len().min(200);
+    let len = (template.len() / 2).max(20);
     let mut modif_table = Vec::new();
     let mut changed_pos = Vec::new();
     let mut aligner = Aligner::with_capacity(template.len(), radius);
@@ -701,7 +701,7 @@ where
         .map(|ops| ops.iter().filter(|&&op| op != Op::Match).count())
         .collect();
     for t in 0..100 {
-        let inactive = INACTIVE_TIME + t % len;
+        let inactive = INACTIVE_TIME + (INACTIVE_TIME * t) % len;
         modif_table.clear();
         let dist: u32 = ops
             .iter_mut()

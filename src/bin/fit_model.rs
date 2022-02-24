@@ -1,5 +1,4 @@
 const SEED: u64 = 129004923;
-const CONS_COV: usize = 1;
 const CONS_RAD: usize = 2;
 const CONS_LEN: usize = 10;
 const TIME: usize = 2;

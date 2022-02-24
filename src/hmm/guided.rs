@@ -836,17 +836,21 @@ impl PairHiddenMarkovModel {
         let lk = self.update(&mut memory, rs, qs, ops);
         (memory.mod_table, lk)
     }
-    /// With bootstrap operations. The returned operations would be
-    /// consistent with the returned sequence.
-    pub fn polish_until_converge_with<T: std::borrow::Borrow<[u8]>>(
+    /// With bootstrap operations and taking numbers.
+    /// The returned operations would be consistent with the returned sequence.
+    /// Only the *first* `take_num` seuqneces would be used to polish,
+    /// but the operations of the rest are also updated accordingly.
+    /// This is (slightly) faster than the usual/full polishing...
+    pub fn polish_until_converge_with_take<T: std::borrow::Borrow<[u8]>>(
         &self,
         draft: &[u8],
         xs: &[T],
         ops: &mut [Vec<Op>],
         radius: usize,
+        take_num: usize,
     ) -> Vec<u8> {
         let mut template = draft.to_vec();
-        let len = template.len().min(200);
+        let len = (template.len() / 2).max(3);
         let mut modif_table = Vec::new();
         let mut memory = Memory::with_capacity(template.len(), radius);
         let first_lks: Vec<_> = xs
@@ -857,29 +861,27 @@ impl PairHiddenMarkovModel {
         for t in 0..100 {
             let inactive = INACTIVE_TIME + (t * INACTIVE_TIME) % len;
             modif_table.clear();
-            let lk: f64 = ops
-                .iter_mut()
-                .zip(xs.iter())
-                .zip(first_lks.iter())
-                .map(|((ops, seq), first_lk)| {
-                    let lk = self.update_aln_path(&mut memory, &template, seq.borrow(), ops);
-                    if lk < 2f64 * first_lk {
-                        *ops = self.align(&template, seq.borrow(), memory.default_radius).1;
+            let mut current_lk = 0f64;
+            let seq_stream = ops.iter_mut().zip(xs.iter()).zip(first_lks.iter());
+            for (i, ((ops, seq), first_lk)) in seq_stream.enumerate() {
+                let lk = self.update_aln_path(&mut memory, &template, seq.borrow(), ops);
+                // Fallback.
+                if lk < 2f64 * first_lk {
+                    *ops = self.align(&template, seq.borrow(), memory.default_radius).1;
+                }
+                if i < take_num {
+                    current_lk += self.update(&mut memory, &template, seq.borrow(), ops);
+                    if modif_table.is_empty() {
+                        modif_table.extend_from_slice(&memory.mod_table)
+                    } else {
+                        modif_table
+                            .iter_mut()
+                            .zip(memory.mod_table.iter())
+                            .for_each(|(x, y)| *x += y);
                     }
-                    let lk = self.update(&mut memory, &template, seq.borrow(), ops);
-                    match modif_table.is_empty() {
-                        true => modif_table.extend_from_slice(&memory.mod_table),
-                        false => {
-                            modif_table
-                                .iter_mut()
-                                .zip(memory.mod_table.iter())
-                                .for_each(|(x, y)| *x += y);
-                        }
-                    }
-                    lk
-                })
-                .sum();
-            let changed_pos = polish_guided(&mut template, &modif_table, lk, inactive);
+                }
+            }
+            let changed_pos = polish_guided(&mut template, &modif_table, current_lk, inactive);
             let edit_path = changed_pos.iter().map(|&(pos, op)| {
                 if op < 4 {
                     (pos, crate::op::Edit::Subst)
@@ -897,20 +899,22 @@ impl PairHiddenMarkovModel {
                 crate::op::fix_alignment_path(ops, edit_path.clone(), qlen, rlen);
             }
             memory.update_radius(&changed_pos, template.len());
-            trace!("FIX\t{}\t{:?}", t, changed_pos);
             if changed_pos.is_empty() {
-                if log_enabled!(log::Level::Trace) {
-                    let dist = crate::bialignment::edit_dist(draft, &template);
-                    trace!("POLISHED\t{}\t{}", t, dist);
-                }
                 break;
             }
         }
-        if log_enabled!(log::Level::Trace) {
-            let dist = crate::bialignment::edit_dist(draft, &template);
-            trace!("POLISHED\t{}\t{}", 101, dist);
-        }
         template
+    }
+    /// With bootstrap operations. The returned operations would be
+    /// consistent with the returned sequence.
+    pub fn polish_until_converge_with<T: std::borrow::Borrow<[u8]>>(
+        &self,
+        draft: &[u8],
+        xs: &[T],
+        ops: &mut [Vec<Op>],
+        radius: usize,
+    ) -> Vec<u8> {
+        self.polish_until_converge_with_take(draft, xs, ops, radius, xs.len())
     }
     pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(
         &self,
