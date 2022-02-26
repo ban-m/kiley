@@ -789,20 +789,6 @@ impl PairHiddenMarkovModel {
         self.fill_pre_dp(memory, rs, qs);
         self.fill_post_dp(memory, rs, qs);
         self.fill_mod_table(memory, rs, qs);
-        if log_enabled!(log::Level::Trace) && memory.mod_table.iter().any(|x| !x.is_finite()) {
-            let pre_is_nan = memory
-                .pre
-                .as_raw()
-                .iter()
-                .any(|x| x.0.is_infinite() || x.1.is_infinite() || x.2.is_infinite());
-            let post_is_nan = memory
-                .post
-                .as_raw()
-                .iter()
-                .any(|x| x.0.is_infinite() || x.1.is_infinite() || x.2.is_infinite());
-            let table_is_infinite = memory.mod_table.iter().any(|x| x.is_infinite());
-            panic!("{},{},{}", pre_is_nan, post_is_nan, table_is_infinite);
-        };
         let lk = memory.post.get(0, 0).0.ln() + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>();
         let lk2 = {
             let (mat, ins, del) = memory.pre.get(qs.len(), rs.len());
