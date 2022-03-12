@@ -184,6 +184,7 @@ pub fn edit_dist_guided(
     (score, ops)
 }
 
+/// Global alignment, guided by the `ops`.
 pub fn global_guided(
     reference: &[u8],
     query: &[u8],
@@ -273,6 +274,154 @@ pub fn global_guided(
                 state = 1;
             }
             qpos -= 1;
+        } else {
+            ops.push(Op::Del);
+            assert_eq!(state, 2);
+            let current = del;
+            let (m_prev, i_prev, d_prev) = dp.get(qpos, rpos - 1);
+            if current == m_prev + open {
+                state = 0;
+            } else if current == i_prev + open {
+                state = 1;
+            } else {
+                assert_eq!(current, d_prev + ext);
+                state = 2;
+            }
+            rpos -= 1;
+        }
+    }
+    ops.extend(std::iter::repeat(Op::Del).take(rpos));
+    ops.extend(std::iter::repeat(Op::Ins).take(qpos));
+    ops.reverse();
+    (score, ops)
+}
+
+/// Infix alignment, guided by the `ops`.
+/// The both end of the reference is not penalized.
+pub fn infix_guided(
+    reference: &[u8],
+    query: &[u8],
+    ops: &[Op],
+    radius: usize,
+    (match_score, mism, open, ext): (i32, i32, i32, i32),
+) -> (i32, Vec<Op>) {
+    let (qs, rs) = (query, reference);
+    let fill_range = convert_to_fill_range(qs.len(), rs.len(), ops, radius);
+    let lower = (reference.len() + query.len()) as i32 * open;
+    let mut dp = DPTable::new(&fill_range, (lower, lower, lower));
+    // 1. Initialization
+    dp.set(0, 0, (0, lower, lower));
+    // Deletion is not penalized.
+    for j in 1..rs.len() + 1 {
+        dp.set(0, j, (lower, lower, 0));
+    }
+    for i in 1..qs.len() + 1 {
+        dp.set(i, 0, (lower, open + (i - 1) as i32 * ext, lower));
+    }
+    // 2. Recur.
+    let rows = fill_range.iter().enumerate().skip(1).zip(qs.iter());
+    for ((i, &(start, end)), &q) in rows {
+        for j in start.max(1)..end {
+            let r = rs[j - 1];
+            let aln = if q == r { match_score } else { mism };
+            let mat_next = {
+                let (mat, ins, del) = dp.get(i - 1, j - 1);
+                mat.max(ins).max(del) + aln
+            };
+            let ins_next = {
+                let (mat, ins, _) = dp.get(i - 1, j);
+                (mat + open).max(ins + ext)
+            };
+            let del_next = {
+                let (mat, ins, del) = dp.get(i, j - 1);
+                (mat + open).max(del + ext).max(ins + open)
+            };
+            dp.set(i, j, (mat_next, ins_next, del_next));
+        }
+    }
+    let last_row = fill_range.iter().enumerate().skip(1).zip(qs.iter()).last();
+    if let Some(((i, &(start, end)), &q)) = last_row {
+        for j in start.max(1)..end {
+            let r = rs[j - 1];
+            let aln = if q == r { match_score } else { mism };
+            let mat_next = {
+                let (mat, ins, del) = dp.get(i - 1, j - 1);
+                mat.max(ins).max(del) + aln
+            };
+            let ins_next = {
+                let (mat, ins, _) = dp.get(i - 1, j);
+                (mat + open).max(ins + ext)
+            };
+            let del_next = {
+                let (mat, ins, del) = dp.get(i, j - 1);
+                (mat).max(del).max(ins)
+            };
+            dp.set(i, j, (mat_next, ins_next, del_next));
+        }
+    }
+    // Traceback.
+    let mut qpos = qs.len();
+    let mut rpos = fill_range.last().unwrap().1 - 1;
+    assert_eq!(rpos, rs.len());
+    let (mut state, score) = {
+        let (mat, ins, del) = dp.get(qpos, rpos);
+        if ins <= mat && del <= mat {
+            (0, mat)
+        } else if mat <= ins && del <= ins {
+            (1, ins)
+        } else {
+            assert!(mat <= del && ins <= del);
+            (2, del)
+        }
+    };
+    let mut ops = Vec::with_capacity(qs.len() + rs.len());
+    while 0 < qpos && 0 < rpos {
+        let (mat, ins, del) = dp.get(qpos, rpos);
+        if state == 0 {
+            let is_mat = qs[qpos - 1] == rs[rpos - 1];
+            if is_mat {
+                ops.push(Op::Match)
+            } else {
+                ops.push(Op::Mismatch)
+            };
+            let aln = if is_mat { match_score } else { mism };
+            let current = mat - aln;
+            let (m_prev, i_prev, d_prev) = dp.get(qpos - 1, rpos - 1);
+            if current == m_prev {
+                state = 0;
+            } else if current == i_prev {
+                state = 1;
+            } else {
+                assert_eq!(current, d_prev);
+                state = 2;
+            }
+            qpos -= 1;
+            rpos -= 1;
+        } else if state == 1 {
+            ops.push(Op::Ins);
+            let current = ins;
+            let (m_prev, i_prev, _) = dp.get(qpos - 1, rpos);
+            if current == m_prev + open {
+                state = 0;
+            } else {
+                assert_eq!(current, i_prev + ext);
+                state = 1;
+            }
+            qpos -= 1;
+        } else if qpos == qs.len() {
+            ops.push(Op::Del);
+            assert_eq!(state, 2);
+            let current = del;
+            let (m_prev, i_prev, d_prev) = dp.get(qpos, rpos - 1);
+            if current == m_prev {
+                state = 0;
+            } else if current == i_prev {
+                state = 1;
+            } else {
+                assert_eq!(current, d_prev);
+                state = 2;
+            }
+            rpos -= 1;
         } else {
             ops.push(Op::Del);
             assert_eq!(state, 2);
