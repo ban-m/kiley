@@ -80,28 +80,28 @@ fn main() {
         }
         eprintln!("{}", hmm);
     }
-    {
-        let mut hmm = hmm.clone();
-        let ops: Vec<_> = xss
-            .iter()
-            .map(|xs| kiley::bialignment::guided::bootstrap_ops(template.len(), xs.len()))
-            .collect();
-        let lk: f64 = xss
-            .iter()
-            .map(|x| hmm.likelihood(&template, x, CONS_RAD))
-            .sum();
-        println!("Banded\t{}\t{:.2}\t{:.4}", 0, 0, lk);
-        for t in 1..TIME {
-            let s = std::time::Instant::now();
-            hmm.fit_guided(&template, &xss, &ops, CONS_RAD);
-            let e = std::time::Instant::now();
-            let lk: f64 = xss
-                .iter()
-                .map(|x| hmm.likelihood(&template, x, CONS_RAD))
-                .sum();
-            let time = (e - s).as_millis();
-            println!("Banded\t{}\t{}\t{:.4}", t, time, lk);
-        }
-        eprintln!("{}", hmm);
-    }
+    // {
+    // let mut hmm = hmm.clone();
+    // let ops: Vec<_> = xss
+    //     .iter()
+    //     .map(|xs| kiley::bialignment::guided::bootstrap_ops(template.len(), xs.len()))
+    //     .collect();
+    // let lk: f64 = xss
+    //     .iter()
+    //     .map(|x| hmm.likelihood(&template, x, CONS_RAD))
+    //     .sum();
+    // println!("Banded\t{}\t{:.2}\t{:.4}", 0, 0, lk);
+    // for t in 1..TIME {
+    //     let s = std::time::Instant::now();
+    //     hmm.fit_guided(&template, &xss, &ops, CONS_RAD);
+    //     let e = std::time::Instant::now();
+    //     let lk: f64 = xss
+    //         .iter()
+    //         .map(|x| hmm.likelihood(&template, x, CONS_RAD))
+    //         .sum();
+    //     let time = (e - s).as_millis();
+    //     println!("Banded\t{}\t{}\t{:.4}", t, time, lk);
+    // }
+    // eprintln!("{}", hmm);
+    // }
 }

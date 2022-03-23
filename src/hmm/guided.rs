@@ -4,12 +4,12 @@ use crate::dptable::DPTable;
 use crate::op::Op;
 use std::f64::MIN_POSITIVE;
 
-fn mul((m1, i1, d1): (f64, f64, f64), (m2, i2, d2): (f64, f64, f64)) -> (f64, f64, f64) {
-    (m1 * m2, i1 * i2, d1 * d2)
-}
-fn prod((m1, i1, d1): (f64, f64, f64), (m2, i2, d2): (f64, f64, f64)) -> f64 {
-    m1 * m2 + i1 * i2 + d1 * d2
-}
+// fn mul((m1, i1, d1): (f64, f64, f64), (m2, i2, d2): (f64, f64, f64)) -> (f64, f64, f64) {
+//     (m1 * m2, i1 * i2, d1 * d2)
+// }
+// fn prod((m1, i1, d1): (f64, f64, f64), (m2, i2, d2): (f64, f64, f64)) -> f64 {
+//     m1 * m2 + i1 * i2 + d1 * d2
+// }
 
 fn sum((x, y, z): (f64, f64, f64)) -> f64 {
     x + y + z
@@ -307,6 +307,17 @@ impl PairHiddenMarkovModel {
             } else if ins <= del && mat <= del {
                 (State::Del, del)
             } else {
+                if !(del <= ins && mat <= ins) {
+                    eprintln!("REF\t{}", String::from_utf8_lossy(rs));
+                    eprintln!("QRY\t{}", String::from_utf8_lossy(qs));
+                    eprintln!("OPS\t{}", ops.len());
+                    let (qx, ax, rx) = crate::recover(qs, rs, ops);
+                    for ((qx, ax), rx) in qx.chunks(200).zip(ax.chunks(200)).zip(rx.chunks(200)) {
+                        eprintln!("{}", String::from_utf8_lossy(qx));
+                        eprintln!("{}", String::from_utf8_lossy(ax));
+                        eprintln!("{}\n", String::from_utf8_lossy(rx));
+                    }
+                }
                 assert!(del <= ins && mat <= ins, "{},{},{}", mat, ins, del);
                 (State::Ins, ins)
             }
@@ -584,24 +595,6 @@ impl PairHiddenMarkovModel {
                 })
                 .map(|lk| lk.exp())
                 .collect()
-            // let current: f64 = memory.post_scl.iter().map(|x| x / scaling).product();
-            // let old: Vec<_> = memory
-            //     .pre_scl
-            //     .iter()
-            //     .zip(memory.post_scl.iter())
-            //     .scan(current / scaling, |current, (f, b)| {
-            //         let val = *current * f;
-            //         *current = val / b;
-            //         Some(val)
-            //     })
-            //     .collect();
-            // let diff: f64 = old
-            //     .iter()
-            //     .zip(temp.iter())
-            //     .map(|(x, y)| (x - y).abs().powi(2))
-            //     .sum();
-            // assert!(diff < 0.0001, "{}", diff);
-            // old
         };
         // i-> prod_{t=0}^{i} scale[t]/scaling * prod_{t=i+1}^{N+1} scale[t]/scaling / scaling.
         // The last /scaling factor is needed .
@@ -624,30 +617,6 @@ impl PairHiddenMarkovModel {
                 })
                 .map(|x| x.exp())
                 .collect()
-            // let current: f64 = memory
-            //     .post_scl
-            //     .iter()
-            //     .skip(1)
-            //     .map(|x| x / scaling)
-            //     .product();
-            // let current = current / scaling;
-            // let old: Vec<_> = memory
-            //     .pre_scl
-            //     .iter()
-            //     .zip(memory.post_scl.iter().skip(1))
-            //     .scan(current / scaling, |current, (f, b)| {
-            //         let val = *current * f;
-            //         *current = val / b;
-            //         Some(val)
-            //     })
-            //     .collect();
-            // let diff: f64 = temp
-            //     .iter()
-            //     .zip(old.iter())
-            //     .map(|(x, y)| (x - y).powi(2))
-            //     .sum();
-            // assert!(diff < 0.0001, "{}", diff);
-            // old
         };
         assert!(
             scale_proc.iter().all(|x| x.is_finite()),
@@ -798,8 +767,11 @@ impl PairHiddenMarkovModel {
         lk
     }
     pub fn likelihood(&self, rs: &[u8], qs: &[u8], radius: usize) -> f64 {
-        let mut memory = Memory::with_capacity(rs.len(), radius);
         let ops = bootstrap_ops(rs.len(), qs.len());
+        self.likelihood_guided(rs, qs, &ops, radius)
+    }
+    pub fn likelihood_guided(&self, rs: &[u8], qs: &[u8], ops: &[Op], radius: usize) -> f64 {
+        let mut memory = Memory::with_capacity(rs.len(), radius);
         memory.fill_ranges.clear();
         memory
             .fill_ranges
@@ -811,6 +783,7 @@ impl PairHiddenMarkovModel {
         assert!(!(mat + ins + del).is_nan(), "{},{},{}", mat, ins, del);
         (mat + del + ins).ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
     }
+
     pub fn modification_table(
         &self,
         rs: &[u8],
@@ -827,22 +800,26 @@ impl PairHiddenMarkovModel {
     /// Only the *first* `take_num` seuqneces would be used to polish,
     /// but the operations of the rest are also updated accordingly.
     /// This is (slightly) faster than the usual/full polishing...
-    pub fn polish_until_converge_with_take<T: std::borrow::Borrow<[u8]>>(
+    pub fn polish_until_converge_with_take<T, O>(
         &self,
         draft: &[u8],
         xs: &[T],
-        ops: &mut [Vec<Op>],
+        ops: &mut [O],
         radius: usize,
         take_num: usize,
-    ) -> Vec<u8> {
+    ) -> Vec<u8>
+    where
+        T: std::borrow::Borrow<[u8]>,
+        O: std::borrow::BorrowMut<Vec<Op>>,
+    {
         let mut template = draft.to_vec();
         let len = (template.len() / 2).max(3);
         let mut modif_table = Vec::new();
         let mut memory = Memory::with_capacity(template.len(), radius);
         let first_lks: Vec<_> = xs
             .iter()
-            .zip(ops.iter())
-            .map(|(seq, ops)| self.eval_ln(&template, seq.borrow(), ops))
+            .zip(ops.iter_mut())
+            .map(|(seq, ops)| self.eval_ln(&template, seq.borrow(), ops.borrow_mut()))
             .collect();
         for t in 0..100 {
             let inactive = INACTIVE_TIME + (t * INACTIVE_TIME) % len;
@@ -850,6 +827,7 @@ impl PairHiddenMarkovModel {
             let mut current_lk = 0f64;
             let seq_stream = ops.iter_mut().zip(xs.iter()).zip(first_lks.iter());
             for (i, ((ops, seq), first_lk)) in seq_stream.enumerate() {
+                let ops = ops.borrow_mut();
                 let lk = self.update_aln_path(&mut memory, &template, seq.borrow(), ops);
                 // Fallback.
                 if lk < 2f64 * first_lk {
@@ -880,6 +858,7 @@ impl PairHiddenMarkovModel {
                 }
             });
             for (ops, seq) in ops.iter_mut().zip(xs.iter()) {
+                let ops = ops.borrow_mut();
                 let seq = seq.borrow();
                 let (qlen, rlen) = (seq.len(), template.len());
                 crate::op::fix_alignment_path(ops, edit_path.clone(), qlen, rlen);
@@ -914,252 +893,252 @@ impl PairHiddenMarkovModel {
             .collect();
         self.polish_until_converge_with(template, xs, &mut ops, radius)
     }
-    pub fn fit_guided<T, O>(&mut self, template: &[u8], xss: &[T], ops: &[O], radius: usize)
-    where
-        T: std::borrow::Borrow<[u8]>,
-        O: std::borrow::Borrow<[Op]>,
-    {
-        let rs = template;
-        let mut memory = Memory::with_capacity(template.len(), radius);
-        let mut next = PairHiddenMarkovModel::zeros();
-        for (ops, seq) in ops.iter().zip(xss.iter()) {
-            let (ops, qs) = (ops.borrow(), seq.borrow());
-            memory.fill_ranges.clear();
-            memory
-                .fill_ranges
-                .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
-            re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut memory.fill_ranges);
-            memory.initialize();
-            self.fill_post_dp(&mut memory, rs, qs);
-            memory.pre.set(0, 0, (1f64, 0f64, 0f64));
-            self.register(&mut memory, rs, qs, radius, &mut next);
-        }
-        next.normalize();
-        *self = next;
-    }
-    pub fn fit<T: std::borrow::Borrow<[u8]>>(&mut self, template: &[u8], xss: &[T], radius: usize) {
-        let ops: Vec<_> = xss
-            .iter()
-            .map(|seq| bootstrap_ops(template.len(), seq.borrow().len()))
-            .collect();
-        self.fit_guided(template, xss, &ops, radius);
-    }
-    fn register(&self, mem: &mut Memory, rs: &[u8], qs: &[u8], rad: usize, next: &mut Self) {
-        let backward: Vec<_> = {
-            let mut temp: Vec<_> = mem
-                .post_scl
-                .iter()
-                .scan(0f64, |acc, scl| {
-                    *acc += scl.ln();
-                    Some(*acc)
-                })
-                .collect();
-            temp.reverse();
-            temp
-        };
-        let mut dead_prob = 0f64;
-        for _t in 0..qs.len() + rs.len() {
-            let (obss, trans) = self.summarize(mem, rs, qs, &backward, dead_prob);
-            next.mat_emit
-                .iter_mut()
-                .zip(obss)
-                .for_each(|(x, y)| *x += y);
-            next.mat_mat += trans[0][0];
-            next.mat_ins += trans[0][1];
-            next.mat_del += trans[0][2];
-            next.ins_mat += trans[1][0];
-            next.ins_ins += trans[1][1];
-            next.ins_del += trans[1][2];
-            next.del_mat += trans[2][0];
-            next.del_ins += trans[2][1];
-            next.del_del += trans[2][2];
-            let (dp, dead) = self.fill_step(mem, rs, qs, rad, dead_prob);
-            dead_prob = dead;
-            mem.pre = dp;
-            if 0.9999 < dead_prob {
-                break;
-            }
-        }
-    }
-    fn summarize(
-        &self,
-        mem: &Memory,
-        rs: &[u8],
-        qs: &[u8],
-        backward: &[f64],
-        dead_prob: f64,
-    ) -> (Vec<f64>, Vec<Vec<f64>>) {
-        let obss = self.summarize_obs(mem, rs, qs, backward, dead_prob);
-        let trans = self.summarize_trans(mem, rs, qs, backward, dead_prob);
-        (obss, trans)
-    }
-    fn summarize_obs(
-        &self,
-        mem: &Memory,
-        rs: &[u8],
-        qs: &[u8],
-        backward: &[f64],
-        dead_prob: f64,
-    ) -> Vec<f64> {
-        // Sum of likelihoods sum_s X_{i,j,s}
-        let mut position_lks = vec![];
-        let mut obss = vec![vec![vec![]; 4]; 4];
-        for ((i, &(start, end)), &q) in mem.fill_ranges.iter().enumerate().skip(1).zip(qs.iter()) {
-            let scale = backward[i];
-            for j in start.max(1)..end {
-                let r = rs[j - 1];
-                let (mat, del, ins) = mul(mem.pre.get(i, j), mem.post.get(i, j));
-                let lk = mat.max(MIN_POSITIVE).ln() + scale;
-                obss[BASE_TABLE[r as usize]][BASE_TABLE[q as usize]].push(lk);
-                position_lks.push((mat + del + ins).max(MIN_POSITIVE).ln() + scale);
-            }
-            if start == 0 {
-                let lk = prod(mem.pre.get(i, 0), mem.post.get(i, 0));
-                position_lks.push(lk.max(MIN_POSITIVE).ln() + scale);
-            }
-        }
-        // Other missed values.
-        if let Some(&(start, end)) = mem.fill_ranges.first() {
-            let scale = backward[0];
-            for j in start..end {
-                let lk = prod(mem.pre.get(0, j), mem.post.get(0, j));
-                position_lks.push(lk.max(MIN_POSITIVE).ln() + scale);
-            }
-        }
-        // Dead state.
-        position_lks.push(dead_prob.max(MIN_POSITIVE).ln());
-        // total lk
-        let position_lk = logsumexp_stream(position_lks.into_iter());
-        obss.iter()
-            .flat_map(|lks| lks.iter().map(|x| (logsumexp(x) - position_lk).exp()))
-            .collect()
-    }
-    fn summarize_trans(
-        &self,
-        mem: &Memory,
-        rs: &[u8],
-        qs: &[u8],
-        backward: &[f64],
-        dead_prob: f64,
-    ) -> Vec<Vec<f64>> {
-        let mut trans = vec![vec![vec![]; 3]; 3];
-        // Transition probability.
-        for (i, &(start, end)) in mem.fill_ranges.iter().enumerate().take(qs.len()) {
-            let stay = backward[i];
-            let proceed = backward[i + 1];
-            let q = qs[i];
-            for j in start..end.min(rs.len()) {
-                let r = rs[j];
-                let (from_mat, from_ins, from_del) = mem.pre.get(i, j);
-                let after_mat = mem.post.get(i + 1, j + 1).0 * self.obs(r, q);
-                let after_ins = mem.post.get(i + 1, j).1 * self.ins(q);
-                let after_del = mem.post.get(i, j + 1).2 * self.del(r);
-                let mat_to_mat = from_mat * self.mat_mat * after_mat;
-                let mat_to_ins = from_mat * self.mat_ins * after_ins;
-                let mat_to_del = from_mat * self.mat_del * after_del;
-                let ins_to_mat = from_ins * self.ins_mat * after_mat;
-                let ins_to_ins = from_ins * self.ins_ins * after_ins;
-                let ins_to_del = from_ins * self.ins_del * after_del;
-                let del_to_mat = from_del * self.del_mat * after_mat;
-                let del_to_ins = from_del * self.del_ins * after_ins;
-                let del_to_del = from_del * self.del_del * after_del;
-                trans[0][0].push(mat_to_mat.max(MIN_POSITIVE).ln() + proceed);
-                trans[0][1].push(mat_to_ins.max(MIN_POSITIVE).ln() + proceed);
-                trans[0][2].push(mat_to_del.max(MIN_POSITIVE).ln() + stay);
-                trans[1][0].push(ins_to_mat.max(MIN_POSITIVE).ln() + proceed);
-                trans[1][1].push(ins_to_ins.max(MIN_POSITIVE).ln() + proceed);
-                trans[1][2].push(ins_to_del.max(MIN_POSITIVE).ln() + stay);
-                trans[2][0].push(del_to_mat.max(MIN_POSITIVE).ln() + proceed);
-                trans[2][1].push(del_to_ins.max(MIN_POSITIVE).ln() + proceed);
-                trans[2][2].push(del_to_del.max(MIN_POSITIVE).ln() + stay);
-            }
-            // Only swiching to the insertion is allowed.
-            if end == rs.len() + 1 {
-                let (from_mat, from_ins, from_del) = mem.pre.get(i, rs.len());
-                let after_ins = self.ins(q) * mem.post.get(i + 1, rs.len()).1;
-                let mat_to_ins = from_mat * self.mat_ins * after_ins;
-                let ins_to_ins = from_ins * self.ins_ins * after_ins;
-                let del_to_ins = from_del * self.del_ins * after_ins;
-                trans[0][1].push(mat_to_ins.max(MIN_POSITIVE).ln() + proceed);
-                trans[1][1].push(ins_to_ins.max(MIN_POSITIVE).ln() + proceed);
-                trans[2][1].push(del_to_ins.max(MIN_POSITIVE).ln() + proceed);
-            }
-        }
-        // Last position.
-        if let Some((i, &(start, end))) = mem.fill_ranges.iter().enumerate().last() {
-            assert_eq!(i, qs.len());
-            let scale = backward[i];
-            // Only deletion is allowed.
-            for j in start..end.min(rs.len()) {
-                let r = rs[j];
-                let (from_mat, from_ins, from_del) = mem.pre.get(i, j);
-                let after_del = self.del(r) * mem.post.get(i, j + 1).2;
-                let mat_del_lk = from_mat * self.mat_del * after_del;
-                let ins_del_lk = from_ins * self.ins_del * after_del;
-                let del_del_lk = from_del * self.del_del * after_del;
-                trans[0][2].push(mat_del_lk.max(MIN_POSITIVE).ln() + scale);
-                trans[1][2].push(ins_del_lk.max(MIN_POSITIVE).ln() + scale);
-                trans[2][2].push(del_del_lk.max(MIN_POSITIVE).ln() + scale);
-            }
-        }
-        // Transition to dead state.
-        // Also, Transition from the dead state to the dead state
-        let to_dead = {
-            let (m, i, d) = mem.pre.get(qs.len(), rs.len());
-            [(m + i + d + dead_prob).max(MIN_POSITIVE).ln()]
-        };
-        let trans_lks = trans.iter().flatten().flatten().copied().chain(to_dead);
-        let total = logsumexp_stream(trans_lks.rev());
-        trans
-            .iter()
-            .map(|lks| lks.iter().map(|lk| (logsumexp(lk) - total).exp()).collect())
-            .collect()
-    }
-    fn fill_step(
-        &self,
-        mem: &Memory,
-        rs: &[u8],
-        qs: &[u8],
-        _: usize,
-        dead: f64,
-    ) -> (DPTable<(f64, f64, f64)>, f64) {
-        let mut total_probs = 0f64;
-        let mut dp = mem.pre.clone();
-        dp.reset();
-        // 1. Initialization.
-        for j in 1..rs.len() + 1 {
-            let del = self.to_del(mem.pre.get(0, j - 1)) * self.del(rs[j - 1]);
-            total_probs += del;
-            dp.set(0, j, (0f64, 0f64, del));
-        }
-        for i in 1..qs.len() + 1 {
-            let ins = self.to_ins(mem.pre.get(i - 1, 0)) * self.ins(qs[i - 1]);
-            total_probs += ins;
-            dp.set(i, 0, (0f64, ins, 0f64));
-        }
-        // Fill range.
-        for ((i, &(start, end)), &q) in mem.fill_ranges.iter().enumerate().skip(1).zip(qs.iter()) {
-            for j in start.max(1)..end {
-                let r = rs[j - 1];
-                let obs = (self.obs(r, q), self.ins(q), self.del(r));
-                let mat = self.to_mat(mem.pre.get(i - 1, j - 1));
-                let ins = self.to_ins(mem.pre.get(i - 1, j));
-                let del = self.to_del(mem.pre.get(i, j - 1));
-                let elm = mul((mat, ins, del), obs);
-                dp.set(i, j, elm);
-                total_probs += sum(elm);
-            }
-        }
-        let dead = dead + sum(mem.pre.get(qs.len(), rs.len()));
-        total_probs += dead;
-        dp.as_raw_mut().iter_mut().for_each(|(x, y, z)| {
-            *x /= total_probs;
-            *y /= total_probs;
-            *z /= total_probs;
-        });
-        let dead = dead / total_probs;
-        (dp, dead)
-    }
+    // pub fn fit_guided<T, O>(&mut self, template: &[u8], xss: &[T], ops: &[O], radius: usize)
+    // where
+    //     T: std::borrow::Borrow<[u8]>,
+    //     O: std::borrow::Borrow<[Op]>,
+    // {
+    //     let rs = template;
+    //     let mut memory = Memory::with_capacity(template.len(), radius);
+    //     let mut next = PairHiddenMarkovModel::zeros();
+    //     for (ops, seq) in ops.iter().zip(xss.iter()) {
+    //         let (ops, qs) = (ops.borrow(), seq.borrow());
+    //         memory.fill_ranges.clear();
+    //         memory
+    //             .fill_ranges
+    //             .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
+    //         re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut memory.fill_ranges);
+    //         memory.initialize();
+    //         self.fill_post_dp(&mut memory, rs, qs);
+    //         memory.pre.set(0, 0, (1f64, 0f64, 0f64));
+    //         self.register(&mut memory, rs, qs, radius, &mut next);
+    //     }
+    //     next.normalize();
+    //     *self = next;
+    // }
+    // pub fn fit<T: std::borrow::Borrow<[u8]>>(&mut self, template: &[u8], xss: &[T], radius: usize) {
+    //     let ops: Vec<_> = xss
+    //         .iter()
+    //         .map(|seq| bootstrap_ops(template.len(), seq.borrow().len()))
+    //         .collect();
+    //     self.fit_guided(template, xss, &ops, radius);
+    // }
+    // fn register(&self, mem: &mut Memory, rs: &[u8], qs: &[u8], rad: usize, next: &mut Self) {
+    //     let backward: Vec<_> = {
+    //         let mut temp: Vec<_> = mem
+    //             .post_scl
+    //             .iter()
+    //             .scan(0f64, |acc, scl| {
+    //                 *acc += scl.ln();
+    //                 Some(*acc)
+    //             })
+    //             .collect();
+    //         temp.reverse();
+    //         temp
+    //     };
+    //     let mut dead_prob = 0f64;
+    //     for _t in 0..qs.len() + rs.len() {
+    //         let (obss, trans) = self.summarize(mem, rs, qs, &backward, dead_prob);
+    //         next.mat_emit
+    //             .iter_mut()
+    //             .zip(obss)
+    //             .for_each(|(x, y)| *x += y);
+    //         next.mat_mat += trans[0][0];
+    //         next.mat_ins += trans[0][1];
+    //         next.mat_del += trans[0][2];
+    //         next.ins_mat += trans[1][0];
+    //         next.ins_ins += trans[1][1];
+    //         next.ins_del += trans[1][2];
+    //         next.del_mat += trans[2][0];
+    //         next.del_ins += trans[2][1];
+    //         next.del_del += trans[2][2];
+    //         let (dp, dead) = self.fill_step(mem, rs, qs, rad, dead_prob);
+    //         dead_prob = dead;
+    //         mem.pre = dp;
+    //         if 0.9999 < dead_prob {
+    //             break;
+    //         }
+    //     }
+    // }
+    // fn summarize(
+    //     &self,
+    //     mem: &Memory,
+    //     rs: &[u8],
+    //     qs: &[u8],
+    //     backward: &[f64],
+    //     dead_prob: f64,
+    // ) -> (Vec<f64>, Vec<Vec<f64>>) {
+    //     let obss = self.summarize_obs(mem, rs, qs, backward, dead_prob);
+    //     let trans = self.summarize_trans(mem, rs, qs, backward, dead_prob);
+    //     (obss, trans)
+    // }
+    // fn summarize_obs(
+    //     &self,
+    //     mem: &Memory,
+    //     rs: &[u8],
+    //     qs: &[u8],
+    //     backward: &[f64],
+    //     dead_prob: f64,
+    // ) -> Vec<f64> {
+    //     // Sum of likelihoods sum_s X_{i,j,s}
+    //     let mut position_lks = vec![];
+    //     let mut obss = vec![vec![vec![]; 4]; 4];
+    //     for ((i, &(start, end)), &q) in mem.fill_ranges.iter().enumerate().skip(1).zip(qs.iter()) {
+    //         let scale = backward[i];
+    //         for j in start.max(1)..end {
+    //             let r = rs[j - 1];
+    //             let (mat, del, ins) = mul(mem.pre.get(i, j), mem.post.get(i, j));
+    //             let lk = mat.max(MIN_POSITIVE).ln() + scale;
+    //             obss[BASE_TABLE[r as usize]][BASE_TABLE[q as usize]].push(lk);
+    //             position_lks.push((mat + del + ins).max(MIN_POSITIVE).ln() + scale);
+    //         }
+    //         if start == 0 {
+    //             let lk = prod(mem.pre.get(i, 0), mem.post.get(i, 0));
+    //             position_lks.push(lk.max(MIN_POSITIVE).ln() + scale);
+    //         }
+    //     }
+    //     // Other missed values.
+    //     if let Some(&(start, end)) = mem.fill_ranges.first() {
+    //         let scale = backward[0];
+    //         for j in start..end {
+    //             let lk = prod(mem.pre.get(0, j), mem.post.get(0, j));
+    //             position_lks.push(lk.max(MIN_POSITIVE).ln() + scale);
+    //         }
+    //     }
+    //     // Dead state.
+    //     position_lks.push(dead_prob.max(MIN_POSITIVE).ln());
+    //     // total lk
+    //     let position_lk = logsumexp_stream(position_lks.into_iter());
+    //     obss.iter()
+    //         .flat_map(|lks| lks.iter().map(|x| (logsumexp(x) - position_lk).exp()))
+    //         .collect()
+    // }
+    // fn summarize_trans(
+    //     &self,
+    //     mem: &Memory,
+    //     rs: &[u8],
+    //     qs: &[u8],
+    //     backward: &[f64],
+    //     dead_prob: f64,
+    // ) -> Vec<Vec<f64>> {
+    //     let mut trans = vec![vec![vec![]; 3]; 3];
+    //     // Transition probability.
+    //     for (i, &(start, end)) in mem.fill_ranges.iter().enumerate().take(qs.len()) {
+    //         let stay = backward[i];
+    //         let proceed = backward[i + 1];
+    //         let q = qs[i];
+    //         for j in start..end.min(rs.len()) {
+    //             let r = rs[j];
+    //             let (from_mat, from_ins, from_del) = mem.pre.get(i, j);
+    //             let after_mat = mem.post.get(i + 1, j + 1).0 * self.obs(r, q);
+    //             let after_ins = mem.post.get(i + 1, j).1 * self.ins(q);
+    //             let after_del = mem.post.get(i, j + 1).2 * self.del(r);
+    //             let mat_to_mat = from_mat * self.mat_mat * after_mat;
+    //             let mat_to_ins = from_mat * self.mat_ins * after_ins;
+    //             let mat_to_del = from_mat * self.mat_del * after_del;
+    //             let ins_to_mat = from_ins * self.ins_mat * after_mat;
+    //             let ins_to_ins = from_ins * self.ins_ins * after_ins;
+    //             let ins_to_del = from_ins * self.ins_del * after_del;
+    //             let del_to_mat = from_del * self.del_mat * after_mat;
+    //             let del_to_ins = from_del * self.del_ins * after_ins;
+    //             let del_to_del = from_del * self.del_del * after_del;
+    //             trans[0][0].push(mat_to_mat.max(MIN_POSITIVE).ln() + proceed);
+    //             trans[0][1].push(mat_to_ins.max(MIN_POSITIVE).ln() + proceed);
+    //             trans[0][2].push(mat_to_del.max(MIN_POSITIVE).ln() + stay);
+    //             trans[1][0].push(ins_to_mat.max(MIN_POSITIVE).ln() + proceed);
+    //             trans[1][1].push(ins_to_ins.max(MIN_POSITIVE).ln() + proceed);
+    //             trans[1][2].push(ins_to_del.max(MIN_POSITIVE).ln() + stay);
+    //             trans[2][0].push(del_to_mat.max(MIN_POSITIVE).ln() + proceed);
+    //             trans[2][1].push(del_to_ins.max(MIN_POSITIVE).ln() + proceed);
+    //             trans[2][2].push(del_to_del.max(MIN_POSITIVE).ln() + stay);
+    //         }
+    //         // Only swiching to the insertion is allowed.
+    //         if end == rs.len() + 1 {
+    //             let (from_mat, from_ins, from_del) = mem.pre.get(i, rs.len());
+    //             let after_ins = self.ins(q) * mem.post.get(i + 1, rs.len()).1;
+    //             let mat_to_ins = from_mat * self.mat_ins * after_ins;
+    //             let ins_to_ins = from_ins * self.ins_ins * after_ins;
+    //             let del_to_ins = from_del * self.del_ins * after_ins;
+    //             trans[0][1].push(mat_to_ins.max(MIN_POSITIVE).ln() + proceed);
+    //             trans[1][1].push(ins_to_ins.max(MIN_POSITIVE).ln() + proceed);
+    //             trans[2][1].push(del_to_ins.max(MIN_POSITIVE).ln() + proceed);
+    //         }
+    //     }
+    //     // Last position.
+    //     if let Some((i, &(start, end))) = mem.fill_ranges.iter().enumerate().last() {
+    //         assert_eq!(i, qs.len());
+    //         let scale = backward[i];
+    //         // Only deletion is allowed.
+    //         for j in start..end.min(rs.len()) {
+    //             let r = rs[j];
+    //             let (from_mat, from_ins, from_del) = mem.pre.get(i, j);
+    //             let after_del = self.del(r) * mem.post.get(i, j + 1).2;
+    //             let mat_del_lk = from_mat * self.mat_del * after_del;
+    //             let ins_del_lk = from_ins * self.ins_del * after_del;
+    //             let del_del_lk = from_del * self.del_del * after_del;
+    //             trans[0][2].push(mat_del_lk.max(MIN_POSITIVE).ln() + scale);
+    //             trans[1][2].push(ins_del_lk.max(MIN_POSITIVE).ln() + scale);
+    //             trans[2][2].push(del_del_lk.max(MIN_POSITIVE).ln() + scale);
+    //         }
+    //     }
+    //     // Transition to dead state.
+    //     // Also, Transition from the dead state to the dead state
+    //     let to_dead = {
+    //         let (m, i, d) = mem.pre.get(qs.len(), rs.len());
+    //         [(m + i + d + dead_prob).max(MIN_POSITIVE).ln()]
+    //     };
+    //     let trans_lks = trans.iter().flatten().flatten().copied().chain(to_dead);
+    //     let total = logsumexp_stream(trans_lks.rev());
+    //     trans
+    //         .iter()
+    //         .map(|lks| lks.iter().map(|lk| (logsumexp(lk) - total).exp()).collect())
+    //         .collect()
+    // }
+    // fn fill_step(
+    //     &self,
+    //     mem: &Memory,
+    //     rs: &[u8],
+    //     qs: &[u8],
+    //     _: usize,
+    //     dead: f64,
+    // ) -> (DPTable<(f64, f64, f64)>, f64) {
+    //     let mut total_probs = 0f64;
+    //     let mut dp = mem.pre.clone();
+    //     dp.reset();
+    //     // 1. Initialization.
+    //     for j in 1..rs.len() + 1 {
+    //         let del = self.to_del(mem.pre.get(0, j - 1)) * self.del(rs[j - 1]);
+    //         total_probs += del;
+    //         dp.set(0, j, (0f64, 0f64, del));
+    //     }
+    //     for i in 1..qs.len() + 1 {
+    //         let ins = self.to_ins(mem.pre.get(i - 1, 0)) * self.ins(qs[i - 1]);
+    //         total_probs += ins;
+    //         dp.set(i, 0, (0f64, ins, 0f64));
+    //     }
+    //     // Fill range.
+    //     for ((i, &(start, end)), &q) in mem.fill_ranges.iter().enumerate().skip(1).zip(qs.iter()) {
+    //         for j in start.max(1)..end {
+    //             let r = rs[j - 1];
+    //             let obs = (self.obs(r, q), self.ins(q), self.del(r));
+    //             let mat = self.to_mat(mem.pre.get(i - 1, j - 1));
+    //             let ins = self.to_ins(mem.pre.get(i - 1, j));
+    //             let del = self.to_del(mem.pre.get(i, j - 1));
+    //             let elm = mul((mat, ins, del), obs);
+    //             dp.set(i, j, elm);
+    //             total_probs += sum(elm);
+    //         }
+    //     }
+    //     let dead = dead + sum(mem.pre.get(qs.len(), rs.len()));
+    //     total_probs += dead;
+    //     dp.as_raw_mut().iter_mut().for_each(|(x, y, z)| {
+    //         *x /= total_probs;
+    //         *y /= total_probs;
+    //         *z /= total_probs;
+    //     });
+    //     let dead = dead / total_probs;
+    //     (dp, dead)
+    // }
     pub fn fit_naive_with<T: std::borrow::Borrow<[u8]>, O: std::borrow::Borrow<[Op]>>(
         &mut self,
         template: &[u8],
@@ -1384,23 +1363,23 @@ impl PairHiddenMarkovModel {
     }
 }
 
-fn logsumexp_stream<I: Iterator<Item = f64>>(xs: I) -> f64 {
-    let (mut max, mut accum, mut count) = (std::f64::NEG_INFINITY, 0f64, 0);
-    for x in xs {
-        count += 1;
-        if x <= max {
-            accum += (x - max).exp();
-        } else {
-            accum = (max - x).exp() * accum + 1f64;
-            max = x;
-        }
-    }
-    match count {
-        0 => -10000000000000000000000000f64,
-        1 => max,
-        _ => accum.ln() + max,
-    }
-}
+// fn logsumexp_stream<I: Iterator<Item = f64>>(xs: I) -> f64 {
+//     let (mut max, mut accum, mut count) = (std::f64::NEG_INFINITY, 0f64, 0);
+//     for x in xs {
+//         count += 1;
+//         if x <= max {
+//             accum += (x - max).exp();
+//         } else {
+//             accum = (max - x).exp() * accum + 1f64;
+//             max = x;
+//         }
+//     }
+//     match count {
+//         0 => -10000000000000000000000000f64,
+//         1 => max,
+//         _ => accum.ln() + max,
+//     }
+// }
 
 fn logsumexp(xs: &[f64]) -> f64 {
     if xs.is_empty() {

@@ -84,9 +84,11 @@ impl<T: Copy> DPTable<T> {
         }
         self.upperbound = ub;
     }
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.mem.fill(self.upperbound);
     }
+    #[allow(dead_code)]
     pub fn as_raw_mut(&mut self) -> &mut [T] {
         &mut self.mem
     }
