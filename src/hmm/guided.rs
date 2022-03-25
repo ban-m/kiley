@@ -870,6 +870,102 @@ impl PairHiddenMarkovModel {
         }
         template
     }
+    /// With bootstrap operations, taking numbers, and accept fraction.
+    /// The returned operations would be consistent with the returned sequence.
+    /// Only the *first* `take_num` seuqneces would be used to polish,
+    /// but the operations of the rest are also updated accordingly.
+    /// Also, for any modification, `thr` fraction of the reads should be
+    /// improve their alignment score. When `thr=0f64`, this is the same as
+    /// `polish_until_converge_with`
+    pub fn polish_until_converge_with_take_cons<T, O>(
+        &self,
+        draft: &[u8],
+        xs: &[T],
+        ops: &mut [O],
+        radius: usize,
+        take_num: usize,
+        thr: f64,
+    ) -> Vec<u8>
+    where
+        T: std::borrow::Borrow<[u8]>,
+        O: std::borrow::BorrowMut<Vec<Op>>,
+    {
+        let mut template = draft.to_vec();
+        let len = (template.len() / 2).max(3);
+        let mut modif_table = Vec::new();
+        let mut improve_count = Vec::new();
+        let mut memory = Memory::with_capacity(template.len(), radius);
+        let first_lks: Vec<_> = xs
+            .iter()
+            .zip(ops.iter_mut())
+            .map(|(seq, ops)| self.eval_ln(&template, seq.borrow(), ops.borrow_mut()))
+            .collect();
+        for t in 0..100 {
+            let inactive = INACTIVE_TIME + (t * INACTIVE_TIME) % len;
+            modif_table.clear();
+            improve_count.clear();
+            let mut current_lk = 0f64;
+            let seq_stream = ops.iter_mut().zip(xs.iter()).zip(first_lks.iter());
+            for (i, ((ops, seq), first_lk)) in seq_stream.enumerate() {
+                let ops = ops.borrow_mut();
+                let lk = self.update_aln_path(&mut memory, &template, seq.borrow(), ops);
+                // Fallback.
+                if lk < 2f64 * first_lk {
+                    *ops = self.align(&template, seq.borrow(), memory.default_radius).1;
+                }
+                if i < take_num {
+                    current_lk += self.update(&mut memory, &template, seq.borrow(), ops);
+                    if modif_table.is_empty() {
+                        improve_count
+                            .extend(memory.mod_table.iter().map(|x| x.is_sign_positive() as u32));
+                        modif_table.extend_from_slice(&memory.mod_table);
+                    } else {
+                        modif_table
+                            .iter_mut()
+                            .zip(improve_count.iter_mut())
+                            .zip(memory.mod_table.iter())
+                            .for_each(|((lk, count), x)| {
+                                *count += x.is_sign_positive() as u32;
+                                *lk += x;
+                            });
+                    }
+                }
+            }
+            let thr = (thr * xs.len().min(take_num) as f64).ceil() as u32;
+            modif_table
+                .iter_mut()
+                .zip(improve_count.iter())
+                .filter(|&(_, &count)| count < thr)
+                .for_each(|(lk, _)| {
+                    // LK is negative...
+                    *lk *= 10f64;
+                });
+            let changed_pos = polish_guided(&mut template, &modif_table, current_lk, inactive);
+            let edit_path = changed_pos.iter().map(|&(pos, op)| {
+                if op < 4 {
+                    (pos, crate::op::Edit::Subst)
+                } else if op < 8 {
+                    (pos, crate::op::Edit::Insertion)
+                } else if op < 8 + COPY_SIZE {
+                    (pos, crate::op::Edit::Copy(op - 8 + 1))
+                } else {
+                    (pos, crate::op::Edit::Deletion(op - 8 - COPY_SIZE + 1))
+                }
+            });
+            for (ops, seq) in ops.iter_mut().zip(xs.iter()) {
+                let ops = ops.borrow_mut();
+                let seq = seq.borrow();
+                let (qlen, rlen) = (seq.len(), template.len());
+                crate::op::fix_alignment_path(ops, edit_path.clone(), qlen, rlen);
+            }
+            memory.update_radius(&changed_pos, template.len());
+            if changed_pos.is_empty() {
+                break;
+            }
+        }
+        template
+    }
+
     /// With bootstrap operations. The returned operations would be
     /// consistent with the returned sequence.
     pub fn polish_until_converge_with<T: std::borrow::Borrow<[u8]>>(
