@@ -12,7 +12,7 @@ pub use bialignment::polish_until_converge_banded;
 mod dptable;
 pub mod gphmm;
 pub use op::recover;
-mod op;
+pub mod op;
 use gphmm::{Cond, HMMType, GPHMM};
 pub use op::Op;
 use rand::seq::*;

@@ -11,6 +11,25 @@ use std::f64::MIN_POSITIVE;
 //     m1 * m2 + i1 * i2 + d1 * d2
 // }
 
+#[derive(Debug, Clone)]
+/// Configurations
+pub struct HMMConfig {
+    pub radius: usize,
+    pub take_num: usize,
+    pub ignore_edge: usize,
+    // pub at_least_frac: f64,
+}
+
+impl HMMConfig {
+    pub fn new(radius: usize, take_num: usize, ignore_edge: usize) -> Self {
+        Self {
+            radius,
+            take_num,
+            ignore_edge,
+        }
+    }
+}
+
 fn sum((x, y, z): (f64, f64, f64)) -> f64 {
     x + y + z
 }
@@ -752,7 +771,7 @@ impl PairHiddenMarkovModel {
             .iter_mut()
             .for_each(|x| *x = x.max(MIN_POSITIVE).ln() + scaling.ln() * len);
     }
-    fn update(&self, memory: &mut Memory, rs: &[u8], qs: &[u8], ops: &mut [Op]) -> f64 {
+    fn update(&self, memory: &mut Memory, rs: &[u8], qs: &[u8], ops: &[Op]) -> f64 {
         memory.set_fill_ranges(rs.len(), qs.len(), ops);
         memory.initialize();
         self.fill_pre_dp(memory, rs, qs);
@@ -765,6 +784,12 @@ impl PairHiddenMarkovModel {
         };
         assert!((lk - lk2).abs() < 0.0001, "{},{}", lk, lk2,);
         lk
+    }
+    fn lk(&self, memory: &mut Memory, rs: &[u8], qs: &[u8], ops: &[Op]) -> f64 {
+        memory.set_fill_ranges(rs.len(), qs.len(), ops);
+        memory.initialize();
+        self.fill_post_dp(memory, rs, qs);
+        memory.post.get(0, 0).0.ln() + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>()
     }
     pub fn likelihood(&self, rs: &[u8], qs: &[u8], radius: usize) -> f64 {
         let ops = bootstrap_ops(rs.len(), qs.len());
@@ -789,12 +814,13 @@ impl PairHiddenMarkovModel {
         rs: &[u8],
         qs: &[u8],
         radius: usize,
-        ops: &mut [Op],
+        ops: &[Op],
     ) -> (Vec<f64>, f64) {
         let mut memory = Memory::with_capacity(rs.len(), radius);
         let lk = self.update(&mut memory, rs, qs, ops);
         (memory.mod_table, lk)
     }
+
     /// With bootstrap operations and taking numbers.
     /// The returned operations would be consistent with the returned sequence.
     /// Only the *first* `take_num` seuqneces would be used to polish,
@@ -812,6 +838,127 @@ impl PairHiddenMarkovModel {
         T: std::borrow::Borrow<[u8]>,
         O: std::borrow::BorrowMut<Vec<Op>>,
     {
+        let config = HMMConfig::new(radius, take_num, 0);
+        self.polish_until_converge_with_conf(draft, xs, ops, &config)
+    }
+    // /// With bootstrap operations, taking numbers, and accept fraction.
+    // /// The returned operations would be consistent with the returned sequence.
+    // /// Only the *first* `take_num` seuqneces would be used to polish,
+    // /// but the operations of the rest are also updated accordingly.
+    // /// Also, for any modification, `thr` fraction of the reads should be
+    // /// improve their alignment score. When `thr=0f64`, this is the same as
+    // /// `polish_until_converge_with`
+    // pub fn polish_until_converge_with_take_cons<T, O>(
+    //     &self,
+    //     draft: &[u8],
+    //     xs: &[T],
+    //     ops: &mut [O],
+    //     radius: usize,
+    //     take_num: usize,
+    //     thr: f64,
+    // ) -> Vec<u8>
+    // where
+    //     T: std::borrow::Borrow<[u8]>,
+    //     O: std::borrow::BorrowMut<Vec<Op>>,
+    // {
+    //     let mut template = draft.to_vec();
+    //     let len = (template.len() / 2).max(3);
+    //     let mut modif_table = Vec::new();
+    //     let mut improve_count = Vec::new();
+    //     let mut memory = Memory::with_capacity(template.len(), radius);
+    //     let first_lks: Vec<_> = xs
+    //         .iter()
+    //         .zip(ops.iter_mut())
+    //         .map(|(seq, ops)| self.eval_ln(&template, seq.borrow(), ops.borrow_mut()))
+    //         .collect();
+    //     for t in 0..100 {
+    //         let inactive = INACTIVE_TIME + (t * INACTIVE_TIME) % len;
+    //         modif_table.clear();
+    //         improve_count.clear();
+    //         let mut current_lk = 0f64;
+    //         let seq_stream = ops.iter_mut().zip(xs.iter()).zip(first_lks.iter());
+    //         for (i, ((ops, seq), first_lk)) in seq_stream.enumerate() {
+    //             let ops = ops.borrow_mut();
+    //             let lk = self.update_aln_path(&mut memory, &template, seq.borrow(), ops);
+    //             // Fallback.
+    //             if lk < 2f64 * first_lk {
+    //                 *ops = self.align(&template, seq.borrow(), memory.default_radius).1;
+    //             }
+    //             if i < take_num {
+    //                 current_lk += self.update(&mut memory, &template, seq.borrow(), ops);
+    //                 if modif_table.is_empty() {
+    //                     improve_count
+    //                         .extend(memory.mod_table.iter().map(|x| x.is_sign_positive() as u32));
+    //                     modif_table.extend_from_slice(&memory.mod_table);
+    //                 } else {
+    //                     modif_table
+    //                         .iter_mut()
+    //                         .zip(improve_count.iter_mut())
+    //                         .zip(memory.mod_table.iter())
+    //                         .for_each(|((lk, count), x)| {
+    //                             *count += x.is_sign_positive() as u32;
+    //                             *lk += x;
+    //                         });
+    //                 }
+    //             }
+    //         }
+    //         let thr = (thr * xs.len().min(take_num) as f64).ceil() as u32;
+    //         modif_table
+    //             .iter_mut()
+    //             .zip(improve_count.iter())
+    //             .filter(|&(_, &count)| count < thr)
+    //             .for_each(|(lk, _)| {
+    //                 // LK is negative...
+    //                 *lk *= 10f64;
+    //             });
+    //         let changed_pos = polish_guided(&mut template, &modif_table, current_lk, inactive);
+    //         let edit_path = changed_pos.iter().map(|&(pos, op)| {
+    //             if op < 4 {
+    //                 (pos, crate::op::Edit::Subst)
+    //             } else if op < 8 {
+    //                 (pos, crate::op::Edit::Insertion)
+    //             } else if op < 8 + COPY_SIZE {
+    //                 (pos, crate::op::Edit::Copy(op - 8 + 1))
+    //             } else {
+    //                 (pos, crate::op::Edit::Deletion(op - 8 - COPY_SIZE + 1))
+    //             }
+    //         });
+    //         for (ops, seq) in ops.iter_mut().zip(xs.iter()) {
+    //             let ops = ops.borrow_mut();
+    //             let seq = seq.borrow();
+    //             let (qlen, rlen) = (seq.len(), template.len());
+    //             crate::op::fix_alignment_path(ops, edit_path.clone(), qlen, rlen);
+    //         }
+    //         memory.update_radius(&changed_pos, template.len());
+    //         if changed_pos.is_empty() {
+    //             break;
+    //         }
+    //     }
+    //     template
+    // }
+    /// With bootstrap operations and taking numbers.
+    /// The returned operations would be consistent with the returned sequence.
+    /// Only the *first* `take_num` seuqneces would be used to polish,
+    /// but the operations of the rest are also updated accordingly.
+    /// This is (slightly) faster than the usual/full polishing...
+    pub fn polish_until_converge_with_conf<T, O>(
+        &self,
+        draft: &[u8],
+        xs: &[T],
+        ops: &mut [O],
+        config: &HMMConfig,
+    ) -> Vec<u8>
+    where
+        T: std::borrow::Borrow<[u8]>,
+        O: std::borrow::BorrowMut<Vec<Op>>,
+    {
+        let &HMMConfig {
+            radius,
+            take_num,
+            ignore_edge,
+        } = config;
+        let take_num = take_num.min(xs.len());
+        assert!(!xs.is_empty());
         let mut template = draft.to_vec();
         let len = (template.len() / 2).max(3);
         let mut modif_table = Vec::new();
@@ -821,7 +968,7 @@ impl PairHiddenMarkovModel {
             .zip(ops.iter_mut())
             .map(|(seq, ops)| self.eval_ln(&template, seq.borrow(), ops.borrow_mut()))
             .collect();
-        for t in 0..100 {
+        'outer: for t in 0..100 {
             let inactive = INACTIVE_TIME + (t * INACTIVE_TIME) % len;
             modif_table.clear();
             let mut current_lk = 0f64;
@@ -829,9 +976,8 @@ impl PairHiddenMarkovModel {
             for (i, ((ops, seq), first_lk)) in seq_stream.enumerate() {
                 let ops = ops.borrow_mut();
                 let lk = self.update_aln_path(&mut memory, &template, seq.borrow(), ops);
-                // Fallback.
                 if lk < 2f64 * first_lk {
-                    *ops = self.align(&template, seq.borrow(), memory.default_radius).1;
+                    fallback_by_edlib(ops, &template, seq.borrow());
                 }
                 if i < take_num {
                     current_lk += self.update(&mut memory, &template, seq.borrow(), ops);
@@ -845,6 +991,14 @@ impl PairHiddenMarkovModel {
                     }
                 }
             }
+            assert_eq!(modif_table.len(), NUM_ROW * (template.len() + 1));
+            // Ignore edge regions
+            for (i, lk) in modif_table.iter_mut().enumerate() {
+                let pos = i / NUM_ROW;
+                if pos < ignore_edge || template.len() + 1 - ignore_edge < pos {
+                    *lk = -1000000000000000000000000000000f64;
+                }
+            }
             let changed_pos = polish_guided(&mut template, &modif_table, current_lk, inactive);
             let edit_path = changed_pos.iter().map(|&(pos, op)| {
                 if op < 4 {
@@ -865,107 +1019,35 @@ impl PairHiddenMarkovModel {
             }
             memory.update_radius(&changed_pos, template.len());
             if changed_pos.is_empty() {
-                break;
-            }
-        }
-        template
-    }
-    /// With bootstrap operations, taking numbers, and accept fraction.
-    /// The returned operations would be consistent with the returned sequence.
-    /// Only the *first* `take_num` seuqneces would be used to polish,
-    /// but the operations of the rest are also updated accordingly.
-    /// Also, for any modification, `thr` fraction of the reads should be
-    /// improve their alignment score. When `thr=0f64`, this is the same as
-    /// `polish_until_converge_with`
-    pub fn polish_until_converge_with_take_cons<T, O>(
-        &self,
-        draft: &[u8],
-        xs: &[T],
-        ops: &mut [O],
-        radius: usize,
-        take_num: usize,
-        thr: f64,
-    ) -> Vec<u8>
-    where
-        T: std::borrow::Borrow<[u8]>,
-        O: std::borrow::BorrowMut<Vec<Op>>,
-    {
-        let mut template = draft.to_vec();
-        let len = (template.len() / 2).max(3);
-        let mut modif_table = Vec::new();
-        let mut improve_count = Vec::new();
-        let mut memory = Memory::with_capacity(template.len(), radius);
-        let first_lks: Vec<_> = xs
-            .iter()
-            .zip(ops.iter_mut())
-            .map(|(seq, ops)| self.eval_ln(&template, seq.borrow(), ops.borrow_mut()))
-            .collect();
-        for t in 0..100 {
-            let inactive = INACTIVE_TIME + (t * INACTIVE_TIME) % len;
-            modif_table.clear();
-            improve_count.clear();
-            let mut current_lk = 0f64;
-            let seq_stream = ops.iter_mut().zip(xs.iter()).zip(first_lks.iter());
-            for (i, ((ops, seq), first_lk)) in seq_stream.enumerate() {
-                let ops = ops.borrow_mut();
-                let lk = self.update_aln_path(&mut memory, &template, seq.borrow(), ops);
-                // Fallback.
-                if lk < 2f64 * first_lk {
-                    *ops = self.align(&template, seq.borrow(), memory.default_radius).1;
-                }
-                if i < take_num {
-                    current_lk += self.update(&mut memory, &template, seq.borrow(), ops);
-                    if modif_table.is_empty() {
-                        improve_count
-                            .extend(memory.mod_table.iter().map(|x| x.is_sign_positive() as u32));
-                        modif_table.extend_from_slice(&memory.mod_table);
-                    } else {
-                        modif_table
-                            .iter_mut()
-                            .zip(improve_count.iter_mut())
-                            .zip(memory.mod_table.iter())
-                            .for_each(|((lk, count), x)| {
-                                *count += x.is_sign_positive() as u32;
-                                *lk += x;
-                            });
-                    }
-                }
-            }
-            let thr = (thr * xs.len().min(take_num) as f64).ceil() as u32;
-            modif_table
-                .iter_mut()
-                .zip(improve_count.iter())
-                .filter(|&(_, &count)| count < thr)
-                .for_each(|(lk, _)| {
-                    // LK is negative...
-                    *lk *= 10f64;
-                });
-            let changed_pos = polish_guided(&mut template, &modif_table, current_lk, inactive);
-            let edit_path = changed_pos.iter().map(|&(pos, op)| {
-                if op < 4 {
-                    (pos, crate::op::Edit::Subst)
-                } else if op < 8 {
-                    (pos, crate::op::Edit::Insertion)
-                } else if op < 8 + COPY_SIZE {
-                    (pos, crate::op::Edit::Copy(op - 8 + 1))
+                memory.default_radius /= 2;
+                let is_updated = ops
+                    .iter_mut()
+                    .zip(xs.iter())
+                    .take(take_num)
+                    .map(|(ops, seq)| {
+                        let (ops, seq) = (ops.borrow_mut(), seq.borrow());
+                        let lk = self.lk(&mut memory, &template, seq, ops);
+                        let edop = edlib_sys::global(&template, seq);
+                        let e2k = [Op::Match, Op::Ins, Op::Del, Op::Match];
+                        let edop: Vec<_> = edop.iter().map(|&op| e2k[op as usize]).collect();
+                        let lk2 = self.lk(&mut memory, &template, seq, &edop);
+                        if lk + 0.1 < lk2 {
+                            *ops = edop;
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .fold(false, |is_updated, b| is_updated | b);
+                if !is_updated {
+                    break 'outer;
                 } else {
-                    (pos, crate::op::Edit::Deletion(op - 8 - COPY_SIZE + 1))
+                    memory.default_radius *= 2;
                 }
-            });
-            for (ops, seq) in ops.iter_mut().zip(xs.iter()) {
-                let ops = ops.borrow_mut();
-                let seq = seq.borrow();
-                let (qlen, rlen) = (seq.len(), template.len());
-                crate::op::fix_alignment_path(ops, edit_path.clone(), qlen, rlen);
-            }
-            memory.update_radius(&changed_pos, template.len());
-            if changed_pos.is_empty() {
-                break;
             }
         }
         template
     }
-
     /// With bootstrap operations. The returned operations would be
     /// consistent with the returned sequence.
     pub fn polish_until_converge_with<T: std::borrow::Borrow<[u8]>>(
@@ -975,7 +1057,8 @@ impl PairHiddenMarkovModel {
         ops: &mut [Vec<Op>],
         radius: usize,
     ) -> Vec<u8> {
-        self.polish_until_converge_with_take(draft, xs, ops, radius, xs.len())
+        let config = HMMConfig::new(radius, xs.len(), 0);
+        self.polish_until_converge_with_conf(draft, xs, ops, &config)
     }
     pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(
         &self,
@@ -987,7 +1070,8 @@ impl PairHiddenMarkovModel {
             .iter()
             .map(|seq| bootstrap_ops(template.len(), seq.borrow().len()))
             .collect();
-        self.polish_until_converge_with(template, xs, &mut ops, radius)
+        let config = HMMConfig::new(radius, xs.len(), 0);
+        self.polish_until_converge_with_conf(template, xs, &mut ops, &config)
     }
     // pub fn fit_guided<T, O>(&mut self, template: &[u8], xss: &[T], ops: &[O], radius: usize)
     // where
@@ -1572,6 +1656,12 @@ impl Memory {
         assert_eq!(self.radius.len(), len + 1);
     }
 }
+fn fallback_by_edlib(ops: &mut Vec<Op>, template: &[u8], query: &[u8]) {
+    let edop = edlib_sys::global(&template, query);
+    ops.clear();
+    let e2k = [Op::Match, Op::Ins, Op::Del, Op::Match];
+    ops.extend(edop.iter().map(|&op| e2k[op as usize]));
+}
 
 // Minimum required improvement on the likelihood.
 // In a desirable case, it is exactly zero, but as a matter of fact,
@@ -1579,6 +1669,7 @@ impl Memory {
 // so this "min-requirement" is nessesarry.
 const MIN_UP: f64 = 0.00001;
 
+// TODO:Maybe we should choose a position to be changed by window.
 fn polish_guided(
     template: &mut Vec<u8>,
     modif_table: &[f64],
@@ -1955,6 +2046,30 @@ pub mod tests {
             let diff = gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE);
             let mut ops = bootstrap_ops(template.len(), diff.len());
             hmm.update_aln_path(&mut memory, &template, &diff, &mut ops);
+        }
+    }
+    #[test]
+    fn polish_long_insertion() {
+        let hmm = PHMM::default();
+        let radius = 50;
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198);
+        let head = gen_seq::generate_seq(&mut rng, 100);
+        let repeat = gen_seq::generate_seq(&mut rng, 200);
+        let tail = gen_seq::generate_seq(&mut rng, 100);
+        let template = vec![head.clone(), repeat.clone(), tail.clone()].concat();
+        let answer = vec![head, repeat.clone(), repeat, tail].concat();
+        let profile = gen_seq::PROFILE;
+        let seqs: Vec<_> = (0..20)
+            .map(|_| gen_seq::introduce_randomness(&answer, &mut rng, &profile))
+            .collect();
+        let polished = hmm.polish_until_converge(&template, &seqs, radius);
+        if polished != answer {
+            println!("{}", String::from_utf8_lossy(&polished));
+            println!("{}", String::from_utf8_lossy(&answer));
+            let prev = crate::bialignment::edit_dist(&template, &answer);
+            let now = crate::bialignment::edit_dist(&polished, &answer);
+            println!("{}->{}", prev, now);
+            panic!()
         }
     }
 }

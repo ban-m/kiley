@@ -831,15 +831,18 @@ fn polish_guided(
     });
 }
 
-pub fn polish_until_converge_with<T>(
+pub fn polish_until_converge_with_take<T, O>(
     template: &[u8],
     xs: &[T],
-    ops: &mut [Vec<Op>],
+    ops: &mut [O],
     radius: usize,
+    take: usize,
 ) -> Vec<u8>
 where
     T: std::borrow::Borrow<[u8]>,
+    O: std::borrow::BorrowMut<Vec<Op>>,
 {
+    let take = take.min(xs.len());
     let mut template = template.to_vec();
     let len = (template.len() / 2).max(20);
     let mut modif_table = Vec::new();
@@ -847,7 +850,7 @@ where
     let mut aligner = Aligner::with_capacity(template.len(), radius);
     let first_dist: Vec<_> = ops
         .iter()
-        .map(|ops| ops.iter().filter(|&&op| op != Op::Match).count())
+        .map(|ops| ops.borrow().iter().filter(|&&op| op != Op::Match).count())
         .collect();
     for t in 0..100 {
         let inactive = INACTIVE_TIME + (INACTIVE_TIME * t) % len;
@@ -855,8 +858,12 @@ where
         let dist: u32 = ops
             .iter_mut()
             .zip(xs.iter())
-            .map(|(ops, seq)| {
-                let dist = aligner.align(&template, seq.borrow(), ops);
+            .enumerate()
+            .map(|(i, (ops, seq))| {
+                let dist = aligner.align(&template, seq.borrow(), ops.borrow_mut());
+                if take <= i {
+                    return 0;
+                }
                 match modif_table.is_empty() {
                     true => modif_table.extend_from_slice(&aligner.mod_table),
                     false => {
@@ -885,13 +892,14 @@ where
         });
         for ((ops, seq), first_dist) in ops.iter_mut().zip(xs.iter()).zip(first_dist.iter()) {
             let seq = seq.borrow();
+            let ops = ops.borrow_mut();
             let dist = ops.iter().filter(|&&op| op != Op::Match).count();
             if dist < 2 * first_dist {
                 crate::op::fix_alignment_path(ops, edit_path.clone(), seq.len(), temp.len());
             } else {
                 // If the alignment is too diverged, fallback to the default method.
                 *ops = bootstrap_ops(temp.len(), seq.len());
-                *ops = edit_dist_guided(temp, seq, &ops, radius).1;
+                *ops = edit_dist_guided(temp, seq, ops, 3 * radius).1;
             }
         }
         aligner.update_radius(cpos, temp.len());
@@ -899,7 +907,69 @@ where
             break;
         }
     }
+    // for t in 0..100 {
+    //     let inactive = INACTIVE_TIME + (INACTIVE_TIME * t) % len;
+    //     modif_table.clear();
+    //     let dist: u32 = ops
+    //         .iter_mut()
+    //         .zip(xs.iter())
+    //         .map(|(ops, seq)| {
+    //             let dist = aligner.align(&template, seq.borrow(), ops);
+    //             match modif_table.is_empty() {
+    //                 true => modif_table.extend_from_slice(&aligner.mod_table),
+    //                 false => {
+    //                     modif_table
+    //                         .iter_mut()
+    //                         .zip(aligner.mod_table.iter())
+    //                         .for_each(|(x, y)| *x += y);
+    //                 }
+    //             }
+    //             dist
+    //         })
+    //         .sum();
+    //     assert_eq!(template.len() + 1, aligner.radius.len());
+    //     let (temp, cpos) = (&mut template, &mut changed_pos);
+    //     polish_guided(temp, cpos, &modif_table, dist, inactive);
+    //     let edit_path = cpos.iter().map(|&(pos, op)| {
+    //         if op < 4 {
+    //             (pos, crate::op::Edit::Subst)
+    //         } else if op < 8 {
+    //             (pos, crate::op::Edit::Insertion)
+    //         } else if op < 8 + COPY_SIZE {
+    //             (pos, crate::op::Edit::Copy(op - 8 + 1))
+    //         } else {
+    //             (pos, crate::op::Edit::Deletion(op - 8 - COPY_SIZE + 1))
+    //         }
+    //     });
+    //     for ((ops, seq), first_dist) in ops.iter_mut().zip(xs.iter()).zip(first_dist.iter()) {
+    //         let seq = seq.borrow();
+    //         let dist = ops.iter().filter(|&&op| op != Op::Match).count();
+    //         if dist < 2 * first_dist {
+    //             crate::op::fix_alignment_path(ops, edit_path.clone(), seq.len(), temp.len());
+    //         } else {
+    //             // If the alignment is too diverged, fallback to the default method.
+    //             *ops = bootstrap_ops(temp.len(), seq.len());
+    //             *ops = edit_dist_guided(temp, seq, &ops, radius).1;
+    //         }
+    //     }
+    //     aligner.update_radius(cpos, temp.len());
+    //     if changed_pos.is_empty() {
+    //         break;
+    //     }
+    // }
     template
+}
+
+pub fn polish_until_converge_with<T>(
+    template: &[u8],
+    xs: &[T],
+    ops: &mut [Vec<Op>],
+    radius: usize,
+) -> Vec<u8>
+where
+    T: std::borrow::Borrow<[u8]>,
+{
+    polish_until_converge_with_take(template, xs, ops, radius, xs.len())
 }
 
 pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(
