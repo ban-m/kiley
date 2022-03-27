@@ -963,22 +963,25 @@ impl PairHiddenMarkovModel {
         let len = (template.len() / 2).max(3);
         let mut modif_table = Vec::new();
         let mut memory = Memory::with_capacity(template.len(), radius);
-        let first_lks: Vec<_> = xs
-            .iter()
-            .zip(ops.iter_mut())
-            .map(|(seq, ops)| self.eval_ln(&template, seq.borrow(), ops.borrow_mut()))
-            .collect();
+        // let first_lks: Vec<_> = xs
+        //     .iter()
+        //     .zip(ops.iter_mut())
+        //     .map(|(seq, ops)| self.eval_ln(&template, seq.borrow(), ops.borrow_mut()))
+        //     .collect();
+        let mut current_max = None;
         'outer: for t in 0..100 {
             let inactive = INACTIVE_TIME + (t * INACTIVE_TIME) % len;
             modif_table.clear();
             let mut current_lk = 0f64;
-            let seq_stream = ops.iter_mut().zip(xs.iter()).zip(first_lks.iter());
-            for (i, ((ops, seq), first_lk)) in seq_stream.enumerate() {
+            // let seq_stream = ops.iter_mut().zip(xs.iter()).zip(first_lks.iter());
+            // for (i, ((ops, seq), first_lk)) in seq_stream.enumerate() {
+            let seq_stream = ops.iter_mut().zip(xs.iter());
+            for (i, (ops, seq)) in seq_stream.enumerate() {
                 let ops = ops.borrow_mut();
-                let lk = self.update_aln_path(&mut memory, &template, seq.borrow(), ops);
-                if lk < 2f64 * first_lk {
-                    fallback_by_edlib(ops, &template, seq.borrow());
-                }
+                let _ = self.update_aln_path(&mut memory, &template, seq.borrow(), ops);
+                // if lk < 2f64 * first_lk {
+                //     fallback_by_edlib(ops, &template, seq.borrow());
+                // }
                 if i < take_num {
                     current_lk += self.update(&mut memory, &template, seq.borrow(), ops);
                     if modif_table.is_empty() {
@@ -1019,12 +1022,17 @@ impl PairHiddenMarkovModel {
             }
             memory.update_radius(&changed_pos, template.len());
             if changed_pos.is_empty() {
-                memory.default_radius /= 2;
+                if matches!(current_max,Some(lk) if current_lk < lk + 0.1) {
+                    break;
+                }
+                trace!("NOWLK\t{}", current_lk);
+                current_max = Some(current_lk);
                 let is_updated = ops
                     .iter_mut()
                     .zip(xs.iter())
                     .take(take_num)
-                    .map(|(ops, seq)| {
+                    .enumerate()
+                    .map(|(i, (ops, seq))| {
                         let (ops, seq) = (ops.borrow_mut(), seq.borrow());
                         let lk = self.lk(&mut memory, &template, seq, ops);
                         let edop = edlib_sys::global(&template, seq);
@@ -1032,6 +1040,7 @@ impl PairHiddenMarkovModel {
                         let edop: Vec<_> = edop.iter().map(|&op| e2k[op as usize]).collect();
                         let lk2 = self.lk(&mut memory, &template, seq, &edop);
                         if lk + 0.1 < lk2 {
+                            trace!("{t}\t{i}\t{:.3}\t{:.3}", lk, lk2);
                             *ops = edop;
                             true
                         } else {
@@ -1041,8 +1050,6 @@ impl PairHiddenMarkovModel {
                     .fold(false, |is_updated, b| is_updated | b);
                 if !is_updated {
                     break 'outer;
-                } else {
-                    memory.default_radius *= 2;
                 }
             }
         }
@@ -1656,12 +1663,12 @@ impl Memory {
         assert_eq!(self.radius.len(), len + 1);
     }
 }
-fn fallback_by_edlib(ops: &mut Vec<Op>, template: &[u8], query: &[u8]) {
-    let edop = edlib_sys::global(&template, query);
-    ops.clear();
-    let e2k = [Op::Match, Op::Ins, Op::Del, Op::Match];
-    ops.extend(edop.iter().map(|&op| e2k[op as usize]));
-}
+// fn fallback_by_edlib(ops: &mut Vec<Op>, template: &[u8], query: &[u8]) {
+//     let edop = edlib_sys::global(&template, query);
+//     ops.clear();
+//     let e2k = [Op::Match, Op::Ins, Op::Del, Op::Match];
+//     ops.extend(edop.iter().map(|&op| e2k[op as usize]));
+// }
 
 // Minimum required improvement on the likelihood.
 // In a desirable case, it is exactly zero, but as a matter of fact,
