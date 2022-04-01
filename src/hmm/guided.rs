@@ -782,7 +782,15 @@ impl PairHiddenMarkovModel {
             let (mat, ins, del) = memory.pre.get(qs.len(), rs.len());
             (mat + del + ins).ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
         };
-        assert!((lk - lk2).abs() < 0.0001, "{},{}", lk, lk2,);
+        if (lk - lk2).abs() < 0.0001 {
+            eprintln!("{},{}", lk, lk2);
+            eprintln!("MODEL\t{}", self);
+            let ops: String = ops.iter().map(|x| format!("{}", x)).collect();
+            eprintln!("OPS\t{}", ops);
+            eprintln!("REF\t{}", String::from_utf8_lossy(rs));
+            eprintln!("QRY\t{}", String::from_utf8_lossy(qs));
+            panic!();
+        }
         lk
     }
     fn lk(&self, memory: &mut Memory, rs: &[u8], qs: &[u8], ops: &[Op]) -> f64 {

@@ -6,6 +6,19 @@ pub enum Op {
     Del,
 }
 
+impl std::fmt::Display for Op {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use std::fmt::Write;
+        let op = match self {
+            Op::Mismatch => '=',
+            Op::Match => 'X',
+            Op::Ins => 'I',
+            Op::Del => 'D',
+        };
+        f.write_char(op)
+    }
+}
+
 /// xs is the reference, ys is the query.
 pub fn recover(xs: &[u8], ys: &[u8], ops: &[Op]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let (mut i, mut j) = (0, 0);
