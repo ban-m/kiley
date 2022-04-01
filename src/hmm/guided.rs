@@ -782,7 +782,7 @@ impl PairHiddenMarkovModel {
             let (mat, ins, del) = memory.pre.get(qs.len(), rs.len());
             (mat + del + ins).ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
         };
-        if (lk - lk2).abs() < 0.0001 {
+        if 0.0001 < (lk - lk2).abs() {
             eprintln!("{},{}", lk, lk2);
             eprintln!("MODEL\t{}", self);
             let ops: String = ops.iter().map(|x| format!("{}", x)).collect();
