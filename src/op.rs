@@ -10,8 +10,8 @@ impl std::fmt::Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use std::fmt::Write;
         let op = match self {
-            Op::Mismatch => '=',
-            Op::Match => 'X',
+            Op::Mismatch => 'X',
+            Op::Match => '=',
             Op::Ins => 'I',
             Op::Del => 'D',
         };

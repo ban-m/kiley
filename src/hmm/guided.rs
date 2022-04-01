@@ -787,8 +787,8 @@ impl PairHiddenMarkovModel {
             eprintln!("MODEL\t{}", self);
             let ops: String = ops.iter().map(|x| format!("{}", x)).collect();
             eprintln!("OPS\t{}", ops);
-            eprintln!("REF\t{}", String::from_utf8_lossy(rs));
-            eprintln!("QRY\t{}", String::from_utf8_lossy(qs));
+            eprintln!("REF\t{}\t{}", String::from_utf8_lossy(rs), rs.len());
+            eprintln!("QRY\t{}\t{}", String::from_utf8_lossy(qs), qs.len());
             panic!();
         }
         lk
