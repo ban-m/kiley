@@ -128,6 +128,38 @@ fn edit_dist_dp_post(xs: &[u8], ys: &[u8]) -> Vec<Vec<u32>> {
     dp
 }
 
+/// Edit distance and its operations.
+pub fn edit_dist_ops(xs: &[u8], ys: &[u8]) -> (u32, Vec<Op>) {
+    let dp = edit_dist_dp_pre(xs, ys);
+    let (mut i, mut j) = (xs.len(), ys.len());
+    let mut ops = vec![];
+    while 0 < i && 0 < j {
+        let dist = dp[i][j];
+        if dist == dp[i - 1][j] + 1 {
+            ops.push(Op::Del);
+            i -= 1;
+        } else if dist == dp[i][j - 1] + 1 {
+            ops.push(Op::Ins);
+            j -= 1;
+        } else {
+            let mat_pen = (xs[i - 1] != ys[j - 1]) as u32;
+            assert_eq!(dist, dp[i - 1][j - 1] + mat_pen);
+            ops.push(if mat_pen == 0 {
+                Op::Match
+            } else {
+                Op::Mismatch
+            });
+            i -= 1;
+            j -= 1;
+        }
+    }
+    ops.extend(std::iter::repeat(Op::Del).take(i));
+    ops.extend(std::iter::repeat(Op::Ins).take(j));
+    ops.reverse();
+    let dist = dp[xs.len()][ys.len()];
+    (dist, ops)
+}
+
 // /// Slow edit distance calculation, allowing removing any prefix and any suffix from **ys**.
 // /// In other words, it allows us to comsume leading bases and drop trailing bases as much as we like.
 // /// Note that even thought this function is semi-global and so the first argument of the return value is,
@@ -180,34 +212,6 @@ fn edit_dist_dp_post(xs: &[u8], ys: &[u8]) -> Vec<Vec<u32>> {
 //     ops.extend(std::iter::repeat(Op::Del).take(i));
 //     ops.extend(std::iter::repeat(Op::Ins).take(j));
 //     ops.reverse();
-//     (dist, ops)
-// }
-
-// /// Edit distance and its operations.
-// pub fn edit_dist_slow_ops(xs: &[u8], ys: &[u8]) -> (u32, Vec<Op>) {
-//     let dp = edit_dist_dp_pre(xs, ys);
-//     let (mut i, mut j) = (xs.len(), ys.len());
-//     let mut ops = vec![];
-//     while 0 < i && 0 < j {
-//         let dist = dp[i][j];
-//         if dist == dp[i - 1][j] + 1 {
-//             ops.push(Op::Del);
-//             i -= 1;
-//         } else if dist == dp[i][j - 1] + 1 {
-//             ops.push(Op::Ins);
-//             j -= 1;
-//         } else {
-//             let mat_pen = (xs[i - 1] != ys[j - 1]) as u32;
-//             assert_eq!(dist, dp[i - 1][j - 1] + mat_pen);
-//             ops.push(if mat_pen == 0 { Op::Mat } else { Op::Mism });
-//             i -= 1;
-//             j -= 1;
-//         }
-//     }
-//     ops.extend(std::iter::repeat(Op::Del).take(i));
-//     ops.extend(std::iter::repeat(Op::Ins).take(j));
-//     ops.reverse();
-//     let dist = dp[xs.len()][ys.len()];
 //     (dist, ops)
 // }
 
