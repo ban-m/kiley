@@ -169,14 +169,22 @@ fn polish(matches: &clap::ArgMatches) -> std::io::Result<()> {
         .value_of("seed")
         .and_then(|e| e.parse().ok())
         .unwrap();
-    use kiley::gphmm::*;
-    let model = GPHMM::<Cond>::clr();
-    let config =
-        kiley::PolishConfig::with_model(radius, chunk_size, max_coverage, seed, overlap, model);
-    let result = kiley::polish(&contigs, &reads, &alignments, &config);
+    let config = kiley::PolishConfig::new(radius, chunk_size, max_coverage, overlap, seed);
+    let contigs: Vec<_> = contigs
+        .into_iter()
+        .map(|(id, seq)| kiley::SeqRecord::new(id, seq))
+        .collect();
+    let reads: Vec<_> = reads
+        .into_iter()
+        .map(|(id, seq)| kiley::SeqRecord::new(id, seq))
+        .collect();
+    let polished_contigs: Vec<_> = kiley::polish(&contigs, &reads, &alignments, &config)
+        .into_iter()
+        .map(|kiley::SeqRecord { id, seq }| (id, seq))
+        .collect();
     let stdout = std::io::stdout();
     let mut wtr = std::io::BufWriter::new(stdout.lock());
-    kiley::fasta::write_fasta(&mut wtr, &result)
+    kiley::fasta::write_fasta(&mut wtr, &polished_contigs)
 }
 
 fn consensus(matches: &clap::ArgMatches) -> std::io::Result<()> {
