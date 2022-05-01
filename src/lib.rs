@@ -52,8 +52,8 @@ impl PolishConfig {
         radius: usize,
         chunk_size: usize,
         max_coverage: usize,
-        seed: u64,
         overlap: usize,
+        seed: u64,
         hmm: hmm::guided::PairHiddenMarkovModel,
     ) -> Self {
         Self {
@@ -86,7 +86,6 @@ where
     }
 }
 
-// struct SeqRecord = (std::borrow::Borrow<str>, std::borrow::Borrow<[u8]>);
 /// Only Alignment with Cigar fields would be used in the polishing stage.
 /// It is the task for caller to filter erroneous alignmnet before calling this function.
 pub fn polish<I, S>(
