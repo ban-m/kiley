@@ -18,6 +18,12 @@ are implemented. In addition, there is a function to estimate the maximum-likeli
 
 The main aim is to make a correct consensus from noisy reads. 
 
+## TODO
+
+- If the alignment contains very long run of insertion/deletion at head/tail, the computing likelihood would be unstable in the guided PairHMM alignment. 
+  This is because the alignment is global, and the leading runs of ins/del make the likelihood be exatly zero.
+  Maybe we should fall back slow log-sum-exp version (current implementation is based on scaling as it is much faster and accurate for usual alignment....).
+
 ## Install
 
 1. Install [Rust](https://www.rust-lang.org/).

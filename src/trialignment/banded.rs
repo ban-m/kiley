@@ -44,6 +44,7 @@ impl Aligner {
         let extend_size = (len * len * (total_length + 1)).saturating_sub(self.memory.len());
         self.memory
             .extend(std::iter::repeat(total_length as u32).take(extend_size));
+
         self.align_inner(xs, ys, zs, radius)
     }
     fn align_inner(&mut self, xs: &[u8], ys: &[u8], zs: &[u8], rad: usize) -> (u32, Vec<Op>) {
@@ -607,6 +608,16 @@ mod test {
             let (dist2, _) = alignment(x, y, z, radius);
             assert_eq!(dist, dist2);
         }
+    }
+    #[test]
+    fn three_way_check() {
+        let mut aligner = Aligner::new(10, 10, 10, 2);
+        let xs = b"TG";
+        let radius = 2;
+        let (dist, aln) = aligner.align(xs, xs, xs, radius);
+        assert_eq!(dist, 0);
+        let answer = vec![super::Op::Match, super::Op::Match];
+        assert_eq!(aln, answer);
     }
     // #[test]
     // #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]

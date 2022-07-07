@@ -130,7 +130,14 @@ where
     T: std::borrow::Borrow<[u8]>,
 {
     let chunks = register_all_alignments(template, alignments, config);
-    debug!("Record alignemnts.");
+    if log_enabled!(log::Level::Trace) {
+        for (i, (temp, seqs, _)) in chunks.iter().enumerate() {
+            trace!("POLISH\tREF\t{i}\t{}", temp.len());
+            for seq in seqs.iter() {
+                trace!("POLISH\tQRY\t{i}\t{}", seq.len());
+            }
+        }
+    }
     let polished = chunks
         .into_par_iter()
         .map(|(draft, seqs, mut ops)| match seqs.len() < 5 {
@@ -275,7 +282,7 @@ fn overlap_aln(xs: &[u8], ys: &[u8]) -> (i32, Vec<Op>) {
 }
 
 // Split query into (chunk-id, aligned seq)-array.
-// If the alignment does not have CIGAR string, return empty array(NOt good).
+// If the alignment does not have CIGAR string, return empty array.
 fn split_query(
     query: &[u8],
     aln: &sam::Record,
@@ -295,14 +302,9 @@ fn split_query(
             _ => unreachable!(),
         })
         .collect();
-    if ops.is_empty() {
+    if ops.is_empty() || aln.pos() == 0 {
         return vec![];
     }
-    let query = if aln.is_forward() {
-        query.to_vec()
-    } else {
-        revcmp(query)
-    };
     let (mut ref_position, mut query_position) = (aln.pos() - 1, 0);
     let break_len = config.chunk_size - config.overlap;
     let initial_chunk_id = if ref_position % break_len == 0 {
@@ -317,6 +319,7 @@ fn split_query(
         ops.pop();
     }
     // Seek until reached to the chunk_start.
+    assert!(ref_position <= chunk_start);
     while ref_position < chunk_start {
         match ops.pop() {
             Some(Op::Mismatch | Op::Match) => {
@@ -329,6 +332,11 @@ fn split_query(
         }
     }
     assert_eq!(ref_position, chunk_start);
+    let query = if aln.is_forward() {
+        query.to_vec()
+    } else {
+        revcmp(query)
+    };
     let query = &query[query_position..];
     seq_into_subchunks(query, config, ops, reflen - ref_position)
         .into_iter()
@@ -586,7 +594,10 @@ fn partition_query<'a>(
     let (mut i, mut j) = (0, 0);
     let mut q_split_position = vec![];
     let mut target_poss = split_positions.iter();
-    let mut target_pos = *target_poss.next().unwrap();
+    let mut target_pos = match target_poss.next() {
+        Some(&res) => res,
+        None => return vec![(0, query)],
+    };
     for op in ops {
         match op {
             Op::Match | Op::Mismatch => {
@@ -812,22 +823,37 @@ pub fn ternary_consensus_by_chunk<T: std::borrow::Borrow<[u8]>>(
 ) -> Vec<u8> {
     let max = chunk_size * 2;
     let mut aligner = Aligner::new(max, max, max, chunk_size / 2);
-    let draft = seqs[0].borrow();
+    if seqs.iter().all(|x| x.borrow().len() < chunk_size) {
+        let mut xs: Vec<_> = seqs.iter().map(|x| x.borrow()).collect();
+        let mean: usize = xs.iter().map(|x| x.len()).sum::<usize>() / xs.len();
+        let thr = mean / 4;
+        xs.retain(|qs| {
+            let diff = qs.len().max(mean) - qs.len().min(mean);
+            diff < thr
+        });
+        let min = xs.iter().map(|x| x.len()).min().unwrap();
+        let radius = (min / 3).max(chunk_size / 3) + 1;
+        return consensus_inner(&xs, radius, &mut aligner);
+    }
+    let draft = &seqs[0].borrow();
     // 1. Partition each reads into `chunk-size`bp.
     // Calculate the range of each window.
     let chunk_start_position: Vec<_> = (0..)
         .map(|i| i * chunk_size)
-        .take_while(|l| l + chunk_size <= draft.len())
+        .take_while(|l| l + chunk_size <= draft.len()) // ?
         .collect();
     let mut chunks: Vec<_> = chunk_start_position
         .windows(2)
         .map(|w| vec![&draft[w[0]..w[1]]])
         .collect();
-    let pos = *chunk_start_position.last().unwrap();
+    if chunks.is_empty() {
+        chunks.push(vec![draft]);
+    };
+    let pos = *chunk_start_position.last().unwrap_or(&0);
     chunks.push(vec![&draft[pos..]]);
     for seq in seqs.iter() {
         for (pos, x) in partition_query(draft, seq.borrow(), &chunk_start_position) {
-            chunks[pos].push(x);
+            chunks[pos].push(&x);
         }
     }
     // Maybe we need filter out very short chunk.
@@ -841,7 +867,7 @@ pub fn ternary_consensus_by_chunk<T: std::borrow::Borrow<[u8]>>(
         .iter()
         .flat_map(|xs| {
             let min = xs.iter().map(|x| x.len()).min().unwrap();
-            let radius = (min / 3).max(chunk_size / 3);
+            let radius = (min / 3).max(chunk_size / 3) + 1;
             consensus_inner(xs, radius, &mut aligner)
         })
         .collect();

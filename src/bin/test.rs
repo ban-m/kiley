@@ -1,28 +1,26 @@
+use kiley::gen_seq;
+use rand::Rng;
 use rand::SeedableRng;
-fn main() {
+use rand_xoshiro::Xoroshiro128PlusPlus;
+fn main() -> std::io::Result<()> {
     env_logger::init();
-    use kiley::gen_seq;
-    let coverage = 10;
-    let rad = 200;
-    let prof = gen_seq::ProfileWithContext::default();
-    let seed = 36;
-    let len = 2000;
-    let mut rng: rand_xoshiro::Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(seed);
-    let template: Vec<_> = gen_seq::generate_seq(&mut rng, len);
-    let seqs: Vec<_> = (0..coverage)
-        .map(|_| gen_seq::introduce_randomness_with_context(&template, &mut rng, &prof))
-        .collect();
-    use kiley::bialignment::edit_dist;
-    let hmm = kiley::hmm::guided::PairHiddenMarkovModel::default();
-    let (gtime, gdist, after) = {
-        let start = std::time::Instant::now();
-        let draft = kiley::ternary_consensus_by_chunk(&seqs, rad);
-        //let consensus = kiley::bialignment::guided::polish_until_converge(&draft, &seqs, rad);
-        let consensus = hmm.polish_until_converge(&draft, &seqs, rad);
-        let end = std::time::Instant::now();
-        let before = edit_dist(&template, &draft);
-        let after = edit_dist(&template, &consensus);
-        ((end - start).as_millis(), before, after)
+    let len = 500;
+    let seed = 2032;
+    let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(seed);
+    let seq = gen_seq::generate_seq(&mut rng, len);
+    let profile = gen_seq::Profile {
+        sub: 0.02,
+        del: 0.02,
+        ins: 0.02,
     };
-    println!("{}\t{}\t{}", gtime, gdist, after);
+    let draft = gen_seq::introduce_randomness(&seq, &mut rng, &profile);
+    let hmm = kiley::hmm::guided::PairHiddenMarkovModel::default();
+    for _ in 0..200 {
+        let len = rng.gen_range(300..500);
+        let query = gen_seq::introduce_randomness(&seq[len..], &mut rng, &profile);
+        let ops = kiley::bialignment::global(&draft, &query, 1, -1, -1, -3).1;
+        let len = hmm.modification_table(&draft, &query, 20, &ops).0.len();
+        println!("{len}");
+    }
+    Ok(())
 }

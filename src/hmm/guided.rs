@@ -2,6 +2,7 @@ use crate::bialignment::guided::bootstrap_ops;
 use crate::bialignment::guided::re_fill_fill_range;
 use crate::dptable::DPTable;
 use crate::op::Op;
+use serde::{Deserialize, Serialize};
 use std::f64::MIN_POSITIVE;
 
 // fn mul((m1, i1, d1): (f64, f64, f64), (m2, i2, d2): (f64, f64, f64)) -> (f64, f64, f64) {
@@ -48,15 +49,15 @@ const fn base_table() -> [usize; 256] {
 }
 const BASE_TABLE: [usize; 256] = base_table();
 
-const COPY_SIZE: usize = 5;
-const DEL_SIZE: usize = 5;
+pub const COPY_SIZE: usize = 1;
+pub const DEL_SIZE: usize = 1;
 pub const NUM_ROW: usize = 8 + COPY_SIZE + DEL_SIZE;
 // After introducing mutation, we would take INACTIVE_TIME bases just as-is.
 const INACTIVE_TIME: usize = 5;
 
 /// HMM. As a rule of thumb, we do not take logarithm of each field; Scaling would be
 /// better both in performance and computational stability.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PairHiddenMarkovModel {
     /// Prob from mat.
     /// Pr{Mat->Mat},
@@ -1033,14 +1034,14 @@ impl PairHiddenMarkovModel {
                 if matches!(current_max,Some(lk) if current_lk < lk + 0.1) {
                     break;
                 }
-                trace!("NOWLK\t{}", current_lk);
+                // trace!("NOWLK\t{}", current_lk);
                 current_max = Some(current_lk);
                 let is_updated = ops
                     .iter_mut()
                     .zip(xs.iter())
                     .take(take_num)
                     .enumerate()
-                    .map(|(i, (ops, seq))| {
+                    .map(|(_, (ops, seq))| {
                         let (ops, seq) = (ops.borrow_mut(), seq.borrow());
                         let lk = self.lk(&mut memory, &template, seq, ops);
                         let edop = edlib_sys::global(&template, seq);
@@ -1048,7 +1049,7 @@ impl PairHiddenMarkovModel {
                         let edop: Vec<_> = edop.iter().map(|&op| e2k[op as usize]).collect();
                         let lk2 = self.lk(&mut memory, &template, seq, &edop);
                         if lk + 0.1 < lk2 {
-                            trace!("{t}\t{i}\t{:.3}\t{:.3}", lk, lk2);
+                            // trace!("{t}\t{i}\t{:.3}\t{:.3}", lk, lk2);
                             *ops = edop;
                             true
                         } else {
