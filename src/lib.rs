@@ -130,21 +130,28 @@ where
     T: std::borrow::Borrow<[u8]>,
 {
     let chunks = register_all_alignments(template, alignments, config);
-    if log_enabled!(log::Level::Trace) {
-        for (i, (temp, seqs, _)) in chunks.iter().enumerate() {
-            trace!("POLISH\tREF\t{i}\t{}", temp.len());
-            for seq in seqs.iter() {
-                trace!("POLISH\tQRY\t{i}\t{}", seq.len());
-            }
-        }
-    }
+    // for (i, (temp, seqs, _)) in chunks.iter().enumerate() {
+    //     debug!("POLISH\tREF\t{i}\t{}\t{}", temp.len(), seqs.len());
+    // }
+    // if log_enabled!(log::Level::Trace) {
+    //     for (i, (temp, seqs, _)) in chunks.iter().enumerate() {
+    //         trace!("POLISH\tREF\t{i}\t{}\t{}", temp.len(), seqs.len());
+    // for seq in seqs.iter() {
+    //     trace!("POLISH\tQRY\t{i}\t{}", seq.len());
+    // }
+    //     }
+    // }
+    use bialignment::guided::polish_until_converge_with;
     let polished = chunks
         .into_par_iter()
         .map(|(draft, seqs, mut ops)| match seqs.len() < 5 {
             true => draft.to_vec(),
-            false => config
-                .hmm
-                .polish_until_converge_with(draft, &seqs, &mut ops, config.radius),
+            false => {
+                let draft = polish_until_converge_with(draft, &seqs, &mut ops, config.radius);
+                config
+                    .hmm
+                    .polish_until_converge_with(&draft, &seqs, &mut ops, config.radius)
+            }
         })
         .fold(Vec::new, |cons: Vec<u8>, chunk: Vec<u8>| {
             merge(cons, chunk, config.overlap)
@@ -575,22 +582,26 @@ fn revcmp(xs: &[u8]) -> Vec<u8> {
 //     }
 // }
 
+fn edlib_global(target: &[u8], query: &[u8]) -> Vec<Op> {
+    let task = edlib_sys::AlignTask::Alignment;
+    let mode = edlib_sys::AlignMode::Global;
+    let aln = edlib_sys::align(query, target, mode, task);
+    use Op::*;
+    const EDLIB2KILEY: [Op; 4] = [Match, Ins, Del, Mismatch];
+    aln.operations()
+        .unwrap()
+        .iter()
+        .map(|x| EDLIB2KILEY[*x as usize])
+        .collect()
+}
+
 // Split reads into size intervals. Note that the last chunks is merged the 2nd last one.
 fn partition_query<'a>(
     draft: &[u8],
     query: &'a [u8],
     split_positions: &[usize],
 ) -> Vec<(usize, &'a [u8])> {
-    let ops: Vec<_> = edlib_sys::global(draft, query)
-        .into_iter()
-        .map(|x| match x {
-            0 => Op::Match,
-            1 => Op::Ins,
-            2 => Op::Del,
-            3 => Op::Mismatch,
-            _ => unreachable!(),
-        })
-        .collect();
+    let ops = edlib_global(draft, query);
     let (mut i, mut j) = (0, 0);
     let mut q_split_position = vec![];
     let mut target_poss = split_positions.iter();
@@ -964,27 +975,26 @@ pub fn polish_by_pileup<T: std::borrow::Borrow<[u8]>>(template: &[u8], xs: &[T])
     let mut deletions = vec![0; template.len()];
     for x in xs.iter() {
         let x = x.borrow();
-        let ops = edlib_sys::global(template, x);
+        let ops = edlib_global(template, x);
         let (mut i, mut j) = (0, 0);
         let mut ins_buffer = vec![];
         for &op in ops.iter() {
             match op {
-                0 | 3 => {
+                Op::Match | Op::Mismatch => {
                     matches[i][padseq::convert_to_twobit(&x[j]) as usize] += 1;
                     i += 1;
                     j += 1;
                 }
-                1 => {
+                Op::Ins => {
                     ins_buffer.push(x[j]);
                     j += 1;
                 }
-                2 => {
+                Op::Del => {
                     deletions[i] += 1;
                     i += 1;
                 }
-                _ => unreachable!(),
             }
-            if op != 1 && !ins_buffer.is_empty() {
+            if op != Op::Ins && !ins_buffer.is_empty() {
                 insertions[i].push(ins_buffer.clone());
                 ins_buffer.clear();
             }

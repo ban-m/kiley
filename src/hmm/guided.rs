@@ -82,6 +82,38 @@ pub struct PairHiddenMarkovModel {
     pub mat_emit: [f64; 16],
 }
 
+impl crate::gen_seq::Generate for PairHiddenMarkovModel {
+    fn gen<R: rand::Rng>(&self, seq: &[u8], rng: &mut R) -> Vec<u8> {
+        use rand::seq::SliceRandom;
+        let states = [Op::Match, Op::Del, Op::Ins];
+        let mut current = Op::Match;
+        let mut gen = vec![];
+        let mut seq = seq.iter().peekable();
+        while seq.peek().is_some() {
+            current = *states
+                .choose_weighted(rng, |to| self.weight(current, *to))
+                .unwrap();
+            match current {
+                Op::Match => {
+                    let base = *seq.next().unwrap();
+                    let start = 4 * BASE_TABLE[base as usize];
+                    let pos = *[0, 1, 2, 3]
+                        .choose_weighted(rng, |i| self.mat_emit[start + i])
+                        .unwrap();
+                    gen.push(b"ACGT"[pos]);
+                }
+                Op::Ins => {
+                    assert!(seq.next().is_some());
+                    gen.push(*b"ACGT".choose(rng).unwrap());
+                }
+                Op::Del => assert!(seq.next().is_some()),
+                _ => panic!(),
+            }
+        }
+        gen
+    }
+}
+
 impl std::fmt::Display for PairHiddenMarkovModel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(
@@ -142,6 +174,20 @@ impl std::default::Default for PairHiddenMarkovModel {
 }
 
 impl PairHiddenMarkovModel {
+    fn weight(&self, from: Op, to: Op) -> f64 {
+        match (from, to) {
+            (Op::Match, Op::Match) => self.mat_mat,
+            (Op::Match, Op::Ins) => self.mat_ins,
+            (Op::Match, Op::Del) => self.mat_del,
+            (Op::Ins, Op::Match) => self.ins_mat,
+            (Op::Ins, Op::Ins) => self.ins_ins,
+            (Op::Ins, Op::Del) => self.ins_del,
+            (Op::Del, Op::Match) => self.del_mat,
+            (Op::Del, Op::Ins) => self.del_ins,
+            (Op::Del, Op::Del) => self.del_del,
+            _ => panic!(),
+        }
+    }
     pub fn new(
         (mat_mat, mat_ins, mat_del): (f64, f64, f64),
         (ins_mat, ins_ins, ins_del): (f64, f64, f64),
@@ -817,7 +863,17 @@ impl PairHiddenMarkovModel {
         assert!(!(mat + ins + del).is_nan(), "{},{},{}", mat, ins, del);
         (mat + del + ins).ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
     }
-
+    pub fn likelihood_guided_post(&self, rs: &[u8], qs: &[u8], ops: &[Op], radius: usize) -> f64 {
+        let mut memory = Memory::with_capacity(rs.len(), radius);
+        memory.fill_ranges.clear();
+        memory
+            .fill_ranges
+            .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
+        re_fill_fill_range(qs.len(), rs.len(), &ops, radius, &mut memory.fill_ranges);
+        memory.initialize();
+        self.fill_post_dp(&mut memory, rs, qs);
+        memory.post.get(0, 0).0.ln() + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>()
+    }
     pub fn modification_table(
         &self,
         rs: &[u8],
@@ -1044,9 +1100,7 @@ impl PairHiddenMarkovModel {
                     .map(|(_, (ops, seq))| {
                         let (ops, seq) = (ops.borrow_mut(), seq.borrow());
                         let lk = self.lk(&mut memory, &template, seq, ops);
-                        let edop = edlib_sys::global(&template, seq);
-                        let e2k = [Op::Match, Op::Ins, Op::Del, Op::Match];
-                        let edop: Vec<_> = edop.iter().map(|&op| e2k[op as usize]).collect();
+                        let edop = crate::edlib_global(&template, seq);
                         let lk2 = self.lk(&mut memory, &template, seq, &edop);
                         if lk + 0.1 < lk2 {
                             // trace!("{t}\t{i}\t{:.3}\t{:.3}", lk, lk2);

@@ -2,11 +2,22 @@
 //! Usually, it would not be used in the real-applications.
 use crate::op::Op;
 use rand::seq::SliceRandom;
+
+/// Generate sequence.
+pub trait Generate {
+    fn gen<R: rand::Rng>(&self, seq: &[u8], rng: &mut R) -> Vec<u8>;
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Profile {
     pub sub: f64,
     pub del: f64,
     pub ins: f64,
+}
+impl Generate for Profile {
+    fn gen<R: rand::Rng>(&self, seq: &[u8], rng: &mut R) -> Vec<u8> {
+        introduce_randomness(seq, rng, self)
+    }
 }
 
 impl Profile {
