@@ -1154,8 +1154,8 @@ pub mod test {
     use super::*;
     fn edit_dist_base_ops(xs: &[u8], ys: &[u8]) -> (u32, Vec<Op>) {
         let mut dp = vec![vec![0; ys.len() + 1]; xs.len() + 1];
-        for i in 0..xs.len() + 1 {
-            dp[i][0] = i as u32;
+        for (i, row) in dp.iter_mut().enumerate() {
+            row[0] = i as u32;
         }
         for j in 0..ys.len() + 1 {
             dp[0][j] = j as u32;
@@ -1342,7 +1342,7 @@ pub mod test {
                 // Copy region.
                 for j in 0..xs.len() {
                     let seek = j * NUM_ROW + 8;
-                    for len in (0..COPY_SIZE).filter(|c| j + c + 1 <= xs.len()) {
+                    for len in (0..COPY_SIZE).filter(|c| j + c < xs.len()) {
                         let xs: Vec<_> =
                             xs[..j + len + 1].iter().chain(&xs[j..]).copied().collect();
                         let (dist, _) = edit_dist_guided(&xs, &ys, &ops, radius);
@@ -1352,7 +1352,7 @@ pub mod test {
                 // Delete region.
                 for j in 0..xs.len() {
                     let seek = j * NUM_ROW + 8 + COPY_SIZE;
-                    for len in (0..DEL_SIZE).filter(|d| j + d + 1 <= xs.len()) {
+                    for len in (0..DEL_SIZE).filter(|d| j + d < xs.len()) {
                         let xs: Vec<_> =
                             xs[..j].iter().chain(&xs[j + len + 1..]).copied().collect();
                         let (dist, _) = edit_dist_guided(&xs, &ys, &ops, radius);

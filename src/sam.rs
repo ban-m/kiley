@@ -376,7 +376,7 @@ fn match_mismatch(xs: &[u8], ys: &[u8]) -> Vec<u8> {
 fn cigar_parse() {
     use super::sam::Op::*;
     let cigar = "101S33M2I66M";
-    let processed = parse_cigar_string(&cigar);
+    let processed = parse_cigar_string(cigar);
     eprintln!("{:?}", processed);
     assert_eq!(
         processed,

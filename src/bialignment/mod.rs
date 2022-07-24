@@ -1439,9 +1439,9 @@ pub fn local(xs: &[u8], ys: &[u8], mat: i32, mism: i32, open: i32, ext: i32) -> 
                 .max(dp[2][i - 1][j] + open)
                 .max(0);
             dp[2][i][j] = (dp[0][i][j - 1] + open).max(dp[2][i][j - 1] + ext).max(0);
-            for s in 0..3 {
-                if max < dp[s][i][j] {
-                    max = dp[s][i][j];
+            for (s, inner_dp) in dp.iter().enumerate() {
+                if max < inner_dp[i][j] {
+                    max = inner_dp[i][j];
                     argmax = (s, i, j);
                 }
             }
@@ -1649,8 +1649,8 @@ mod test {
     }
     fn edit_dist_base_ops(xs: &[u8], ys: &[u8]) -> (u32, Vec<Op>) {
         let mut dp = vec![vec![0; ys.len() + 1]; xs.len() + 1];
-        for i in 0..xs.len() + 1 {
-            dp[i][0] = i as u32;
+        for (i, row) in dp.iter_mut().enumerate() {
+            row[0] = i as u32;
         }
         for j in 0..ys.len() + 1 {
             dp[0][j] = j as u32;
@@ -1882,7 +1882,7 @@ mod test {
             assert_eq!(dist, exact_dist, "{:?}", dp.get_row(xslen));
             let dp = naive_banded_dp_post(&xs, &ys, radius, &centers);
             let dist = dp[(0, radius as isize)];
-            assert_eq!(dist, exact_dist, "{:?}", dp.get_row(0 as isize));
+            assert_eq!(dist, exact_dist, "{:?}", dp.get_row(0));
         }
     }
     #[test]

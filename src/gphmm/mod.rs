@@ -1570,7 +1570,7 @@ impl<'a, 'b, 'c> Profile<'a, 'b, 'c, Cond> {
 }
 
 #[cfg(test)]
-mod gphmm {
+mod tests {
     // TODO:Write more tests for conditional hidden Markov models.
     use super::*;
     use crate::op::Op;
@@ -1629,7 +1629,7 @@ mod gphmm {
             let profile = &crate::gen_seq::PROFILE;
             let phmm: GPHMM<FullHiddenMarkovModel> = GPHMM::default();
             let xs = crate::gen_seq::generate_seq(&mut rng, len);
-            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &profile);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, profile);
             let _ = phmm.align(&xs, &ys);
             let phmm = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
             let _ = phmm.align(&xs, &ys);
@@ -1644,7 +1644,7 @@ mod gphmm {
             let len = 1000;
             let profile = &crate::gen_seq::PROFILE;
             let xs = crate::gen_seq::generate_seq(&mut rng, len);
-            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &profile);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, profile);
             let phmm = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
             let (lk, _, _) = phmm.align(&xs, &ys);
             let lkt = phmm.likelihood_naive(&xs, &ys);
@@ -1670,7 +1670,7 @@ mod gphmm {
             let len = 100;
             let profile = &crate::gen_seq::PROFILE;
             let xs = crate::gen_seq::generate_seq(&mut rng, len);
-            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &profile);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, profile);
             let phmm = GPHMM::<Full>::new_three_state(0.8, 0.2, 0.3, 0.9);
             let lkn = phmm.likelihood_naive(&xs, &ys);
             let lks = phmm.likelihood(&xs, &ys);
@@ -1707,7 +1707,7 @@ mod gphmm {
             let len = 1000;
             let profile = &crate::gen_seq::PROFILE;
             let xs = crate::gen_seq::generate_seq(&mut rng, len);
-            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &profile);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, profile);
             let lkn = phmm.likelihood_naive(&xs, &ys);
             let dp = phmm.backward_naive(&xs, &ys);
             let lkbs: Vec<_> = phmm
@@ -1728,7 +1728,7 @@ mod gphmm {
             let len = 1000;
             let profile = &crate::gen_seq::PROFILE;
             let xs = crate::gen_seq::generate_seq(&mut rng, len);
-            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &profile);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, profile);
             let dpn = phmm.backward_naive(&xs, &ys);
             let lk = phmm.likelihood_naive(&xs, &ys);
             let (xs, ys) = (PadSeq::new(xs.as_slice()), PadSeq::new(ys.as_slice()));
@@ -1772,7 +1772,7 @@ mod gphmm {
             let len = 1000;
             let profile = &crate::gen_seq::PROFILE;
             let xs = crate::gen_seq::generate_seq(&mut rng, len);
-            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &profile);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, profile);
             let lk = phmm.likelihood(&xs, &ys);
             let xs = PadSeq::new(xs.as_slice());
             let ys = PadSeq::new(ys.as_slice());
@@ -1789,7 +1789,7 @@ mod gphmm {
             let len = 200;
             let profile = &crate::gen_seq::PROFILE;
             let xs = crate::gen_seq::generate_seq(&mut rng, len);
-            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &profile);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, profile);
             let (_, ops, _) = phmm.align(&xs, &ys);
             let (xr, opr, yr) = crate::recover(&xs, &ys, &ops);
             for ((xr, opr), yr) in xr.chunks(200).zip(opr.chunks(200)).zip(yr.chunks(200)) {
@@ -1833,7 +1833,7 @@ mod gphmm {
             let len = 200;
             let profile = &crate::gen_seq::PROFILE;
             let xs = crate::gen_seq::generate_seq(&mut rng, len);
-            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &profile);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, profile);
             let (_, ops, _) = phmm.align(&xs, &ys);
             let (xr, opr, yr) = crate::recover(&xs, &ys, &ops);
             for ((xr, opr), yr) in xr.chunks(200).zip(opr.chunks(200)).zip(yr.chunks(200)) {
@@ -1865,7 +1865,7 @@ mod gphmm {
             let len = 200;
             let profile = &crate::gen_seq::PROFILE;
             let xs = crate::gen_seq::generate_seq(&mut rng, len);
-            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &profile);
+            let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, profile);
             let (_, ops, _) = phmm.align(&xs, &ys);
             let (xr, opr, yr) = crate::recover(&xs, &ys, &ops);
             for ((xr, opr), yr) in xr.chunks(200).zip(opr.chunks(200)).zip(yr.chunks(200)) {
@@ -1895,7 +1895,7 @@ mod gphmm {
             let profile = &crate::gen_seq::PROFILE;
             let template = crate::gen_seq::generate_seq(&mut rng, len);
             let queries: Vec<_> = (0..coverage)
-                .map(|_| crate::gen_seq::introduce_randomness(&template, &mut rng, &profile))
+                .map(|_| crate::gen_seq::introduce_randomness(&template, &mut rng, profile))
                 .collect();
             let draft = crate::gen_seq::introduce_errors(&template, &mut rng, 1, 1, 1);
             let polished = phmm.correct_until_convergence(&draft, &queries);

@@ -49,8 +49,8 @@ const fn base_table() -> [usize; 256] {
 }
 const BASE_TABLE: [usize; 256] = base_table();
 
-pub const COPY_SIZE: usize = 1;
-pub const DEL_SIZE: usize = 1;
+pub const COPY_SIZE: usize = 3;
+pub const DEL_SIZE: usize = 3;
 pub const NUM_ROW: usize = 8 + COPY_SIZE + DEL_SIZE;
 // After introducing mutation, we would take INACTIVE_TIME bases just as-is.
 const INACTIVE_TIME: usize = 5;
@@ -642,7 +642,7 @@ impl PairHiddenMarkovModel {
                     *current = val - b.ln();
                     Some(val)
                 })
-                .max_by(|x, y| x.partial_cmp(&y).unwrap())
+                .max_by(|x, y| x.partial_cmp(y).unwrap())
                 .unwrap()
         };
         let scaling = (max / memory.post_scl.len() as f64).exp();
@@ -856,7 +856,7 @@ impl PairHiddenMarkovModel {
         memory
             .fill_ranges
             .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
-        re_fill_fill_range(qs.len(), rs.len(), &ops, radius, &mut memory.fill_ranges);
+        re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut memory.fill_ranges);
         memory.initialize();
         self.fill_pre_dp(&mut memory, rs, qs);
         let (mat, ins, del) = memory.pre.get(qs.len(), rs.len());
@@ -869,7 +869,7 @@ impl PairHiddenMarkovModel {
         memory
             .fill_ranges
             .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
-        re_fill_fill_range(qs.len(), rs.len(), &ops, radius, &mut memory.fill_ranges);
+        re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut memory.fill_ranges);
         memory.initialize();
         self.fill_post_dp(&mut memory, rs, qs);
         memory.post.get(0, 0).0.ln() + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>()
@@ -1518,8 +1518,9 @@ impl PairHiddenMarkovModel {
         for ((i, &(start, end)), &q) in mem.fill_ranges.iter().enumerate().zip(qs.iter()) {
             let stay = forward[i] + backward[i];
             let proceed = forward[i] + backward[i + 1];
-            for j in start..end.min(rs.len()) {
-                let r = rs[j];
+            // for j in start..end.min(rs.len()) {
+            //               let r = rs[j];
+            for (j, &r) in rs.iter().enumerate().take(end).skip(start) {
                 let (from_mat, from_ins, from_del) = mem.pre.get(i, j);
                 let after_mat = mem.post.get(i + 1, j + 1).0;
                 let after_ins = mem.post.get(i + 1, j).1;
@@ -1815,20 +1816,20 @@ pub mod tests {
     use crate::gen_seq;
     use rand::SeedableRng;
     use rand_xoshiro::Xoshiro256StarStar;
-    type PHMM = PairHiddenMarkovModel;
+
     #[test]
     fn align() {
-        let phmm = PHMM::default();
-        let (lk, ops) = phmm.align(b"ACCG", b"ACCG", 5);
+        let model = PairHiddenMarkovModel::default();
+        let (lk, ops) = model.align(b"ACCG", b"ACCG", 5);
         eprintln!("{:?}\t{:.3}", ops, lk);
         assert_eq!(ops, vec![Op::Match; 4]);
-        let (lk, ops) = phmm.align(b"ACCG", b"", 2);
+        let (lk, ops) = model.align(b"ACCG", b"", 2);
         eprintln!("{:?}\t{:.3}", ops, lk);
         assert_eq!(ops, vec![Op::Del; 4]);
-        let (lk, ops) = phmm.align(b"", b"ACCG", 2);
+        let (lk, ops) = model.align(b"", b"ACCG", 2);
         assert_eq!(ops, vec![Op::Ins; 4]);
         eprintln!("{:?}\t{:.3}", ops, lk);
-        let (lk, ops) = phmm.align(b"ATGCCGCACAGTCGAT", b"ATCCGC", 5);
+        let (lk, ops) = model.align(b"ATGCCGCACAGTCGAT", b"ATCCGC", 5);
         eprintln!("{:?}\t{:.3}", ops, lk);
         use Op::*;
         let answer = vec![vec![Match; 2], vec![Del], vec![Match; 4], vec![Del; 9]].concat();
@@ -1836,7 +1837,7 @@ pub mod tests {
         let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198);
         let template = gen_seq::generate_seq(&mut rng, 300);
         let profile = gen_seq::PROFILE;
-        let hmm = PHMM::default();
+        let hmm = PairHiddenMarkovModel::default();
         let radius = 50;
         let seq = gen_seq::introduce_randomness(&template, &mut rng, &profile);
         hmm.align(&template, &seq, radius);
@@ -1846,7 +1847,7 @@ pub mod tests {
         let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198);
         let template = gen_seq::generate_seq(&mut rng, 300);
         let profile = gen_seq::PROFILE;
-        let hmm = PHMM::default();
+        let hmm = PairHiddenMarkovModel::default();
         let radius = 50;
         let same_lk = hmm.likelihood(&template, &template, radius);
         let (lk, _) = hmm.align(&template, &template, radius);
@@ -1884,7 +1885,7 @@ pub mod tests {
             vec![Ins, Del, Ins, Del],
             vec![Ins, Ins, Del, Del],
         ];
-        let hmm = PHMM::default();
+        let hmm = PairHiddenMarkovModel::default();
         let lks: Vec<_> = ops.iter().map(|ops| hmm.eval(seq1, seq2, ops)).collect();
         let lk_e = logsumexp(&lks);
         eprintln!("{:?},{}", lks, lk_e);
@@ -1898,13 +1899,13 @@ pub mod tests {
             let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198 + seed);
             let template = gen_seq::generate_seq(&mut rng, 70);
             let profile = gen_seq::PROFILE;
-            let hmm = PHMM::default();
+            let hmm = PairHiddenMarkovModel::default();
             let radius = 50;
             let query = gen_seq::introduce_randomness(&template, &mut rng, &profile);
-            let (modif_table, mut ops) = {
+            let (modif_table, ops) = {
                 let mut memory = Memory::with_capacity(template.len(), radius);
-                let mut ops = bootstrap_ops(template.len(), query.len());
-                let lk = hmm.update(&mut memory, &template, &query, &mut ops);
+                let ops = bootstrap_ops(template.len(), query.len());
+                let lk = hmm.update(&mut memory, &template, &query, &ops);
                 println!("LK\t{}", lk);
                 (memory.mod_table, ops)
             };
@@ -1921,7 +1922,7 @@ pub mod tests {
                 let orig = mod_version[j];
                 for (&base, lk_m) in b"ACGT".iter().zip(modif_table) {
                     mod_version[j] = base;
-                    let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
+                    let lk = hmm.update(&mut memory, &mod_version, &query, &ops);
                     assert!((lk - lk_m).abs() < 0.0001, "{},{},mod", lk, lk_m);
                     println!("M\t{}\t{}", j, (lk - lk_m).abs());
                     mod_version[j] = orig;
@@ -1929,32 +1930,32 @@ pub mod tests {
                 // Insertion error
                 for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
                     mod_version.insert(j, base);
-                    let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
+                    let lk = hmm.update(&mut memory, &mod_version, &query, &ops);
                     assert!((lk - lk_m).abs() < 0.0001, "{},{}", lk, lk_m);
                     println!("I\t{}\t{}", j, (lk - lk_m).abs());
                     mod_version.remove(j);
                 }
                 // Copying mod
-                for len in (0..COPY_SIZE).filter(|c| j + c + 1 <= template.len()) {
+                for len in (0..COPY_SIZE).filter(|c| j + c < template.len()) {
                     let lk_m = modif_table[8 + len];
                     let mod_version: Vec<_> = template[..j + len + 1]
                         .iter()
                         .chain(template[j..].iter())
                         .copied()
                         .collect();
-                    let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
+                    let lk = hmm.update(&mut memory, &mod_version, &query, &ops);
                     println!("C\t{}\t{}\t{}", j, len, (lk - lk_m).abs());
                     assert!((lk - lk_m).abs() < 0.0001, "{},{}", lk, lk_m);
                 }
                 // Deletion error
-                for len in (0..DEL_SIZE).filter(|d| j + d + 1 <= template.len()) {
+                for len in (0..DEL_SIZE).filter(|d| j + d < template.len()) {
                     let lk_m = modif_table[8 + COPY_SIZE + len];
                     let mod_version: Vec<_> = template[..j]
                         .iter()
                         .chain(template[j + len + 1..].iter())
                         .copied()
                         .collect();
-                    let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
+                    let lk = hmm.update(&mut memory, &mod_version, &query, &ops);
                     println!("D\t{}\t{}\t{}", j, len, lk - lk_m);
                     assert!(
                         (lk - lk_m).abs() < 0.01,
@@ -1971,7 +1972,7 @@ pub mod tests {
                 .unwrap();
             for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
                 mod_version.push(base);
-                let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
+                let lk = hmm.update(&mut memory, &mod_version, &query, &ops);
                 assert!((lk - lk_m).abs() < 1.0001);
                 mod_version.pop();
             }
@@ -1993,10 +1994,10 @@ pub mod tests {
         let hmm = super::PairHiddenMarkovModel::default();
         let template = crate::ternary_consensus_by_chunk(&seqs, radius);
         let query = &seqs[0];
-        let (modif_table, mut ops) = {
+        let (modif_table, ops) = {
             let mut memory = Memory::with_capacity(template.len(), radius);
-            let mut ops = bootstrap_ops(template.len(), query.len());
-            let lk = hmm.update(&mut memory, &template, &query, &mut ops);
+            let ops = bootstrap_ops(template.len(), query.len());
+            let lk = hmm.update(&mut memory, &template, query, &ops);
             println!("LK\t{}", lk);
             (memory.mod_table, ops)
         };
@@ -2013,7 +2014,7 @@ pub mod tests {
             let orig = mod_version[j];
             for (&base, lk_m) in b"ACGT".iter().zip(modif_table) {
                 mod_version[j] = base;
-                let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
+                let lk = hmm.update(&mut memory, &mod_version, query, &ops);
                 assert!((lk - lk_m).abs() < 0.0001, "{},{},mod", lk, lk_m);
                 println!("M\t{}\t{}", j, (lk - lk_m).abs());
                 mod_version[j] = orig;
@@ -2021,32 +2022,32 @@ pub mod tests {
             // Insertion error
             for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
                 mod_version.insert(j, base);
-                let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
+                let lk = hmm.update(&mut memory, &mod_version, query, &ops);
                 assert!((lk - lk_m).abs() < 0.0001, "{},{}", lk, lk_m);
                 println!("I\t{}\t{}", j, (lk - lk_m).abs());
                 mod_version.remove(j);
             }
             // Copying mod
-            for len in (0..COPY_SIZE).filter(|c| j + c + 1 <= template.len()) {
+            for len in (0..COPY_SIZE).filter(|c| j + c < template.len()) {
                 let lk_m = modif_table[8 + len];
                 let mod_version: Vec<_> = template[..j + len + 1]
                     .iter()
                     .chain(template[j..].iter())
                     .copied()
                     .collect();
-                let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
+                let lk = hmm.update(&mut memory, &mod_version, query, &ops);
                 println!("C\t{}\t{}\t{}", j, len, (lk - lk_m).abs());
                 assert!((lk - lk_m).abs() < 0.0001, "{},{}", lk, lk_m);
             }
             // Deletion error
-            for len in (0..DEL_SIZE).filter(|d| j + d + 1 <= template.len()) {
+            for len in (0..DEL_SIZE).filter(|d| j + d < template.len()) {
                 let lk_m = modif_table[8 + COPY_SIZE + len];
                 let mod_version: Vec<_> = template[..j]
                     .iter()
                     .chain(template[j + len + 1..].iter())
                     .copied()
                     .collect();
-                let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
+                let lk = hmm.update(&mut memory, &mod_version, query, &ops);
                 println!("D\t{}\t{}\t{}", j, len, lk - lk_m);
                 assert!(
                     (lk - lk_m).abs() < 0.01,
@@ -2063,14 +2064,14 @@ pub mod tests {
             .unwrap();
         for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
             mod_version.push(base);
-            let lk = hmm.update(&mut memory, &mod_version, &query, &mut ops);
+            let lk = hmm.update(&mut memory, &mod_version, query, &ops);
             assert!((lk - lk_m).abs() < 1.0001);
             mod_version.pop();
         }
     }
     #[test]
     fn polish_test() {
-        let hmm = PHMM::default();
+        let hmm = PairHiddenMarkovModel::default();
         let radius = 50;
         for seed in 0..10 {
             let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198 + seed);
@@ -2120,7 +2121,7 @@ pub mod tests {
     }
     #[test]
     fn polish_long_insertion() {
-        let hmm = PHMM::default();
+        let hmm = PairHiddenMarkovModel::default();
         let radius = 50;
         let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198);
         let head = gen_seq::generate_seq(&mut rng, 100);

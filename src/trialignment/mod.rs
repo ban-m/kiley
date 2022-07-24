@@ -90,10 +90,12 @@ const fn get_match_table_u32() -> [u32; 512] {
             let mut z = 0;
             while z < 6 {
                 // match score of x, y, and z.
+                let has_two_gap = (y == 4 && (x == 4 || z == 4)) || (x == 4 && z == 4);
                 let match_score = if x == 5 || y == 5 || z == 5 {
                     // We do not allow any alignment among NULL base and others.
                     LARGE
-                } else if (x == 4 && y == 4) || (y == 4 && z == 4) || (z == 4 && x == 4) {
+                } else if has_two_gap {
+                    // } else if (x == 4 && y == 4) || (y == 4 && z == 4) || (z == 4 && x == 4) {
                     // If there's two gaps, the penalty is 1,
                     // as we could have three gaps by mutating the rest.
                     1

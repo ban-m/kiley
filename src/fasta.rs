@@ -48,7 +48,6 @@ pub fn read_fasta<P: AsRef<std::path::Path>>(
     Ok(parse_fasta(&contents))
 }
 
-// TODO: Maybe we can parallelize this function.
 fn parse_fasta(contents: &[u8]) -> Vec<FASTARecord> {
     let mut contents = contents.split(|&x| x == b'>');
     if let Some(first) = contents.next() {

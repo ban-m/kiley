@@ -1362,8 +1362,8 @@ mod gphmm_banded {
     use rand::SeedableRng;
     use rand_xoshiro::Xoroshiro128PlusPlus;
     fn align_banded_check<T: HMMType>(model: &GPHMM<T>, xs: &[u8], ys: &[u8], radius: usize) {
-        let (lk, ops, _states) = model.align(&xs, &ys);
-        let (lk_b, ops_b, _states_b) = model.align_banded(&xs, &ys, radius).unwrap();
+        let (lk, ops, _states) = model.align(xs, ys);
+        let (lk_b, ops_b, _states_b) = model.align_banded(xs, ys, radius).unwrap();
         let diff = (lk - lk_b).abs();
         assert!(diff < 0.0001, "{},{}\n{:?}\n{:?}", lk, lk_b, ops, ops_b);
     }
@@ -1455,8 +1455,8 @@ mod gphmm_banded {
         }
     }
     fn profile_lk_check<T: HMMType>(model: &GPHMM<T>, xs: &[u8], ys: &[u8], radius: isize) {
-        let lk = model.likelihood(&xs, &ys);
-        let lkb = model.likelihood_banded(&xs, &ys, radius as usize).unwrap();
+        let lk = model.likelihood(xs, ys);
+        let lkb = model.likelihood_banded(xs, ys, radius as usize).unwrap();
         assert!((lk - lkb).abs() < 0.001);
         let (xs, ys) = (PadSeq::new(xs), PadSeq::new(ys));
         let profile = ProfileBanded::new(model, &xs, &ys, radius).unwrap();
@@ -1758,12 +1758,12 @@ mod gphmm_banded {
         radius: usize,
         answer: &[u8],
     ) {
-        let correct = model.correct_until_convergence(&draft, queries);
+        let correct = model.correct_until_convergence(draft, queries);
         let correct_b = model
-            .correct_until_convergence_banded(&draft, queries, radius)
+            .correct_until_convergence_banded(draft, queries, radius)
             .unwrap();
-        let dist = crate::bialignment::edit_dist(&correct, &answer);
-        let dist_b = crate::bialignment::edit_dist(&correct_b, &answer);
+        let dist = crate::bialignment::edit_dist(&correct, answer);
+        let dist_b = crate::bialignment::edit_dist(&correct_b, answer);
         assert!(dist_b <= dist);
     }
     #[test]
@@ -1797,13 +1797,13 @@ mod gphmm_banded {
         let mut model: GPHMM<Cond> = model.clone();
         let mut lks: Vec<Option<f64>> = queries
             .iter()
-            .map(|q| model.likelihood_banded(&template, q, radius))
+            .map(|q| model.likelihood_banded(template, q, radius))
             .collect();
         loop {
             let new_m = model.fit_banded(template, queries, radius);
             let new_lks: Vec<Option<f64>> = queries
                 .iter()
-                .map(|q| new_m.likelihood_banded(&template, q, radius))
+                .map(|q| new_m.likelihood_banded(template, q, radius))
                 .collect();
             let lk_gain: f64 = new_lks
                 .iter()
@@ -1825,8 +1825,8 @@ mod gphmm_banded {
         model
     }
     fn fit_banded_check(model: &GPHMM<Cond>, template: &[u8], queries: &[Vec<u8>], radius: usize) {
-        let model_banded = fit_model_banded(&model, template, queries, radius);
-        let model_full = fit_model_full(&model, template, queries);
+        let model_banded = fit_model_banded(model, template, queries, radius);
+        let model_full = fit_model_full(model, template, queries);
         let dist = model_full.dist(&model_banded).unwrap();
         assert!(dist < 0.1, "{}\t{}\n{}", dist, model_full, model_banded)
     }
@@ -1849,10 +1849,10 @@ mod gphmm_banded {
     }
     fn fit_model_full(model: &GPHMM<Cond>, template: &[u8], queries: &[Vec<u8>]) -> GPHMM<Cond> {
         let mut model: GPHMM<Cond> = model.clone();
-        let mut lk: f64 = queries.iter().map(|q| model.likelihood(&template, q)).sum();
+        let mut lk: f64 = queries.iter().map(|q| model.likelihood(template, q)).sum();
         loop {
             let new_m = model.fit(template, queries);
-            let new_lk: f64 = queries.iter().map(|q| new_m.likelihood(&template, q)).sum();
+            let new_lk: f64 = queries.iter().map(|q| new_m.likelihood(template, q)).sum();
             if lk + 1f64 < new_lk {
                 eprintln!("{:.2}", new_lk);
                 lk = new_lk;

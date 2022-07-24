@@ -57,11 +57,11 @@ fn main() {
     for i in 0..4 {
         emission[i * 4 + i] = 0.95;
     }
-    let hmm = kiley::hmm::guided::PairHiddenMarkovModel::new(mat, ins, del, &emission);
+    let mut hmm = kiley::hmm::guided::PairHiddenMarkovModel::new(mat, ins, del, &emission);
     eprintln!("{}", String::from_utf8_lossy(&template));
     eprintln!("{}", String::from_utf8_lossy(&xss[0]));
     {
-        let mut hmm = hmm.clone();
+        // let mut hmm = hmm.clone();
         let lk: f64 = xss
             .iter()
             .map(|x| hmm.likelihood(&template, x, CONS_RAD))

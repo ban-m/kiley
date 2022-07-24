@@ -369,29 +369,6 @@ fn get_next_score(
     }
 }
 
-// #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-#[allow(dead_code)]
-fn min_of_array(xs: &[u32; 7]) -> u32 {
-    *xs.iter().min().unwrap()
-}
-
-// #[allow(dead_code)]
-// #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-// #[target_feature(enable = "avx2")]
-// unsafe fn min_of_array(xs: &[u32; 8]) -> u32 {
-//     use std::arch::x86_64;
-//     use x86_64::{
-//         __m256i, _mm256_alignr_epi8, _mm256_extract_epi32, _mm256_loadu_si256, _mm256_min_epi32,
-//         _mm256_permute2x128_si256,
-//     };
-//     // panic!("SIMD");
-//     let mut xs_min = _mm256_loadu_si256(xs.as_ptr() as *const __m256i);
-//     xs_min = _mm256_min_epi32(xs_min, _mm256_alignr_epi8(xs_min, xs_min, 4));
-//     xs_min = _mm256_min_epi32(xs_min, _mm256_alignr_epi8(xs_min, xs_min, 8));
-//     xs_min = _mm256_min_epi32(xs_min, _mm256_permute2x128_si256(xs_min, xs_min, 1));
-//     _mm256_extract_epi32(xs_min, 0) as u32
-// }
-
 #[cfg(test)]
 mod test {
     use super::*;

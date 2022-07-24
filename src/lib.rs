@@ -163,11 +163,12 @@ where
 }
 
 use std::collections::HashMap;
+type AlnInfo<'a> = (&'a [u8], Vec<Vec<u8>>, Vec<Vec<op::Op>>);
 fn register_all_alignments<'a, I, S, J, T>(
     template: &'a SeqRecord<I, S>,
     alignments: &[(&'a sam::Record, &'a SeqRecord<J, T>)],
     config: &PolishConfig,
-) -> Vec<(&'a [u8], Vec<Vec<u8>>, Vec<Vec<op::Op>>)>
+) -> Vec<AlnInfo<'a>>
 where
     I: std::borrow::Borrow<str>,
     S: std::borrow::Borrow<[u8]>,
@@ -744,23 +745,7 @@ fn polish_chunk<T: std::borrow::Borrow<[u8]>>(
 ) -> Vec<u8> {
     config
         .hmm
-        .polish_until_converge(&draft, &queries, config.radius)
-    // let mut draft = draft.to_vec();
-    // let mut hmm = config.hmm.clone();
-    // let mut lk = std::f64::NEG_INFINITY;
-    // for _  {
-    // draft = hmm.polish_until_converge(&draft, &queries, config.radius);
-    // if let Some(seq) = hmm.correct_banded_batch(&draft, &queries, config.radius, 15) {
-    //     draft = seq;
-    // }
-    // let (new_hmm, new_lk) = hmm.fit_banded_inner(&draft, &queries, config.radius);
-    // if lk < new_lk {
-    //     hmm = new_hmm;
-    //     lk = new_lk;
-    // } else {
-    //     break draft.into();
-    // }
-    // }
+        .polish_until_converge(draft, queries, config.radius)
 }
 
 /// Take consensus and polish it. It consists of three step.
@@ -853,7 +838,7 @@ pub fn ternary_consensus_by_chunk<T: std::borrow::Borrow<[u8]>>(
         .map(|i| i * chunk_size)
         .take_while(|l| l + chunk_size <= draft.len()) // ?
         .collect();
-    let mut chunks: Vec<_> = chunk_start_position
+    let mut chunks: Vec<Vec<&[u8]>> = chunk_start_position
         .windows(2)
         .map(|w| vec![&draft[w[0]..w[1]]])
         .collect();
@@ -864,7 +849,7 @@ pub fn ternary_consensus_by_chunk<T: std::borrow::Borrow<[u8]>>(
     chunks.push(vec![&draft[pos..]]);
     for seq in seqs.iter() {
         for (pos, x) in partition_query(draft, seq.borrow(), &chunk_start_position) {
-            chunks[pos].push(&x);
+            chunks[pos].push(x);
         }
     }
     // Maybe we need filter out very short chunk.

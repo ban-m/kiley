@@ -984,14 +984,13 @@ impl PHMM {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct DiagonalDP {
     // Mat,Del,Ins, Mat,Del,Ins,....,
     // 1-dimensionalized 2D array.
     data: Vec<f64>,
     column: usize,
-    row: usize,
+    // row: usize,
 }
 
 const OFFSET: usize = 3;
@@ -999,7 +998,7 @@ impl DiagonalDP {
     pub fn new(row: usize, column: usize, x: f64) -> Self {
         Self {
             data: vec![x; 3 * (column + 2 * OFFSET) * (row + 2 * OFFSET)],
-            row,
+            // row,
             column,
         }
     }
@@ -1086,12 +1085,6 @@ impl DPTable {
             column,
             row,
         }
-    }
-    #[allow(dead_code)]
-    fn set(&mut self, val: f64) {
-        self.mat_dp.iter_mut().for_each(|x| *x = val);
-        self.del_dp.iter_mut().for_each(|x| *x = val);
-        self.ins_dp.iter_mut().for_each(|x| *x = val);
     }
     pub fn get_mut(&mut self, i: usize, j: usize, state: State) -> &mut f64 {
         match state {
@@ -1403,8 +1396,13 @@ pub mod tests {
             }
             println!();
             let mut dump = vec![vec![EP; seq.len() + 1]; template.len() + 1];
-            for k in 0..template.len() + seq.len() + 1 {
-                let center = centers[k];
+            // for k in 0..template.len() + seq.len() + 1 {
+            for (k, center) in centers
+                .iter()
+                .enumerate()
+                .take(template.len() + seq.len() + 1)
+            {
+                // let center = centers[k];
                 for (pos, &lk) in fwd.get_row(k as isize, state).iter().enumerate() {
                     let u = pos as isize + center - radius as isize;
                     let (i, j) = (u, k as isize - u);
@@ -1426,8 +1424,13 @@ pub mod tests {
                 println!();
             }
             println!();
-            for k in 0..template.len() + seq.len() + 1 {
-                let center = centers[k];
+            for (k, center) in centers
+                .iter()
+                .enumerate()
+                .take(template.len() + seq.len() + 1)
+            {
+                // for k in 0..template.len() + seq.len() + 1 {
+                //     let center = centers[k];
                 let k = k as isize;
                 for (u, ((&mat, &del), &ins)) in fwd
                     .get_row(k, State::Mat)
@@ -1521,8 +1524,13 @@ pub mod tests {
             // }
             println!();
             let mut dump = vec![vec![EP; seq.len() + 1]; template.len() + 1];
-            for k in 0..template.len() + seq.len() + 1 {
-                let center = centers[k];
+            for (k, center) in centers
+                .iter()
+                .enumerate()
+                .take(template.len() + seq.len() + 1)
+            {
+                // for k in 0..template.len() + seq.len() + 1 {
+                //     let center = centers[k];
                 let k = k as isize;
                 for (pos, &lk) in bwd.get_row(k, state).iter().enumerate() {
                     let u = pos as isize + center - radius as isize;
@@ -1544,8 +1552,13 @@ pub mod tests {
                 }
                 println!();
             }
-            for k in 0..template.len() + seq.len() + 1 {
-                let center = centers[k];
+            for (k, center) in centers
+                .iter()
+                .enumerate()
+                .take(template.len() + seq.len() + 1)
+            {
+                // for k in 0..template.len() + seq.len() + 1 {
+                //     let center = centers[k];
                 let k = k as isize;
                 for (u, ((&mat, &del), &ins)) in bwd
                     .get_row(k, State::Mat)
