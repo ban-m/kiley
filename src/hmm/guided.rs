@@ -159,7 +159,7 @@ enum State {
 
 impl std::default::Default for PairHiddenMarkovModel {
     fn default() -> Self {
-        let mat = (0.90, 0.05, 0.05);
+        let mat = (0.96, 0.02, 0.02);
         let ins = (0.85, 0.10, 0.05);
         let del = (0.85, 0.10, 0.05);
         let emits = vec![
@@ -1035,6 +1035,7 @@ impl PairHiddenMarkovModel {
         //     .collect();
         let mut current_max = None;
         'outer: for t in 0..100 {
+            //let inactive = (INACTIVE_TIME + t / 2) % len;
             let inactive = INACTIVE_TIME + (t * INACTIVE_TIME) % len;
             modif_table.clear();
             let mut current_lk = 0f64;
@@ -1088,7 +1089,7 @@ impl PairHiddenMarkovModel {
             memory.update_radius(&changed_pos, template.len());
             if changed_pos.is_empty() {
                 if matches!(current_max,Some(lk) if current_lk < lk + 0.1) {
-                    break;
+                    break 'outer;
                 }
                 // trace!("NOWLK\t{}", current_lk);
                 current_max = Some(current_lk);

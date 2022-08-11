@@ -54,7 +54,7 @@ pub fn recover(xs: &[u8], ys: &[u8], ops: &[Op]) -> (Vec<u8>, Vec<u8>, Vec<u8>) 
 }
 
 /// Edit operation (Used in polishing phase)
-#[derive(Debug, Clone, Copy)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum Edit {
     Subst,
     // Insertion before a specified position.

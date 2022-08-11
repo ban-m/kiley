@@ -21,6 +21,9 @@ impl Generate for Profile {
 }
 
 impl Profile {
+    pub fn new(sub: f64, del: f64, ins: f64) -> Self {
+        Self { sub, del, ins }
+    }
     pub fn sum(&self) -> f64 {
         self.sub + self.del + self.ins
     }
@@ -42,9 +45,9 @@ impl Profile {
 }
 
 pub const PROFILE: Profile = Profile {
-    sub: 0.04,
-    del: 0.04,
-    ins: 0.07,
+    sub: 0.01,
+    del: 0.01,
+    ins: 0.01,
 };
 
 pub const CCS_PROFILE: Profile = Profile {

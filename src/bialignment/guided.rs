@@ -1,5 +1,6 @@
 use crate::dptable::DPTable;
 use crate::op::Op;
+use crate::padseq::LOOKUP_TABLE;
 
 pub fn bootstrap_ops(rlen: usize, qlen: usize) -> Vec<Op> {
     let (mut qpos, mut rpos) = (0, 0);
@@ -609,8 +610,8 @@ fn track_back_one_op(
     }
 }
 
-const COPY_SIZE: usize = 3;
-const DEL_SIZE: usize = 3;
+const COPY_SIZE: usize = 4;
+const DEL_SIZE: usize = 4;
 // for each position, four type of mutation,
 // four type of insertion,
 // 1bp, 2bp, 3bp copy,
@@ -1149,6 +1150,146 @@ pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(
     polish_until_converge_with(template, xs, &mut ops, radius)
 }
 
+#[derive(Debug, Clone)]
+struct Pileup {
+    coverage: usize,
+    ins: [usize; 4],
+    del: usize,
+    subst: [usize; 4],
+    ref_base: Option<u8>,
+}
+impl Pileup {
+    fn new() -> Self {
+        Self {
+            coverage: 0,
+            ins: [0; 4],
+            del: 0,
+            subst: [0; 4],
+            ref_base: None,
+        }
+    }
+    fn consensus(&self) -> Option<(crate::op::Edit, u8)> {
+        let thr = self.coverage / 2;
+        let (ins_arg, &ins) = self.ins.iter().enumerate().max_by_key(|x| x.1).unwrap();
+        let (sub_arg, &sub) = self.subst.iter().enumerate().max_by_key(|x| x.1).unwrap();
+        if thr < ins {
+            Some((crate::op::Edit::Insertion, b"ACGT"[ins_arg]))
+        } else if thr < self.del {
+            Some((crate::op::Edit::Deletion(1), b'-'))
+        } else if thr < sub {
+            Some((crate::op::Edit::Subst, b"ACGT"[sub_arg]))
+        } else {
+            Some((crate::op::Edit::Subst, self.ref_base?))
+        }
+    }
+}
+
+/// Consensus by pileup. Polished seq & number of base changed.
+pub fn polish_by_pileup<T: std::borrow::Borrow<[u8]>>(
+    draft: &[u8],
+    seqs: &[T],
+    ops: &mut [Vec<Op>],
+) -> (Vec<u8>, usize) {
+    const COOLDOWN: usize = 5;
+    let mut pileup = vec![Pileup::new(); draft.len() + 1];
+    for (pu, refseq) in pileup.iter_mut().zip(draft.iter()) {
+        pu.ref_base = Some(*refseq);
+    }
+    // Register
+    for (seq, ops) in seqs.iter().zip(ops.iter()) {
+        let seq = seq.borrow();
+        let (mut rpos, mut qpos) = (0, 0);
+        for op in ops.iter() {
+            match op {
+                Op::Del => {
+                    pileup[rpos].del += 1;
+                    rpos += 1;
+                }
+                Op::Ins => {
+                    pileup[rpos].ins[LOOKUP_TABLE[seq[qpos] as usize] as usize] += 1;
+                    qpos += 1;
+                }
+                _ => {
+                    pileup[rpos].coverage += 1;
+                    pileup[rpos].subst[LOOKUP_TABLE[seq[qpos] as usize] as usize] += 1;
+                    rpos += 1;
+                    qpos += 1;
+                }
+            }
+        }
+    }
+    pileup.last_mut().unwrap().coverage = seqs.len();
+    // Polish
+    let mut changed_position = vec![];
+    let mut pileup_iter = pileup.iter().zip(draft.iter()).enumerate();
+    let mut consensus = Vec::with_capacity(draft.len());
+    while let Some((pos, (pu, &refseq))) = pileup_iter.next() {
+        let (op, base) = pu.consensus().unwrap();
+        use crate::op::Edit;
+        match op {
+            Edit::Subst if base == refseq => {
+                consensus.push(base);
+            }
+            Edit::Subst => {
+                consensus.push(base);
+                changed_position.push((pos, op));
+            }
+            Edit::Insertion => {
+                consensus.push(base);
+                consensus.push(refseq);
+                changed_position.push((pos, op));
+            }
+            Edit::Deletion(1) => {
+                changed_position.push((pos, op));
+            }
+            _ => unreachable!(),
+        }
+        if op != Edit::Subst || base != refseq {
+            for _ in 0..COOLDOWN {
+                if let Some((_, (_, &refseq))) = pileup_iter.next() {
+                    consensus.push(refseq);
+                }
+            }
+        }
+    }
+    if let Some((op, base)) = pileup.last().unwrap().consensus() {
+        if op == crate::op::Edit::Insertion {
+            changed_position.push((draft.len(), op));
+            consensus.push(base);
+        }
+    }
+    // Fix alignments.
+    let rlen = consensus.len();
+    for (ops, seq) in ops.iter_mut().zip(seqs.iter()) {
+        let qlen = seq.borrow().len();
+        let cpos = changed_position.iter().copied();
+        crate::op::fix_alignment_path(ops, cpos, qlen, rlen)
+    }
+    (consensus, changed_position.len())
+}
+
+/// Consensus by pileup. Polished seq & number of base changed.
+pub fn polish_by_pileup_until<T: std::borrow::Borrow<[u8]>>(
+    draft: &[u8],
+    seqs: &[T],
+    ops: &mut [Vec<Op>],
+    radius: usize,
+    loop_limit: usize,
+) -> Vec<u8> {
+    let mut consed = draft.to_vec();
+    for _ in 0..loop_limit {
+        let (new, num) = polish_by_pileup(&consed, &seqs, ops);
+        for (ops, ys) in ops.iter_mut().zip(seqs.iter()) {
+            *ops = edit_dist_guided(&new, ys.borrow(), ops, radius).1;
+        }
+        consed = new;
+        if num == 0 {
+            break;
+        }
+    }
+    consed
+}
+
 #[cfg(test)]
 pub mod test {
     use super::*;
@@ -1378,6 +1519,48 @@ pub mod test {
             let consed = polish_until_converge(&template, &yss, radius);
             let (dist, _) = edit_dist_base_ops(&xs, &consed);
             let (prev, _) = edit_dist_base_ops(&xs, &template);
+            assert_eq!(dist, 0, "{},{},{}", i, prev, dist);
+        }
+    }
+    #[test]
+    fn polish_test_2() {
+        for i in 0..100 {
+            println!("ST\t{}", i);
+            let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED + i);
+            let xslen = rng.gen::<usize>() % 100 + 20;
+            let xs = crate::gen_seq::generate_seq(&mut rng, xslen);
+            let prof = crate::gen_seq::Profile {
+                sub: 0.01,
+                del: 0.01,
+                ins: 0.01,
+            };
+            let yss: Vec<_> = (0..30)
+                .map(|_| crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof))
+                .collect();
+            let template = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
+            let mut consed = template.clone();
+            let mut ops: Vec<_> = yss
+                .iter()
+                .map(|seq| crate::edlib_global(&consed, seq))
+                .collect();
+            for _ in 0..10 {
+                let (new, num) = polish_by_pileup(&consed, &yss, &mut ops);
+                ops = ops
+                    .iter()
+                    .zip(yss.iter())
+                    .map(|(ops, ys)| super::edit_dist_guided(&new, ys, ops, 20).1)
+                    .collect();
+                consed = new;
+                if num == 0 {
+                    break;
+                }
+            }
+            let (dist, _) = edit_dist_base_ops(&xs, &consed);
+            let (prev, _) = edit_dist_base_ops(&xs, &template);
+            if dist != 0 {
+                eprintln!("{}", std::str::from_utf8(&xs).unwrap());
+                eprintln!("{}", std::str::from_utf8(&consed).unwrap());
+            }
             assert_eq!(dist, 0, "{},{},{}", i, prev, dist);
         }
     }
