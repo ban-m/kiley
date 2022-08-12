@@ -1278,7 +1278,7 @@ pub fn polish_by_pileup_until<T: std::borrow::Borrow<[u8]>>(
 ) -> Vec<u8> {
     let mut consed = draft.to_vec();
     for _ in 0..loop_limit {
-        let (new, num) = polish_by_pileup(&consed, &seqs, ops);
+        let (new, num) = polish_by_pileup(&consed, seqs, ops);
         for (ops, ys) in ops.iter_mut().zip(seqs.iter()) {
             *ops = edit_dist_guided(&new, ys.borrow(), ops, radius).1;
         }
