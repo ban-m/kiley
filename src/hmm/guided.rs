@@ -481,7 +481,9 @@ impl PairHiddenMarkovModel {
         {
             memory.pre.set(0, 0, (1f64, 0f64, 0f64));
             for j in 1..rs.len() + 1 {
-                let del_cum = memory.pre.get(0, j - 1).2 * self.del_del * self.del(rs[j - 1]);
+                let (prev_m, _, prev_d) = memory.pre.get(0, j - 1);
+                let del_cum =
+                    ((prev_m * self.mat_del) + (prev_d * self.del_del)) * self.del(rs[j - 1]);
                 memory.pre.set(0, j, (0f64, 0f64, del_cum));
             }
             memory.pre_scl.push(1f64);
