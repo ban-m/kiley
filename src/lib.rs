@@ -827,9 +827,12 @@ pub fn ternary_consensus_by_chunk<T: std::borrow::Borrow<[u8]>>(
             let diff = qs.len().max(mean) - qs.len().min(mean);
             diff < thr
         });
-        let min = xs.iter().map(|x| x.len()).min().unwrap();
-        let radius = (min / 3).max(chunk_size / 3) + 1;
-        return consensus_inner(&xs, radius, &mut aligner);
+        let radius = xs.iter().map(|x| x.len()).min();
+        let radius = radius.map(|min| (min / 3).max(chunk_size / 3) + 1);
+        match radius {
+            Some(radius) => return consensus_inner(&xs, radius, &mut aligner),
+            None => return vec![],
+        }
     }
     let draft = &seqs[0].borrow();
     // 1. Partition each reads into `chunk-size`bp.

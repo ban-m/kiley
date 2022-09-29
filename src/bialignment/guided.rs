@@ -216,17 +216,6 @@ pub fn global_guided(
     let mut rpos = fill_range.last().unwrap().1 - 1;
     assert_eq!(rpos, rs.len());
     let (mut state, score) = get_max_pair(qpos, rpos, &dp);
-    // let (mut state, score) = {
-    //     let (mat, ins, del) = dp.get(qpos, rpos);
-    //     if ins <= mat && del <= mat {
-    //         (0, mat)
-    //     } else if mat <= ins && del <= ins {
-    //         (1, ins)
-    //     } else {
-    //         assert!(mat <= del && ins <= del);
-    //         (2, del)
-    //     }
-    // };
     let mut ops = Vec::with_capacity(qs.len() + rs.len());
     while 0 < qpos && 0 < rpos {
         let (new_state, op) = track_back_one_op(state, &dp, (qpos, qs), (rpos, rs), param);
@@ -240,52 +229,6 @@ pub fn global_guided(
         }
         state = new_state;
         ops.push(op);
-        // if state == 0 {
-        //     let is_mat = qs[qpos - 1] == rs[rpos - 1];
-        //     if is_mat {
-        //         ops.push(Op::Match)
-        //     } else {
-        //         ops.push(Op::Mismatch)
-        //     };
-        //     let aln = if is_mat { match_score } else { mism };
-        //     let current = mat - aln;
-        //     let (m_prev, i_prev, d_prev) = dp.get(qpos - 1, rpos - 1);
-        //     if current == m_prev {
-        //         state = 0;
-        //     } else if current == i_prev {
-        //         state = 1;
-        //     } else {
-        //         assert_eq!(current, d_prev);
-        //         state = 2;
-        //     }
-        //     qpos -= 1;
-        //     rpos -= 1;
-        // } else if state == 1 {
-        //     ops.push(Op::Ins);
-        //     let current = ins;
-        //     let (m_prev, i_prev, _) = dp.get(qpos - 1, rpos);
-        //     if current == m_prev + open {
-        //         state = 0;
-        //     } else {
-        //         assert_eq!(current, i_prev + ext);
-        //         state = 1;
-        //     }
-        //     qpos -= 1;
-        // } else {
-        //     ops.push(Op::Del);
-        //     assert_eq!(state, 2);
-        //     let current = del;
-        //     let (m_prev, i_prev, d_prev) = dp.get(qpos, rpos - 1);
-        //     if current == m_prev + open {
-        //         state = 0;
-        //     } else if current == i_prev + open {
-        //         state = 1;
-        //     } else {
-        //         assert_eq!(current, d_prev + ext);
-        //         state = 2;
-        //     }
-        //     rpos -= 1;
-        // }
     }
     ops.extend(std::iter::repeat(Op::Del).take(rpos));
     ops.extend(std::iter::repeat(Op::Ins).take(qpos));

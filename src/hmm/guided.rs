@@ -1168,6 +1168,12 @@ impl PairHiddenMarkovModel {
             temp.reverse();
             temp
         };
+        if forward.iter().any(|x| x.is_nan() || x.is_infinite()) {
+            return;
+        }
+        if backward.iter().any(|x| x.is_nan() || x.is_infinite()) {
+            return;
+        }
         // Obs probs (Mat)
         let mut mat_probs: Vec<Vec<Vec<f64>>> = vec![vec![Vec::new(); 4]; 4];
         for ((i, &(start, end)), &q) in mem.fill_ranges.iter().enumerate().skip(1).zip(qs.iter()) {
@@ -1184,7 +1190,9 @@ impl PairHiddenMarkovModel {
             let lks: Vec<_> = lks.iter().map(|x| logsumexp(x)).collect();
             let total = logsumexp(&lks);
             let sum: f64 = lks.iter().map(|x| (x - total).exp()).sum();
-            assert!((sum - 1f64).abs() < 0.0001);
+            if 0.0001 < (sum - 1f64).abs() {
+                continue;
+            }
             for (q, lk) in lks.iter().enumerate() {
                 next.mat_emit[r << 2 | q] += (lk - total).exp();
             }
@@ -1208,7 +1216,9 @@ impl PairHiddenMarkovModel {
             let lks: Vec<_> = lks.iter().map(|x| logsumexp(x)).collect();
             let total = logsumexp(&lks);
             let sum: f64 = lks.iter().map(|x| (x - total).exp()).sum();
-            assert!((sum - 1f64).abs() < 0.00001);
+            if 0.0001 < (sum - 1f64).abs() {
+                continue;
+            }
             for (q, lk) in lks.iter().enumerate() {
                 next.ins_emit[prev << 2 | q] += (lk - total).exp();
             }
@@ -1287,18 +1297,7 @@ impl PairHiddenMarkovModel {
             .zip(other.ins_emit.iter())
             .for_each(|(x, y)| *x += y);
     }
-    // fn regularize(&mut self, weight: f64) {
-    //     self.mat_mat += weight;
-    //     self.mat_ins += weight;
-    //     self.mat_del += weight;
-    //     self.ins_mat += weight;
-    //     self.ins_del += weight;
-    //     self.ins_ins += weight;
-    //     self.del_mat += weight;
-    //     self.del_del += weight;
-    //     self.del_ins += weight;
-    //     self.mat_emit.iter_mut().for_each(|x| *x += weight);
-    // }
+
     fn normalize(&mut self) {
         let mat_sum = self.mat_mat + self.mat_ins + self.mat_del;
         self.mat_mat /= mat_sum;
