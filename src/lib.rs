@@ -257,11 +257,11 @@ fn overlap_aln(xs: &[u8], ys: &[u8]) -> (i32, Vec<Op>) {
                 .max(dp[i][j - 1] - 1);
         }
     }
-    let (score, (mut i, mut j)) = (1..ys.len() + 1)
+    let (score, (mut i, mut j)) = (0..ys.len() + 1)
         .map(|j| (xs.len(), j))
         .map(|(i, j)| (dp[i][j], (i, j)))
         .max_by_key(|x| x.0)
-        .unwrap();
+        .unwrap_or_else(|| panic!("{}", line!()));
     let mut ops: Vec<_> = std::iter::repeat(Op::Ins).take(ys.len() - j).collect();
     while 0 < i && 0 < j {
         let mat = if xs[i - 1] == ys[j - 1] { 1 } else { -1 };
@@ -409,53 +409,6 @@ fn skip(len: usize, ops: &mut Vec<Op>) -> usize {
     q_pos
 }
 
-// let mut target = (1..).flat_map(|i| {
-//     let start = i * break_len;
-//     [start, start + config.overlap]
-// });
-// let mut current_target = target.next().unwrap();
-// // Reference position, query position.
-// let mut chunk_position: Vec<(usize, usize)> = vec![(0, 0)];
-// while let Some(op) = ops.pop() {
-//     match op {
-//         Op::Mismatch | Op::Match => {
-//             q_pos += 1;
-//             r_pos += 1;
-//         }
-//         Op::Ins => q_pos += 1,
-//         Op::Del => r_pos += 1,
-//     }
-//     if current_target == r_pos {
-//         chunk_position.push((current_target, q_pos));
-//         current_target = target.next().unwrap();
-//     } else if reflen == r_pos {
-//         chunk_position.push((reflen, q_pos));
-//         // We should break here, as there would be some junk trailing clips.
-//         break;
-//     }
-// }
-// if chunk_position.len() < 2 {
-//     return vec![];
-// }
-// chunk_position
-//     .iter()
-//     .enumerate()
-//     .filter(|(_, (r_pos, _))| r_pos % break_len == 0)
-//     .filter_map(|(idx, &(ref_start, start_pos))| {
-//         // If this chunk is at the end of the contig, and this alignment comsumes all the reference,
-//         if reflen <= ref_start + config.chunk_size && r_pos == reflen {
-//             Some(query[start_pos..q_pos].to_vec())
-//         } else {
-//             chunk_position[idx..]
-//                 .iter()
-//                 .find(|&&(r_pos, _)| r_pos == ref_start + config.chunk_size)
-//                 .map(|&(_, end_pos)| query[start_pos..end_pos].to_vec())
-//         }
-//     })
-//     .map(|x| (x, vec![]))
-//     .collect()
-// }
-
 fn revcmp(xs: &[u8]) -> Vec<u8> {
     xs.iter()
         .map(padseq::convert_to_twobit)
@@ -464,136 +417,17 @@ fn revcmp(xs: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-// pub fn fit_model_from_multiple(
-//     training: &[(&[u8], &[Vec<u8>])],
-//     config: &PolishConfig,
-// ) -> GPHMM {
-//     use padseq::PadSeq;
-//     let (mut drafts, queries): (Vec<_>, Vec<_>) = training
-//         .iter()
-//         .map(|&(x, ys)| {
-//             let x = PadSeq::new(x);
-//             let ys: Vec<_> = ys.iter().map(|y| PadSeq::new(y.as_slice())).collect();
-//             (x, ys)
-//         })
-//         .unzip();
-//     let mut phmm = config.phmm.clone();
-//     let get_lk = |model: &GPHMM<Cond>, drafts: &[PadSeq]| -> f64 {
-//         queries
-//             .par_iter()
-//             .zip(drafts.par_iter())
-//             .map(|(qs, d)| {
-//                 qs.iter()
-//                     .filter_map(|q| model.likelihood_banded_inner(d, q, config.radius))
-//                     .sum::<f64>()
-//             })
-//             .sum()
-//     };
-//     let mut lk = get_lk(&phmm, &drafts);
-//     loop {
-//         let new_drafts = drafts
-//             .par_iter()
-//             .zip(queries.par_iter())
-//             .map(
-//                 |(d, qs)| match phmm.correct_banded_batch(d, qs, config.radius, 20) {
-//                     Some(res) => res,
-//                     None => d.clone(),
-//                 },
-//             )
-//             .collect();
-//         if drafts == new_drafts {
-//             break phmm;
-//         }
-//         drafts = new_drafts;
-//         phmm = fit_multiple_inner(&phmm, &drafts, &queries, config);
-//         let new_lk = get_lk(&phmm, &drafts);
-//         if new_lk < lk {
-//             break phmm;
-//         }
-//         lk = new_lk;
-//     }
-// }
-
-// fn fit_multiple_inner(
-//     model: &GPHMM<Cond>,
-//     drafts: &[padseq::PadSeq],
-//     queries: &[Vec<padseq::PadSeq>],
-//     config: &PolishConfig<Cond>,
-// ) -> GPHMM<Cond> {
-//     use gphmm::banded::ProfileBanded;
-//     let radius = config.radius as isize;
-//     let profiles: Vec<_> = queries
-//         .par_iter()
-//         .zip(drafts.par_iter())
-//         .flat_map(|(qs, d)| {
-//             qs.iter()
-//                 .filter_map(|q| ProfileBanded::new(model, d, q, radius))
-//                 .collect::<Vec<_>>()
-//         })
-//         .collect();
-//     // debug!("Profiled {} alignments.", profiles.len());
-//     // let start = std::time::Instant::now();
-//     let initial_distribution = model.par_estimate_initial_distribution_banded(&profiles);
-//     // let init = std::time::Instant::now();
-//     let transition_matrix = model.par_estimate_transition_prob_banded(&profiles);
-//     // let trans = std::time::Instant::now();
-//     let observation_matrix = model.par_estimate_observation_prob_banded(&profiles);
-//     // let obs = std::time::Instant::now();
-//     // debug!(
-//     //     "ESTIM\t{}\t{}\t{}",
-//     //     (init - start).as_millis(),
-//     //     (trans - init).as_millis(),
-//     //     (obs - trans).as_millis()
-//     // );
-//     // debug!("Re-estimated parameters.");
-//     GPHMM::from_raw_elements(
-//         model.states(),
-//         transition_matrix,
-//         observation_matrix,
-//         initial_distribution,
-//     )
-// }
-
-// pub fn fit_model<T: std::borrow::Borrow<[u8]>>(
-//     draft: &[u8],
-//     queries: &[T],
-//     config: &PolishConfig<Cond>,
-// ) -> GPHMM<Cond> {
-//     use padseq::PadSeq;
-//     let mut draft = PadSeq::new(draft);
-//     let queries: Vec<_> = queries.iter().map(|x| PadSeq::new(x.borrow())).collect();
-//     let mut phmm = config.phmm.clone();
-//     let get_lk = |model: &GPHMM<Cond>, draft: &PadSeq| -> f64 {
-//         queries
-//             .iter()
-//             .filter_map(|q| model.likelihood_banded_inner(draft, q, config.radius))
-//             .sum()
-//     };
-//     let mut lk = get_lk(&phmm, &draft);
-//     loop {
-//         let (new_phmm, new_lk) = phmm.fit_banded_inner(&draft, &queries, config.radius);
-//         if new_lk - lk < 0.1f64 {
-//             break phmm;
-//         }
-//         phmm = new_phmm;
-//         lk = new_lk;
-//         draft = phmm
-//             .correction_until_convergence_banded_inner(&draft, &queries, config.radius)
-//             .unwrap();
-//     }
-// }
-
 fn edlib_global(target: &[u8], query: &[u8]) -> Vec<Op> {
     let task = edlib_sys::AlignTask::Alignment;
     let mode = edlib_sys::AlignMode::Global;
     let aln = edlib_sys::align(query, target, mode, task);
     use Op::*;
     const EDLIB2KILEY: [Op; 4] = [Match, Ins, Del, Mismatch];
-    aln.operations()
-        .unwrap()
-        .iter()
-        .map(|x| EDLIB2KILEY[*x as usize])
-        .collect()
+    assert!(aln.operations().is_some());
+    match aln.operations() {
+        Some(aln) => aln.iter().map(|x| EDLIB2KILEY[*x as usize]).collect(),
+        None => vec![],
+    }
 }
 
 // Split reads into size intervals. Note that the last chunks is merged the 2nd last one.
@@ -602,6 +436,7 @@ fn partition_query<'a>(
     query: &'a [u8],
     split_positions: &[usize],
 ) -> Vec<(usize, &'a [u8])> {
+    assert!(!split_positions.is_empty());
     let ops = edlib_global(draft, query);
     let (mut i, mut j) = (0, 0);
     let mut q_split_position = vec![];
@@ -642,7 +477,9 @@ fn partition_query<'a>(
         .enumerate()
         .map(|(bin, w)| (bin, &query[w[0]..w[1]]))
         .collect();
-    let query_last = *q_split_position.last().unwrap();
+    let query_last = *q_split_position
+        .last()
+        .unwrap_or_else(|| panic!("{}", line!()));
     split.push((split_positions.len() - 1, &query[query_last..]));
     split
 }
@@ -656,6 +493,10 @@ pub fn polish_chunk_by_parts<T: std::borrow::Borrow<[u8]>>(
 ) -> Vec<u8> {
     assert!(!draft.is_empty());
     let subchunk_size = 100;
+    if draft.len() < subchunk_size + 10 * 3 {
+        let rad = draft.len() / 3;
+        return bialignment::guided::polish_until_converge(draft, queries, rad);
+    }
     let mut draft = draft.to_vec();
     let mut config = config.clone();
     for offset in 0..2 {
@@ -674,7 +515,9 @@ pub fn polish_chunk_by_parts<T: std::borrow::Borrow<[u8]>>(
             .windows(2)
             .map(|w| (&draft[w[0]..w[1]], vec![]))
             .collect();
-        let pos = *chunk_start_position.last().unwrap();
+        let pos = *chunk_start_position
+            .last()
+            .unwrap_or_else(|| panic!("{}", line!()));
         chunks.push((&draft[pos..], vec![]));
         for query in part_queries.iter() {
             for &(pos, seq) in query.iter() {
@@ -708,33 +551,6 @@ fn polish_multiple(chunks: &[(&[u8], Vec<&[u8]>)], config: &PolishConfig) -> Vec
         .iter()
         .map(|(drf, qs)| config.hmm.polish_until_converge(drf, qs, config.radius))
         .collect()
-    // use padseq::PadSeq;
-    // let (mut drafts, queries): (Vec<_>, Vec<_>) = chunks
-    //     .iter()
-    //     .map(|&(x, ref ys)| {
-    // let x = PadSeq::new(x);
-    // let ys: Vec<_> = ys.iter().map(|&y| PadSeq::new(y)).collect();
-    //     (x, ys)
-    // })
-    // .unzip();
-    // for (i, (d, qs)) in drafts.iter_mut().zip(queries.iter()).enumerate() {
-    //     let mut skip = 7;
-    //     let orig = d.len();
-    // while let Some(res) = config
-    //     .phmm
-    //     .correct_banded_batch(d, qs, config.radius, skip % d.len())
-    // {
-    //     skip += 1;
-    //     *d = res;
-    //     if d.len() * 3 < skip {
-    //         warn!("CHUNK\tReached max cycle\t{}\t{}", i, config.seed);
-    //         let draft = String::from_utf8(d.clone().into()).unwrap();
-    //         warn!("CHUNK\tREF\t{}\t{}\t{}", draft.len(), orig, draft);
-    //         break;
-    //     }
-    // }
-    // }
-    // drafts.into_iter().map(|x| x.into()).collect()
 }
 
 // Polish chunk.
@@ -758,6 +574,7 @@ pub fn consensus<T: std::borrow::Borrow<[u8]>>(
     _repnum: usize,
     radius: usize,
 ) -> Vec<u8> {
+    assert!(!seqs.is_empty());
     let config = PolishConfig::new(radius, 0, seqs.len(), 0, 0);
     let lens = seqs.iter().map(|x| x.borrow().len());
     let min = lens.clone().min().unwrap();
@@ -864,10 +681,12 @@ pub fn ternary_consensus_by_chunk<T: std::borrow::Borrow<[u8]>>(
     // 2. Polish each segments.
     let polished: Vec<_> = chunks
         .iter()
-        .flat_map(|xs| {
-            let min = xs.iter().map(|x| x.len()).min().unwrap();
-            let radius = (min / 3).max(chunk_size / 3) + 1;
-            consensus_inner(xs, radius, &mut aligner)
+        .flat_map(|xs| match xs.iter().map(|x| x.len()).min() {
+            Some(min) => {
+                let radius = (min / 3).max(chunk_size / 3) + 1;
+                consensus_inner(xs, radius, &mut aligner)
+            }
+            None => vec![],
         })
         .collect();
     polished
@@ -879,6 +698,7 @@ pub fn ternary_consensus<T: std::borrow::Borrow<[u8]>>(
     repnum: usize,
     radius: usize,
 ) -> Vec<u8> {
+    assert!(!seqs.is_empty());
     let max_len = seqs.iter().map(|x| x.borrow().len()).max().unwrap();
     let mut aligner = Aligner::new(max_len, max_len, max_len, radius);
     let fold_num = (1..)
@@ -912,48 +732,6 @@ fn consensus_inner<T: std::borrow::Borrow<[u8]>>(
     }
     consensus.pop().unwrap()
 }
-
-// pub fn consensus_poa<T: std::borrow::Borrow<[u8]>>(
-//     seqs: &[T],
-//     seed: u64,
-//     subchunk: usize,
-//     repnum: usize,
-//     read_type: &str,
-// ) -> Vec<u8> {
-//     use poa_hmm::POA;
-//     let seqs: Vec<_> = seqs.iter().map(|x| x.borrow()).collect();
-//     #[inline]
-//     fn score(x: u8, y: u8) -> i32 {
-//         if x == y {
-//             1
-//         } else {
-//             -1
-//         }
-//     }
-//     let max_len = match seqs.iter().map(|x| x.len()).max() {
-//         Some(res) => res,
-//         None => return vec![],
-//     };
-//     let rad = match read_type {
-//         "CCS" => max_len / 20,
-//         "CLR" => max_len / 10,
-//         "ONT" => max_len / 10,
-//         _ => unreachable!(),
-//     };
-//     if seqs.len() <= 10 {
-//         POA::from_slice_default(&seqs).consensus()
-//     } else {
-//         let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
-//         let subseq: Vec<_> = (0..repnum)
-//             .map(|_| {
-//                 let subchunk: Vec<_> = seqs.choose_multiple(&mut rng, subchunk).copied().collect();
-//                 POA::from_slice_banded(&subchunk, (-1, -1, &score), rad).consensus()
-//             })
-//             .collect();
-//         let subseq: Vec<_> = subseq.iter().map(|e| e.as_slice()).collect();
-//         POA::from_slice_banded(&subseq, (-1, -1, &score), max_len / 10).consensus()
-//     }
-// }
 
 pub fn polish_by_pileup<T: std::borrow::Borrow<[u8]>>(template: &[u8], xs: &[T]) -> Vec<u8> {
     let mut matches = vec![[0; 4]; template.len()];
@@ -1072,15 +850,7 @@ pub fn polish_by_pileup_affine<T: std::borrow::Borrow<[u8]>>(
             insertions[i].push(ins_buffer);
         }
     }
-    // println!("DUMP");
-    // for (idx, ((m, d), i)) in matches
-    //     .iter()
-    //     .zip(deletions.iter())
-    //     .zip(insertions.iter())
-    //     .enumerate()
-    // {
-    //     println!("{}\t{:?}\t{}\t{:?}", idx, i, d, m);
-    // }
+
     let mut template = vec![];
     for ((i, m), &d) in insertions.iter().zip(matches.iter()).zip(deletions.iter()) {
         let insertion = i.iter().len();
@@ -1120,7 +890,10 @@ fn naive_consensus(xs: &[Vec<u8>]) -> Vec<u8> {
             .fold(0, |acc, base| (acc << 2) | base as u64);
         *counts.entry((hash, len)).or_default() += 1;
     }
-    let (&(kmer, k), _max) = counts.iter().max_by_key(|x| x.1).unwrap();
+    let (&(kmer, k), _max) = counts
+        .iter()
+        .max_by_key(|x| x.1)
+        .unwrap_or_else(|| panic!("{}", line!()));
     (0..k)
         .map(|idx| {
             let base = (kmer >> (2 * (k - 1 - idx))) & 0b11;
@@ -1135,7 +908,10 @@ fn naive_consensus(xs: &[Vec<u8>]) -> Vec<u8> {
 // removing all the lightwehgit edge,
 fn de_bruijn_consensus(xs: &[Vec<u8>]) -> Vec<u8> {
     // TODO: Implement this function.
-    xs.iter().max_by_key(|x| x.len()).unwrap().to_vec()
+    match xs.iter().max_by_key(|x| x.len()) {
+        Some(res) => res.to_vec(),
+        None => vec![],
+    }
 }
 
 #[cfg(test)]
@@ -1283,38 +1059,5 @@ mod test {
         assert!(result > 40, "{}", result);
     }
     #[test]
-    fn lowcomplexity_kiley() {
-        // TODO: Make module to pass this test.
-        //     let bases = b"ACTG";
-        //     let cov = 20;
-        //     let len = 3;
-        //     let repnum = 100;
-        //     let result = (0..50)
-        //         .into_iter()
-        //         .filter(|&i| {
-        //             let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(i as u64);
-        //             let template1: Vec<_> = (0..len)
-        //                 .filter_map(|_| bases.choose(&mut rng))
-        //                 .copied()
-        //                 .collect();
-        //             let template1: Vec<_> = (0..repnum)
-        //                 .flat_map(|_| template1.iter())
-        //                 .copied()
-        //                 .collect();
-        //             let seqs: Vec<_> = (0..cov)
-        //                 .map(|_| gen_seq::introduce_randomness(&template1, &mut rng, &gen_seq::PROFILE))
-        //                 .collect();
-        //             let consensus = consensus(&seqs, cov as u64, 6, 10).unwrap();
-        //             let dist = edit_dist(&consensus, &template1);
-        //             eprintln!(
-        //                 "{}\n{}\n{}",
-        //                 dist,
-        //                 String::from_utf8_lossy(&template1),
-        //                 String::from_utf8_lossy(&consensus)
-        //             );
-        //             dist <= 20
-        //         })
-        //         .count();
-        //     assert!(result > 40, "{}", result);
-    }
+    fn lowcomplexity_kiley() {}
 }

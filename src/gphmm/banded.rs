@@ -1809,7 +1809,7 @@ mod gphmm_banded {
                 .iter()
                 .zip(lks.iter())
                 .map(|(x, y)| match (x, y) {
-                    (Some(x), Some(y)) => (x - y),
+                    (Some(x), Some(y)) => x - y,
                     _ => 0f64,
                 })
                 .sum();
