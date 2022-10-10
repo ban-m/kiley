@@ -1111,6 +1111,21 @@ impl Pileup {
             ref_base: None,
         }
     }
+    fn consensus_cov(&self, coverage: usize) -> Option<(crate::op::Edit, u8)> {
+        let thr = coverage / 2;
+        let (ins_arg, &ins) = self.ins.iter().enumerate().max_by_key(|x| x.1).unwrap();
+        let (sub_arg, &sub) = self.subst.iter().enumerate().max_by_key(|x| x.1).unwrap();
+        if thr < ins {
+            Some((crate::op::Edit::Insertion, b"ACGT"[ins_arg]))
+        } else if thr < self.del {
+            Some((crate::op::Edit::Deletion(1), b'-'))
+        } else if thr < sub {
+            Some((crate::op::Edit::Subst, b"ACGT"[sub_arg]))
+        } else {
+            Some((crate::op::Edit::Subst, self.ref_base?))
+        }
+    }
+    #[allow(dead_code)]
     fn consensus(&self) -> Option<(crate::op::Edit, u8)> {
         let thr = self.coverage / 2;
         let (ins_arg, &ins) = self.ins.iter().enumerate().max_by_key(|x| x.1).unwrap();
@@ -1138,6 +1153,7 @@ pub fn polish_by_pileup<T: std::borrow::Borrow<[u8]>>(
     for (pu, refseq) in pileup.iter_mut().zip(draft.iter()) {
         pu.ref_base = Some(*refseq);
     }
+    let coverage = seqs.len();
     // Register
     for (seq, ops) in seqs.iter().zip(ops.iter()) {
         let seq = seq.borrow();
@@ -1167,7 +1183,7 @@ pub fn polish_by_pileup<T: std::borrow::Borrow<[u8]>>(
     let mut pileup_iter = pileup.iter().zip(draft.iter()).enumerate();
     let mut consensus = Vec::with_capacity(draft.len());
     while let Some((pos, (pu, &refseq))) = pileup_iter.next() {
-        let (op, base) = pu.consensus().unwrap();
+        let (op, base) = pu.consensus_cov(coverage).unwrap();
         use crate::op::Edit;
         match op {
             Edit::Subst if base == refseq => {
@@ -1195,7 +1211,7 @@ pub fn polish_by_pileup<T: std::borrow::Borrow<[u8]>>(
             }
         }
     }
-    if let Some((op, base)) = pileup.last().unwrap().consensus() {
+    if let Some((op, base)) = pileup.last().unwrap().consensus_cov(coverage) {
         if op == crate::op::Edit::Insertion {
             changed_position.push((draft.len(), op));
             consensus.push(base);
