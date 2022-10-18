@@ -64,7 +64,7 @@ fn edit_dist(x1: &[u8], x2: &[u8]) -> u32 {
     }
     for (i, x1_b) in x1.iter().enumerate() {
         for (j, x2_b) in x2.iter().enumerate() {
-            let m = if x1_b == x2_b { 0 } else { 1 };
+            let m = (x1_b != x2_b) as u32;
             dp[i + 1][j + 1] = (dp[i][j + 1] + 1).min(dp[i + 1][j] + 1).min(dp[i][j] + m);
         }
     }

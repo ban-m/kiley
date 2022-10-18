@@ -841,7 +841,7 @@ impl<M: HMMType> GPHMM<M> {
                     let del = dp[(i - 1, j, t)]
                         + log_transit[t][state as usize]
                         + log_observe[state as usize][(x << 3 | GAP) as usize];
-                    ((current - del) < 0.000001).then(|| t)
+                    ((current - del) < 0.000001).then_some(t)
                 })
                 .unwrap();
             state = new_state;
@@ -857,7 +857,7 @@ impl<M: HMMType> GPHMM<M> {
                     let ins = dp[(i, j - 1, t)]
                         + log_transit[t][state as usize]
                         + log_observe[state as usize][(GAP << 3 | y) as usize];
-                    ((current - ins).abs() < 0.00001).then(|| t)
+                    ((current - ins).abs() < 0.00001).then_some(t)
                 })
                 .unwrap();
             state = new_state;
@@ -1162,19 +1162,19 @@ impl<M: HMMType> GPHMM<M> {
                         return None;
                     }
                     let new_lk: f64 = profiles.iter().map(|pr| pr.with_mutation(pos, b)).sum();
-                    (total_lk < new_lk).then(|| (pos, Op::Match, b, new_lk))
+                    (total_lk < new_lk).then_some((pos, Op::Match, b, new_lk))
                 });
                 let new_lk = profiles.iter().map(|pr| pr.with_deletion(pos)).sum::<f64>();
-                let deletion = (total_lk < new_lk).then(|| (pos, Op::Del, GAP, new_lk));
+                let deletion = (total_lk < new_lk).then_some((pos, Op::Del, GAP, new_lk));
                 let insertion = b"ACGT".iter().map(padseq::convert_to_twobit).find_map(|b| {
                     let new_lk: f64 = profiles.iter().map(|pr| pr.with_insertion(pos, b)).sum();
-                    (total_lk < new_lk).then(|| (pos, Op::Ins, b, new_lk))
+                    (total_lk < new_lk).then_some((pos, Op::Ins, b, new_lk))
                 });
                 let ins_last = if pos + 1 == template.len() {
                     let pos = pos + 1;
                     b"ACGT".iter().map(padseq::convert_to_twobit).find_map(|b| {
                         let new_lk: f64 = profiles.iter().map(|pr| pr.with_insertion(pos, b)).sum();
-                        (total_lk < new_lk).then(|| (pos, Op::Ins, b, new_lk))
+                        (total_lk < new_lk).then_some((pos, Op::Ins, b, new_lk))
                     })
                 } else {
                     None

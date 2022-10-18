@@ -1636,7 +1636,7 @@ pub mod tests {
                 let diff = x
                     .iter()
                     .zip(y.iter())
-                    .map(|(x, y)| if x == y { 0 } else { 1 })
+                    .map(|(x, y)| (x != y) as u8)
                     .sum::<u8>();
                 assert_eq!(diff, 0, "{:?},{:?}", x, y);
             }

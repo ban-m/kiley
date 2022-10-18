@@ -19,7 +19,7 @@ const fn match_mat() -> [u32; 64] {
     while x < 4 {
         let mut y = 0;
         while y < 4 {
-            let mat_score = if x == y { 0 } else { 1 };
+            let mat_score = (x != y) as u32;
             scores[x << 3 | y] = mat_score;
             y += 1;
         }
@@ -1203,7 +1203,7 @@ pub fn polish_by_batch_banded<T: std::borrow::Borrow<PadSeq>>(
             }
         }
     }
-    is_diffed.then(|| (improved, current_edit_distance))
+    is_diffed.then_some((improved, current_edit_distance))
 }
 
 // Find if there is a sequence x such that
@@ -1657,7 +1657,7 @@ mod test {
         }
         for (i, x) in xs.iter().enumerate().map(|(i, x)| (i + 1, x)) {
             for (j, y) in ys.iter().enumerate().map(|(j, y)| (j + 1, y)) {
-                let mat = if x == y { 0 } else { 1 };
+                let mat = (x != y) as u32;
                 dp[i][j] = (dp[i - 1][j] + 1)
                     .min(dp[i][j - 1] + 1)
                     .min(dp[i - 1][j - 1] + mat);
@@ -1674,7 +1674,7 @@ mod test {
                 j -= 1;
                 ops.push(Op::Ins);
             } else {
-                let mat = if xs[i - 1] == ys[j - 1] { 0 } else { 1 };
+                let mat = (xs[i - 1] != ys[j - 1]) as u32;
                 assert_eq!(dp[i - 1][j - 1] + mat, current);
                 if mat == 0 {
                     ops.push(Op::Match);

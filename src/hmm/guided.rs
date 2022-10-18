@@ -1479,7 +1479,7 @@ fn polish_guided(
         } else if pos < orig_len {
             template.push(template[pos]);
             pos += 1;
-        } else if current_lk + MIN_UP < lk && 4 <= op && op < 8 {
+        } else if current_lk + MIN_UP < lk && (4..8).contains(&op) {
             changed_positions.push((pos, op));
             // Here, we need to consider the last insertion...
             template.push(b"ACGT"[op - 4]);

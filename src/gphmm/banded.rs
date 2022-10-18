@@ -386,7 +386,7 @@ impl<M: HMMType> GPHMM<M> {
                     let del = dp[(i - 1, j_prev, t)]
                         + log_transit[t][state as usize]
                         + log_observe[state as usize][(x << 3 | GAP) as usize];
-                    ((current - del).abs() < 0.001).then(|| t)
+                    ((current - del).abs() < 0.001).then_some(t)
                 })
                 .unwrap();
             state = new_state;
@@ -405,7 +405,7 @@ impl<M: HMMType> GPHMM<M> {
                     let ins = dp[(0, j - 1, t)]
                         + log_transit[t][state as usize]
                         + log_observe[state as usize][(GAP << 3 | y) as usize];
-                    ((current - ins).abs() < 0.0001).then(|| t)
+                    ((current - ins).abs() < 0.0001).then_some(t)
                 })
                 .unwrap();
             state = new_state;
@@ -536,7 +536,7 @@ impl<M: HMMType> GPHMM<M> {
         let m = ys.len() as isize - centers[xs.len()] + radius;
         (0..2 * radius + 1)
             .contains(&m)
-            .then(|| (dp, norm_factors, centers))
+            .then_some((dp, norm_factors, centers))
     }
     fn backward_banded(
         &self,

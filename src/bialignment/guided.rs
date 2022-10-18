@@ -145,7 +145,7 @@ pub fn edit_dist_guided(
         let q = qs[i - 1];
         for j in start.max(1)..end {
             let r = rs[j - 1];
-            let mat = if q == r { 0 } else { 1 };
+            let mat = (q != r) as u32;
             let dist = (dp.get(i - 1, j) + 1)
                 .min(dp.get(i, j - 1) + 1)
                 .min(dp.get(i - 1, j - 1) + mat);
@@ -168,7 +168,7 @@ pub fn edit_dist_guided(
             ops.push(Op::Del);
             rpos -= 1;
         } else {
-            let mat = if qs[qpos - 1] == rs[rpos - 1] { 0 } else { 1 };
+            let mat = (qs[qpos - 1] != rs[rpos - 1]) as u32;
             assert_eq!(mat + dp.get(qpos - 1, rpos - 1), current);
             qpos -= 1;
             rpos -= 1;
@@ -780,7 +780,7 @@ impl Aligner {
             }
             for (j, &r) in rs.iter().enumerate().take(end - 1).skip(start.max(1) - 1) {
                 let j = j + 1;
-                let mat = if q != r { 1 } else { 0 };
+                let mat = (q != r) as u32;
                 let dist = (dp.get(i - 1, j - 1) + mat)
                     .min(dp.get(i, j - 1) + 1)
                     .min(dp.get(i - 1, j) + 1);
@@ -801,7 +801,7 @@ impl Aligner {
                 ops.push(Op::Del);
                 rpos -= 1;
             } else {
-                let mat = if qs[qpos - 1] == rs[rpos - 1] { 0 } else { 1 };
+                let mat = (qs[qpos - 1] != rs[rpos - 1]) as u32;
                 assert_eq!(mat + dp.get(qpos - 1, rpos - 1), current);
                 qpos -= 1;
                 rpos -= 1;
@@ -829,7 +829,7 @@ impl Aligner {
                 dp.set(i, rs.len(), (qs.len() - i) as u32);
             }
             for (j, &r) in rs.iter().enumerate().take(end).skip(start).rev() {
-                let mat = if q == r { 0 } else { 1 };
+                let mat = (q != r) as u32;
                 let dist = (dp.get(i + 1, j) + 1)
                     .min(dp.get(i, j + 1) + 1)
                     .min(dp.get(i + 1, j + 1) + mat);
@@ -927,7 +927,7 @@ fn polish_guided(
         } else if pos < orig_len {
             template.push(template[pos]);
             pos += 1;
-        } else if dist < current_dist && 4 <= op && op < 8 {
+        } else if dist < current_dist && (4..8).contains(&op) {
             // Here, we need to consider the last insertion...
             changed_positions.push((pos, op));
             template.push(b"ACGT"[op - 4]);
@@ -1262,7 +1262,7 @@ pub mod test {
         }
         for (i, x) in xs.iter().enumerate().map(|(i, x)| (i + 1, x)) {
             for (j, y) in ys.iter().enumerate().map(|(j, y)| (j + 1, y)) {
-                let mat = if x == y { 0 } else { 1 };
+                let mat = (x != y) as u32;
                 dp[i][j] = (dp[i - 1][j] + 1)
                     .min(dp[i][j - 1] + 1)
                     .min(dp[i - 1][j - 1] + mat);
@@ -1279,7 +1279,7 @@ pub mod test {
                 j -= 1;
                 ops.push(Op::Ins);
             } else {
-                let mat = if xs[i - 1] == ys[j - 1] { 0 } else { 1 };
+                let mat = (xs[i - 1] != ys[j - 1]) as u32;
                 assert_eq!(dp[i - 1][j - 1] + mat, current);
                 if mat == 0 {
                     ops.push(Op::Match);
