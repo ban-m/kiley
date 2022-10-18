@@ -862,7 +862,6 @@ impl PairHiddenMarkovModel {
         memory.initialize();
         self.fill_pre_dp(memory, rs, qs);
         self.fill_post_dp(memory, rs, qs);
-        self.fill_mod_table(memory, rs, qs);
         let lk = memory.post.get(0, 0).0.ln() + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>();
         let lk2 = {
             let (mat, ins, del) = memory.pre.get(qs.len(), rs.len());
@@ -877,6 +876,7 @@ impl PairHiddenMarkovModel {
             trace!("QRY\t{}\t{}", String::from_utf8_lossy(qs), qs.len());
             None
         } else {
+            self.fill_mod_table(memory, rs, qs);
             Some(lk)
         }
     }
