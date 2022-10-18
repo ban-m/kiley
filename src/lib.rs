@@ -995,29 +995,29 @@ mod test {
         }
         dp[x1.len()][x2.len()]
     }
-    #[test]
-    fn step_consensus_kiley() {
-        let length = 100;
-        for seed in 0..100u64 {
-            let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
-            let template = gen_seq::generate_seq(&mut rng, length);
-            let xs = gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE);
-            let ys = gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE);
-            let zs = gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE);
-            let (_, consensus) =
-                trialignment::banded::Aligner::new(xs.len(), ys.len(), zs.len(), 10)
-                    .consensus(&xs, &ys, &zs, 10);
-            let xdist = edit_dist(&xs, &template);
-            let ydist = edit_dist(&ys, &template);
-            let zdist = edit_dist(&zs, &template);
-            let prev_dist = xdist.min(ydist).min(zdist);
-            let dist = edit_dist(&consensus, &template);
-            eprintln!("{}", String::from_utf8_lossy(&template));
-            eprintln!("{}", String::from_utf8_lossy(&consensus));
-            eprintln!("LONG:{},{},{}=>{}", xdist, ydist, zdist, dist);
-            assert!(dist <= prev_dist);
-        }
-    }
+    // #[test]
+    // fn step_consensus_kiley() {
+    //     let length = 100;
+    //     for seed in 0..100u64 {
+    //         let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
+    //         let template = gen_seq::generate_seq(&mut rng, length);
+    //         let xs = gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE);
+    //         let ys = gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE);
+    //         let zs = gen_seq::introduce_randomness(&template, &mut rng, &gen_seq::PROFILE);
+    //         let (_, consensus) =
+    //             trialignment::banded::Aligner::new(xs.len(), ys.len(), zs.len(), 10)
+    //                 .consensus(&xs, &ys, &zs, 10);
+    //         let xdist = edit_dist(&xs, &template);
+    //         let ydist = edit_dist(&ys, &template);
+    //         let zdist = edit_dist(&zs, &template);
+    //         let prev_dist = xdist.min(ydist).min(zdist);
+    //         let dist = edit_dist(&consensus, &template);
+    //         eprintln!("{}", String::from_utf8_lossy(&template));
+    //         eprintln!("{}", String::from_utf8_lossy(&consensus));
+    //         eprintln!("LONG:{},{},{}=>{}", xdist, ydist, zdist, dist);
+    //         assert!(dist <= prev_dist);
+    //     }
+    // }
     #[test]
     fn short_consensus_kiley() {
         let coverage = 20;
