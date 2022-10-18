@@ -475,6 +475,7 @@ impl PairHiddenMarkovModel {
         score.ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
     }
     // Viterbi algorithm.
+    // Maybe we need log-version....
     fn fill_viterbi(&self, memory: &mut Memory, rs: &[u8], qs: &[u8]) {
         assert!(memory.pre_scl.is_empty());
         // 1. Initialize.
@@ -845,7 +846,7 @@ impl PairHiddenMarkovModel {
             .iter_mut()
             .for_each(|x| *x = x.max(MIN_POSITIVE).ln() + scaling.ln() * len);
     }
-    fn update(&self, memory: &mut Memory, rs: &[u8], qs: &[u8], ops: &[Op]) -> f64 {
+    fn update(&self, memory: &mut Memory, rs: &[u8], qs: &[u8], ops: &[Op]) -> Option<f64> {
         memory.set_fill_ranges(rs.len(), qs.len(), ops);
         memory.initialize();
         self.fill_pre_dp(memory, rs, qs);
@@ -857,15 +858,16 @@ impl PairHiddenMarkovModel {
             (mat + del + ins).ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
         };
         if 0.0001 < (lk - lk2).abs() {
-            eprintln!("{},{}", lk, lk2);
-            eprintln!("MODEL\t{}", self);
+            trace!("{},{}", lk, lk2);
+            trace!("MODEL\t{}", self);
             let ops: String = ops.iter().map(|x| format!("{}", x)).collect();
-            eprintln!("OPS\t{}", ops);
-            eprintln!("REF\t{}\t{}", String::from_utf8_lossy(rs), rs.len());
-            eprintln!("QRY\t{}\t{}", String::from_utf8_lossy(qs), qs.len());
-            panic!();
+            trace!("OPS\t{}", ops);
+            trace!("REF\t{}\t{}", String::from_utf8_lossy(rs), rs.len());
+            trace!("QRY\t{}\t{}", String::from_utf8_lossy(qs), qs.len());
+            None
+        } else {
+            Some(lk)
         }
-        lk
     }
     fn lk(&self, memory: &mut Memory, rs: &[u8], qs: &[u8], ops: &[Op]) -> f64 {
         memory.set_fill_ranges(rs.len(), qs.len(), ops);
@@ -907,10 +909,10 @@ impl PairHiddenMarkovModel {
         qs: &[u8],
         radius: usize,
         ops: &[Op],
-    ) -> (Vec<f64>, f64) {
+    ) -> Option<(Vec<f64>, f64)> {
         let mut memory = Memory::with_capacity(rs.len(), radius);
-        let lk = self.update(&mut memory, rs, qs, ops);
-        (memory.mod_table, lk)
+        let lk = self.update(&mut memory, rs, qs, ops)?;
+        Some((memory.mod_table, lk))
     }
 
     /// With bootstrap operations and taking numbers.
@@ -969,8 +971,11 @@ impl PairHiddenMarkovModel {
             for (i, (ops, seq)) in seq_stream.enumerate() {
                 let ops = ops.borrow_mut();
                 let _ = self.update_aln_path(&mut memory, &template, seq.borrow(), ops);
-                if i < take_num {
-                    current_lk += self.update(&mut memory, &template, seq.borrow(), ops);
+                if take_num <= i {
+                    continue;
+                }
+                if let Some(lk_of_read) = self.update(&mut memory, &template, seq.borrow(), ops) {
+                    current_lk += lk_of_read;
                     if modif_table.is_empty() {
                         modif_table.extend_from_slice(&memory.mod_table)
                     } else {
@@ -1087,6 +1092,15 @@ impl PairHiddenMarkovModel {
             memory.initialize();
             self.fill_pre_dp(&mut memory, rs, qs);
             self.fill_post_dp(&mut memory, rs, qs);
+            let lk =
+                memory.post.get(0, 0).0.ln() + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>();
+            let lk2 = {
+                let (mat, ins, del) = memory.pre.get(qs.len(), rs.len());
+                (mat + del + ins).ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
+            };
+            if 0.0001 < (lk - lk2).abs() {
+                continue;
+            }
             self.register_naive(&memory, rs, qs, &mut next);
         }
         next.normalize();
@@ -1104,7 +1118,7 @@ impl PairHiddenMarkovModel {
         let folded = ops
             .par_iter()
             .zip(xss.par_iter())
-            .map(|(ops, seq)| {
+            .filter_map(|(ops, seq)| {
                 let qs = seq.borrow();
                 let ops = ops.borrow();
                 let mut memory = Memory::with_capacity(template.len(), radius);
@@ -1116,7 +1130,17 @@ impl PairHiddenMarkovModel {
                 memory.initialize();
                 self.fill_pre_dp(&mut memory, rs, qs);
                 self.fill_post_dp(&mut memory, rs, qs);
-                (memory, qs)
+                let lk = memory.post.get(0, 0).0.ln()
+                    + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>();
+                let lk2 = {
+                    let (mat, ins, del) = memory.pre.get(qs.len(), rs.len());
+                    (mat + del + ins).ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
+                };
+                if 0.0001 < (lk - lk2).abs() {
+                    None
+                } else {
+                    Some((memory, qs))
+                }
             })
             .fold(PairHiddenMarkovModel::zeros, |mut next, (memory, qs)| {
                 self.register_naive(&memory, rs, qs, &mut next);
@@ -1589,7 +1613,7 @@ pub mod tests {
             let (modif_table, ops) = {
                 let mut memory = Memory::with_capacity(template.len(), radius);
                 let ops = bootstrap_ops(template.len(), query.len());
-                let lk = hmm.update(&mut memory, &template, &query, &ops);
+                let lk = hmm.update(&mut memory, &template, &query, &ops).unwrap();
                 println!("LK\t{}", lk);
                 (memory.mod_table, ops)
             };
@@ -1606,7 +1630,7 @@ pub mod tests {
                 let orig = mod_version[j];
                 for (&base, lk_m) in b"ACGT".iter().zip(modif_table) {
                     mod_version[j] = base;
-                    let lk = hmm.update(&mut memory, &mod_version, &query, &ops);
+                    let lk = hmm.update(&mut memory, &mod_version, &query, &ops).unwrap();
                     assert!((lk - lk_m).abs() < 0.0001, "{},{},mod", lk, lk_m);
                     println!("M\t{}\t{}", j, (lk - lk_m).abs());
                     mod_version[j] = orig;
@@ -1614,7 +1638,7 @@ pub mod tests {
                 // Insertion error
                 for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
                     mod_version.insert(j, base);
-                    let lk = hmm.update(&mut memory, &mod_version, &query, &ops);
+                    let lk = hmm.update(&mut memory, &mod_version, &query, &ops).unwrap();
                     assert!((lk - lk_m).abs() < 0.0001, "{},{}", lk, lk_m);
                     println!("I\t{}\t{}", j, (lk - lk_m).abs());
                     mod_version.remove(j);
@@ -1627,7 +1651,7 @@ pub mod tests {
                         .chain(template[j..].iter())
                         .copied()
                         .collect();
-                    let lk = hmm.update(&mut memory, &mod_version, &query, &ops);
+                    let lk = hmm.update(&mut memory, &mod_version, &query, &ops).unwrap();
                     println!("C\t{}\t{}\t{}", j, len, (lk - lk_m).abs());
                     assert!((lk - lk_m).abs() < 0.0001, "{},{}", lk, lk_m);
                 }
@@ -1639,7 +1663,7 @@ pub mod tests {
                         .chain(template[j + len + 1..].iter())
                         .copied()
                         .collect();
-                    let lk = hmm.update(&mut memory, &mod_version, &query, &ops);
+                    let lk = hmm.update(&mut memory, &mod_version, &query, &ops).unwrap();
                     println!("D\t{}\t{}\t{}", j, len, lk - lk_m);
                     assert!(
                         (lk - lk_m).abs() < 0.01,
@@ -1656,7 +1680,7 @@ pub mod tests {
                 .unwrap();
             for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
                 mod_version.push(base);
-                let lk = hmm.update(&mut memory, &mod_version, &query, &ops);
+                let lk = hmm.update(&mut memory, &mod_version, &query, &ops).unwrap();
                 assert!((lk - lk_m).abs() < 1.0001);
                 mod_version.pop();
             }
@@ -1681,7 +1705,7 @@ pub mod tests {
         let (modif_table, ops) = {
             let mut memory = Memory::with_capacity(template.len(), radius);
             let ops = bootstrap_ops(template.len(), query.len());
-            let lk = hmm.update(&mut memory, &template, query, &ops);
+            let lk = hmm.update(&mut memory, &template, query, &ops).unwrap();
             println!("LK\t{}", lk);
             (memory.mod_table, ops)
         };
@@ -1698,7 +1722,7 @@ pub mod tests {
             let orig = mod_version[j];
             for (&base, lk_m) in b"ACGT".iter().zip(modif_table) {
                 mod_version[j] = base;
-                let lk = hmm.update(&mut memory, &mod_version, query, &ops);
+                let lk = hmm.update(&mut memory, &mod_version, query, &ops).unwrap();
                 assert!((lk - lk_m).abs() < 0.0001, "{},{},mod", lk, lk_m);
                 println!("M\t{}\t{}", j, (lk - lk_m).abs());
                 mod_version[j] = orig;
@@ -1706,7 +1730,7 @@ pub mod tests {
             // Insertion error
             for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
                 mod_version.insert(j, base);
-                let lk = hmm.update(&mut memory, &mod_version, query, &ops);
+                let lk = hmm.update(&mut memory, &mod_version, query, &ops).unwrap();
                 assert!((lk - lk_m).abs() < 0.0001, "{},{}", lk, lk_m);
                 println!("I\t{}\t{}", j, (lk - lk_m).abs());
                 mod_version.remove(j);
@@ -1719,7 +1743,7 @@ pub mod tests {
                     .chain(template[j..].iter())
                     .copied()
                     .collect();
-                let lk = hmm.update(&mut memory, &mod_version, query, &ops);
+                let lk = hmm.update(&mut memory, &mod_version, query, &ops).unwrap();
                 println!("C\t{}\t{}\t{}", j, len, (lk - lk_m).abs());
                 assert!((lk - lk_m).abs() < 0.0001, "{},{}", lk, lk_m);
             }
@@ -1731,7 +1755,7 @@ pub mod tests {
                     .chain(template[j + len + 1..].iter())
                     .copied()
                     .collect();
-                let lk = hmm.update(&mut memory, &mod_version, query, &ops);
+                let lk = hmm.update(&mut memory, &mod_version, query, &ops).unwrap();
                 println!("D\t{}\t{}\t{}", j, len, lk - lk_m);
                 assert!(
                     (lk - lk_m).abs() < 0.01,
@@ -1748,7 +1772,7 @@ pub mod tests {
             .unwrap();
         for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
             mod_version.push(base);
-            let lk = hmm.update(&mut memory, &mod_version, query, &ops);
+            let lk = hmm.update(&mut memory, &mod_version, query, &ops).unwrap();
             assert!((lk - lk_m).abs() < 1.0001);
             mod_version.pop();
         }

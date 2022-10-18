@@ -19,7 +19,11 @@ fn main() -> std::io::Result<()> {
         let len = rng.gen_range(300..500);
         let query = gen_seq::introduce_randomness(&seq[len..], &mut rng, &profile);
         let ops = kiley::bialignment::global(&draft, &query, 1, -1, -1, -3).1;
-        let len = hmm.modification_table(&draft, &query, 20, &ops).0.len();
+        let len = hmm
+            .modification_table(&draft, &query, 20, &ops)
+            .unwrap()
+            .0
+            .len();
         println!("{len}");
     }
     Ok(())
