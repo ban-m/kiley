@@ -394,20 +394,26 @@ impl PairHiddenMarkovModel {
                 (State::Del, del)
             } else {
                 if !(del <= ins && mat <= ins) {
-                    trace!("REF\t{}", String::from_utf8_lossy(rs));
-                    trace!("QRY\t{}", String::from_utf8_lossy(qs));
-                    trace!("OPS\t{}", ops.len());
+                    // trace!("REF\t{}", String::from_utf8_lossy(rs));
+                    // trace!("QRY\t{}", String::from_utf8_lossy(qs));
+                    // trace!("OPS\t{}", ops.len());
+                    // let (qx, ax, rx) = crate::recover(qs, rs, ops);
+                    // for ((qx, ax), rx) in qx.chunks(200).zip(ax.chunks(200)).zip(rx.chunks(200)) {
+                    //     trace!("{}", String::from_utf8_lossy(qx));
+                    //     trace!("{}", String::from_utf8_lossy(ax));
+                    //     trace!("{}\n", String::from_utf8_lossy(rx));
+                    // }
+                    // Fallback.
+                    let rad = memory.default_radius;
+                    let (_, fallback) =
+                        crate::bialignment::guided::edit_dist_guided(rs, qs, ops, rad);
+                    *ops = fallback;
                     let (qx, ax, rx) = crate::recover(qs, rs, ops);
                     for ((qx, ax), rx) in qx.chunks(200).zip(ax.chunks(200)).zip(rx.chunks(200)) {
                         trace!("{}", String::from_utf8_lossy(qx));
                         trace!("{}", String::from_utf8_lossy(ax));
                         trace!("{}\n", String::from_utf8_lossy(rx));
                     }
-                    // Fallback.
-                    let rad = memory.default_radius;
-                    let (_, fallback) =
-                        crate::bialignment::guided::edit_dist_guided(rs, qs, ops, rad);
-                    *ops = fallback;
                     return -100f64 * (qs.len() + rs.len()) as f64;
                 }
                 (State::Ins, ins)
