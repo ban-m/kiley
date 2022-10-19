@@ -394,21 +394,12 @@ impl PairHiddenMarkovModel {
                 (State::Del, del)
             } else {
                 if !(del <= ins && mat <= ins) {
-                    // trace!("REF\t{}", String::from_utf8_lossy(rs));
-                    // trace!("QRY\t{}", String::from_utf8_lossy(qs));
-                    // trace!("OPS\t{}", ops.len());
-                    // let (qx, ax, rx) = crate::recover(qs, rs, ops);
-                    // for ((qx, ax), rx) in qx.chunks(200).zip(ax.chunks(200)).zip(rx.chunks(200)) {
-                    //     trace!("{}", String::from_utf8_lossy(qx));
-                    //     trace!("{}", String::from_utf8_lossy(ax));
-                    //     trace!("{}\n", String::from_utf8_lossy(rx));
-                    // }
                     // Fallback.
                     let rad = memory.default_radius;
                     let (_, fallback) =
                         crate::bialignment::guided::edit_dist_guided(rs, qs, ops, rad);
                     *ops = fallback;
-                    let (qx, ax, rx) = crate::recover(qs, rs, ops);
+                    let (qx, ax, rx) = crate::recover(rs, qs, ops);
                     for ((qx, ax), rx) in qx.chunks(200).zip(ax.chunks(200)).zip(rx.chunks(200)) {
                         trace!("{}", String::from_utf8_lossy(qx));
                         trace!("{}", String::from_utf8_lossy(ax));
@@ -867,7 +858,7 @@ impl PairHiddenMarkovModel {
             let (mat, ins, del) = memory.pre.get(qs.len(), rs.len());
             (mat + del + ins).ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
         };
-        if 0.0001 < (lk - lk2).abs() {
+        if 0.0001 < (lk - lk2).abs() || lk.is_nan() || lk2.is_nan() {
             trace!("{},{}", lk, lk2);
             trace!("MODEL\t{}", self);
             let ops: String = ops.iter().map(|x| format!("{}", x)).collect();
