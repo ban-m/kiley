@@ -1072,6 +1072,109 @@ impl PairHiddenMarkovModel {
         let config = HMMConfig::new(radius, xs.len(), 0);
         self.polish_until_converge_with_conf(template, xs, &mut ops, &config)
     }
+    pub fn fit_by_alignment<T: std::borrow::Borrow<[u8]>, O: std::borrow::Borrow<[Op]>>(
+        &mut self,
+        template: &[u8],
+        xss: &[T],
+        radius: usize,
+    ) {
+        let ops: Vec<_> = xss
+            .iter()
+            .map(|xs| self.align(template, xs.borrow(), radius).1)
+            .collect();
+        self.fit_by_alignment_with(template, xss, &ops);
+    }
+    pub fn fit_by_alignment_with<T: std::borrow::Borrow<[u8]>, O: std::borrow::Borrow<[Op]>>(
+        &mut self,
+        template: &[u8],
+        xss: &[T],
+        ops: &[O],
+    ) {
+        // From -> To. Mat, Ins, Del = 0, 1, 2
+        fn op_to_state(op: Op) -> usize {
+            match op {
+                Op::Mismatch => 0,
+                Op::Match => 0,
+                Op::Ins => 1,
+                Op::Del => 2,
+            }
+        }
+        let mut transitions = [[1f64; 3]; 3];
+        let mut mat_emit = [1f64; 16];
+        let mut ins_emit = [1f64; 20];
+        for (ops, xs) in ops.iter().zip(xss.iter()) {
+            let ops = ops.borrow();
+            let xs = xs.borrow();
+            if ops.len() < 2 {
+                continue;
+            }
+            let mut state = op_to_state(ops[0]);
+            let (mut rpos, mut qpos) = (0, 0);
+            let rbase = BASE_TABLE[template[rpos] as usize] << 2;
+            let qbase = BASE_TABLE[xs[qpos] as usize];
+            match state {
+                0 => {
+                    mat_emit[rbase | qbase] += 1f64;
+                    rpos += 1;
+                    qpos += 1;
+                }
+                1 => {
+                    ins_emit[rbase | qbase] += 1f64;
+                    qpos += 1;
+                }
+                _ => {
+                    rpos += 1;
+                }
+            }
+            for op in ops.iter().skip(1) {
+                let next = op_to_state(*op);
+                transitions[state][next] += 1f64;
+                state = next;
+                let rbase = BASE_TABLE[template[rpos] as usize] << 2;
+                let qbase = BASE_TABLE[xs[qpos] as usize];
+                match state {
+                    0 => {
+                        mat_emit[rbase | qbase] += 1f64;
+                        rpos += 1;
+                        qpos += 1;
+                    }
+                    1 => {
+                        ins_emit[rbase | qbase] += 1f64;
+                        qpos += 1;
+                    }
+                    _ => {
+                        rpos += 1;
+                    }
+                }
+            }
+        }
+        for &base in template.iter() {
+            ins_emit[16 + BASE_TABLE[base as usize]] += 1.0;
+        }
+        for state in ins_emit.chunks_exact_mut(4) {
+            let sum: f64 = state.iter().sum();
+            state.iter_mut().for_each(|x| *x /= sum);
+        }
+        for state in mat_emit.chunks_exact_mut(4) {
+            let sum: f64 = state.iter().sum();
+            state.iter_mut().for_each(|x| *x /= sum);
+        }
+        for from_state in transitions.iter_mut() {
+            let sum: f64 = from_state.iter().sum();
+            from_state.iter_mut().for_each(|x| *x /= sum);
+        }
+        self.ins_emit = ins_emit;
+        self.mat_emit = mat_emit;
+        self.mat_mat = transitions[0][0];
+        self.mat_ins = transitions[0][1];
+        self.mat_del = transitions[0][2];
+        self.ins_mat = transitions[1][0];
+        self.ins_ins = transitions[1][1];
+        self.ins_del = transitions[1][2];
+        self.del_mat = transitions[2][0];
+        self.del_ins = transitions[2][1];
+        self.del_del = transitions[2][2];
+    }
     pub fn fit_naive_with<T: std::borrow::Borrow<[u8]>, O: std::borrow::Borrow<[Op]>>(
         &mut self,
         template: &[u8],
