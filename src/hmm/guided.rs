@@ -1130,15 +1130,17 @@ impl PairHiddenMarkovModel {
                 let next = op_to_state(*op);
                 transitions[state][next] += 1f64;
                 state = next;
-                let rbase = BASE_TABLE[template[rpos] as usize] << 2;
-                let qbase = BASE_TABLE[xs[qpos] as usize];
                 match state {
                     0 => {
+                        let rbase = BASE_TABLE[template[rpos] as usize] << 2;
+                        let qbase = BASE_TABLE[xs[qpos] as usize];
                         mat_emit[rbase | qbase] += 1f64;
                         rpos += 1;
                         qpos += 1;
                     }
                     1 => {
+                        let rbase = BASE_TABLE[template[rpos] as usize] << 2;
+                        let qbase = BASE_TABLE[xs[qpos] as usize];
                         ins_emit[rbase | qbase] += 1f64;
                         qpos += 1;
                     }
