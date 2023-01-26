@@ -1,3 +1,5 @@
+// TODO: This file is too large. Split into several files.
+
 use crate::bialignment::guided::bootstrap_ops;
 use crate::bialignment::guided::re_fill_fill_range;
 use crate::dptable::DPTable;
@@ -45,7 +47,7 @@ pub const COPY_SIZE: usize = 3;
 pub const DEL_SIZE: usize = 3;
 pub const NUM_ROW: usize = 8 + COPY_SIZE + DEL_SIZE;
 // After introducing mutation, we would take INACTIVE_TIME bases just as-is.
-const INACTIVE_TIME: usize = 5;
+pub const INACTIVE_TIME: usize = 5;
 
 /// HMM. As a rule of thumb, we do not take logarithm of each field; Scaling would be
 /// better both in performance and computational stability.
@@ -1477,6 +1479,9 @@ pub struct Memory {
 
 impl Memory {
     const MIN_RADIUS: usize = 4;
+    pub fn mod_table(&self) -> &[f64] {
+        &self.mod_table
+    }
     pub fn with_capacity(rlen: usize, radius: usize) -> Self {
         let fill_ranges = Vec::with_capacity(radius * rlen * 3);
         let mod_table = Vec::with_capacity(radius * rlen * 3);
@@ -1623,6 +1628,140 @@ fn polish_guided(
         orig_len < idx
     });
     changed_positions
+}
+
+/// Guided version of the pair HMM on the forward and reverse strands.
+#[derive(Debug, Clone)]
+pub struct PairHiddenMarkovModelOnStrands {
+    forward: PairHiddenMarkovModel,
+    reverse: PairHiddenMarkovModel,
+}
+
+impl PairHiddenMarkovModelOnStrands {
+    pub fn new(forward: PairHiddenMarkovModel, reverse: PairHiddenMarkovModel) -> Self {
+        Self { forward, reverse }
+    }
+    /// With bootstrap operations and taking numbers.
+    /// The returned operations would be consistent with the returned sequence.
+    /// Only the *first* `take_num` seuqneces would be used to polish,
+    /// but the operations of the rest are also updated accordingly.
+    /// This is (slightly) faster than the usual/full polishing...
+    /// strands: `true` if forward.
+    pub fn polish_until_converge_with_conf<T, O>(
+        &self,
+        draft: &[u8],
+        xs: &[T],
+        ops: &mut [O],
+        strands: &[bool],
+        config: &HMMConfig,
+    ) -> Vec<u8>
+    where
+        T: std::borrow::Borrow<[u8]>,
+        O: std::borrow::BorrowMut<Vec<Op>>,
+    {
+        let &HMMConfig {
+            radius,
+            take_num,
+            ignore_edge,
+        } = config;
+        let take_num = take_num.min(xs.len());
+        assert!(!xs.is_empty());
+        let mut template = draft.to_vec();
+        let len = (template.len() / 2).max(3);
+        let mut modif_table = Vec::new();
+        let mut memory = Memory::with_capacity(template.len(), radius);
+        let mut current_max = None;
+        'outer: for t in 0..100 {
+            let inactive = INACTIVE_TIME + (t * INACTIVE_TIME) % len;
+            modif_table.clear();
+            let mut current_lk = 0f64;
+            let seq_stream = ops.iter_mut().zip(xs.iter()).zip(strands.iter());
+            for (i, ((ops, seq), strand)) in seq_stream.enumerate() {
+                let ops = ops.borrow_mut();
+                let model = match strand {
+                    true => &self.forward,
+                    false => &self.reverse,
+                };
+                model.update_aln_path(&mut memory, &template, seq.borrow(), ops);
+                if take_num <= i {
+                    continue;
+                }
+                if let Some(lk_of_read) = model.update(&mut memory, &template, seq.borrow(), ops) {
+                    current_lk += lk_of_read;
+                    if modif_table.is_empty() {
+                        modif_table.extend_from_slice(&memory.mod_table)
+                    } else {
+                        modif_table
+                            .iter_mut()
+                            .zip(memory.mod_table.iter())
+                            .for_each(|(x, y)| *x += y);
+                    }
+                }
+            }
+            assert_eq!(modif_table.len(), NUM_ROW * (template.len() + 1));
+            // Ignore edge regions
+            for (i, lk) in modif_table.iter_mut().enumerate() {
+                let pos = i / NUM_ROW;
+                if pos < ignore_edge || template.len() + 1 - ignore_edge < pos {
+                    *lk = -1000000000000000000000000000000f64;
+                }
+            }
+            let changed_pos = polish_guided(&mut template, &modif_table, current_lk, inactive);
+            let edit_path = changed_pos.iter().map(|&(pos, op)| {
+                if op < 4 {
+                    (pos, crate::op::Edit::Subst)
+                } else if op < 8 {
+                    (pos, crate::op::Edit::Insertion)
+                } else if op < 8 + COPY_SIZE {
+                    (pos, crate::op::Edit::Copy(op - 8 + 1))
+                } else {
+                    (pos, crate::op::Edit::Deletion(op - 8 - COPY_SIZE + 1))
+                }
+            });
+            for (ops, seq) in ops.iter_mut().zip(xs.iter()) {
+                let ops = ops.borrow_mut();
+                let seq = seq.borrow();
+                let (qlen, rlen) = (seq.len(), template.len());
+                crate::op::fix_alignment_path(ops, edit_path.clone(), qlen, rlen);
+            }
+            memory.update_radius(&changed_pos, template.len());
+            if changed_pos.is_empty() {
+                if matches!(current_max,Some(lk) if current_lk < lk + 0.1) {
+                    break 'outer;
+                }
+                // trace!("NOWLK\t{}", current_lk);
+                current_max = Some(current_lk);
+                let is_updated = ops
+                    .iter_mut()
+                    .zip(xs.iter())
+                    .zip(strands.iter())
+                    .take(take_num)
+                    .enumerate()
+                    .map(|(_, ((ops, seq), strand))| {
+                        let model = match strand {
+                            true => &self.forward,
+                            false => &self.reverse,
+                        };
+                        let (ops, seq) = (ops.borrow_mut(), seq.borrow());
+                        let lk = model.lk(&mut memory, &template, seq, ops);
+                        let edop = crate::edlib_global(&template, seq);
+                        let lk2 = model.lk(&mut memory, &template, seq, &edop);
+                        if lk + 0.1 < lk2 {
+                            // trace!("{t}\t{i}\t{:.3}\t{:.3}", lk, lk2);
+                            *ops = edop;
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .fold(false, |is_updated, b| is_updated | b);
+                if !is_updated {
+                    break 'outer;
+                }
+            }
+        }
+        template
+    }
 }
 
 #[cfg(test)]

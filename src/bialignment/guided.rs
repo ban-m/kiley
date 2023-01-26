@@ -1016,56 +1016,6 @@ where
             break;
         }
     }
-    // for t in 0..100 {
-    //     let inactive = INACTIVE_TIME + (INACTIVE_TIME * t) % len;
-    //     modif_table.clear();
-    //     let dist: u32 = ops
-    //         .iter_mut()
-    //         .zip(xs.iter())
-    //         .map(|(ops, seq)| {
-    //             let dist = aligner.align(&template, seq.borrow(), ops);
-    //             match modif_table.is_empty() {
-    //                 true => modif_table.extend_from_slice(&aligner.mod_table),
-    //                 false => {
-    //                     modif_table
-    //                         .iter_mut()
-    //                         .zip(aligner.mod_table.iter())
-    //                         .for_each(|(x, y)| *x += y);
-    //                 }
-    //             }
-    //             dist
-    //         })
-    //         .sum();
-    //     assert_eq!(template.len() + 1, aligner.radius.len());
-    //     let (temp, cpos) = (&mut template, &mut changed_pos);
-    //     polish_guided(temp, cpos, &modif_table, dist, inactive);
-    //     let edit_path = cpos.iter().map(|&(pos, op)| {
-    //         if op < 4 {
-    //             (pos, crate::op::Edit::Subst)
-    //         } else if op < 8 {
-    //             (pos, crate::op::Edit::Insertion)
-    //         } else if op < 8 + COPY_SIZE {
-    //             (pos, crate::op::Edit::Copy(op - 8 + 1))
-    //         } else {
-    //             (pos, crate::op::Edit::Deletion(op - 8 - COPY_SIZE + 1))
-    //         }
-    //     });
-    //     for ((ops, seq), first_dist) in ops.iter_mut().zip(xs.iter()).zip(first_dist.iter()) {
-    //         let seq = seq.borrow();
-    //         let dist = ops.iter().filter(|&&op| op != Op::Match).count();
-    //         if dist < 2 * first_dist {
-    //             crate::op::fix_alignment_path(ops, edit_path.clone(), seq.len(), temp.len());
-    //         } else {
-    //             // If the alignment is too diverged, fallback to the default method.
-    //             *ops = bootstrap_ops(temp.len(), seq.len());
-    //             *ops = edit_dist_guided(temp, seq, &ops, radius).1;
-    //         }
-    //     }
-    //     aligner.update_radius(cpos, temp.len());
-    //     if changed_pos.is_empty() {
-    //         break;
-    //     }
-    // }
     template
 }
 
