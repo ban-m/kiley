@@ -1264,6 +1264,60 @@ impl PairHiddenMarkovModel {
         next.normalize();
         *self = next;
     }
+    pub fn fit_multiple_with_par<S, T, O>(
+        &mut self,
+        training_triples: &[(S, &[T], &[O])],
+        radius: usize,
+    ) where
+        S: std::borrow::Borrow<[u8]> + Sync + Send,
+        T: std::borrow::Borrow<[u8]> + Sync + Send,
+        O: std::borrow::Borrow<[Op]> + Sync + Send,
+    {
+        let mut next = Self::uniform(0.0005);
+        for (template, xss, ops) in training_triples.iter() {
+            assert_eq!(xss.len(), ops.len());
+            let rs = template.borrow();
+            use rayon::prelude::*;
+            let folded = ops
+                .par_iter()
+                .zip(xss.par_iter())
+                .filter_map(|(ops, seq)| {
+                    let qs = seq.borrow();
+                    let ops = ops.borrow();
+                    let mut memory = Memory::with_capacity(rs.len(), radius);
+                    memory.fill_ranges.clear();
+                    memory
+                        .fill_ranges
+                        .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
+                    re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut memory.fill_ranges);
+                    memory.initialize();
+                    self.fill_pre_dp(&mut memory, rs, qs);
+                    self.fill_post_dp(&mut memory, rs, qs);
+                    let lk = memory.post.get(0, 0).0.ln()
+                        + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>();
+                    let lk2 = {
+                        let (mat, ins, del) = memory.pre.get(qs.len(), rs.len());
+                        (mat + del + ins).ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
+                    };
+                    if 0.0001 < (lk - lk2).abs() {
+                        None
+                    } else {
+                        Some((memory, qs))
+                    }
+                })
+                .fold(PairHiddenMarkovModel::zeros, |mut next, (memory, qs)| {
+                    self.register_naive(&memory, rs, qs, &mut next);
+                    next
+                })
+                .reduce(PairHiddenMarkovModel::zeros, |mut x, y| {
+                    x.merge(&y);
+                    x
+                });
+            next.merge(&folded);
+        }
+        next.normalize();
+        *self = next;
+    }
     pub fn fit_naive<T: std::borrow::Borrow<[u8]>>(
         &mut self,
         template: &[u8],
