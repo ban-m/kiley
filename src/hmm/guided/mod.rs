@@ -1691,6 +1691,38 @@ pub struct PairHiddenMarkovModelOnStrands {
     reverse: PairHiddenMarkovModel,
 }
 
+#[derive(Debug, Clone)]
+pub struct TrainingDataPack<'a, T, O>
+where
+    T: std::borrow::Borrow<[u8]> + Sync + Send,
+    O: std::borrow::Borrow<[Op]> + Sync + Send,
+{
+    consensus: &'a [u8],
+    directions: &'a [bool],
+    sequences: &'a [T],
+    operations: &'a [O],
+}
+
+impl<'a, T, O> TrainingDataPack<'a, T, O>
+where
+    T: std::borrow::Borrow<[u8]> + Sync + Send,
+    O: std::borrow::Borrow<[Op]> + Sync + Send,
+{
+    pub fn new(
+        consensus: &'a [u8],
+        directions: &'a [bool],
+        sequences: &'a [T],
+        operations: &'a [O],
+    ) -> Self {
+        Self {
+            consensus,
+            directions,
+            sequences,
+            operations,
+        }
+    }
+}
+
 impl PairHiddenMarkovModelOnStrands {
     pub fn forward(&self) -> &PairHiddenMarkovModel {
         &self.forward
@@ -1698,60 +1730,77 @@ impl PairHiddenMarkovModelOnStrands {
     pub fn reverse(&self) -> &PairHiddenMarkovModel {
         &self.reverse
     }
-    pub fn fit_multiple_with_par<D, T, O>(
-        &mut self,
-        training_triples: &[(&[u8], &D, &[T], &[O])],
+    fn baum_welch<'a, T, O>(
+        &self,
+        datapack: &TrainingDataPack<'a, T, O>,
         radius: usize,
-    ) where
-        D: std::borrow::Borrow<[bool]> + Sync + Send,
+    ) -> Vec<(Memory, &'a [u8], bool)>
+    where
         T: std::borrow::Borrow<[u8]> + Sync + Send,
         O: std::borrow::Borrow<[Op]> + Sync + Send,
     {
+        use rayon::prelude::*;
+        let ops = datapack.operations.par_iter();
+        let seqs = datapack.sequences.par_iter();
+        let direction = datapack.directions.par_iter();
+        let rs = datapack.consensus;
+        ops.zip(seqs)
+            .zip(direction)
+            .filter_map(|((ops, seq), direction)| {
+                let qs = seq.borrow();
+                let ops = ops.borrow();
+                let mut memory = Memory::with_capacity(rs.len(), radius);
+                memory.fill_ranges.clear();
+                memory
+                    .fill_ranges
+                    .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
+                re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut memory.fill_ranges);
+                memory.initialize();
+                let target = match direction {
+                    true => self.forward(),
+                    false => self.reverse(),
+                };
+                target.fill_pre_dp(&mut memory, rs, qs);
+                target.fill_post_dp(&mut memory, rs, qs);
+                let lk = memory.post.get(0, 0).0.ln()
+                    + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>();
+                let lk2 = {
+                    let (mat, ins, del) = memory.pre.get(qs.len(), rs.len());
+                    (mat + del + ins).ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
+                };
+                if 0.0001 < (lk - lk2).abs() {
+                    None
+                } else {
+                    Some((memory, qs, *direction))
+                }
+            })
+            .collect()
+    }
+    pub fn fit_multiple_with_par<'a, T, O>(
+        &mut self,
+        training_datapack: &[TrainingDataPack<'a, T, O>],
+        radius: usize,
+    ) where
+        T: std::borrow::Borrow<[u8]> + Sync + Send,
+        O: std::borrow::Borrow<[Op]> + Sync + Send,
+    {
+        const INIT_WEIGHT: f64 = 0.0005;
         let mut fnext = PairHiddenMarkovModel::uniform(INIT_WEIGHT);
-        let mut next = Self::uniform(0.0005);
-        for (template, xss, ops) in training_triples.iter() {
-            assert_eq!(xss.len(), ops.len());
-            let rs = template.borrow();
-            use rayon::prelude::*;
-            let folded = ops
-                .par_iter()
-                .zip(xss.par_iter())
-                .filter_map(|(ops, seq)| {
-                    let qs = seq.borrow();
-                    let ops = ops.borrow();
-                    let mut memory = Memory::with_capacity(rs.len(), radius);
-                    memory.fill_ranges.clear();
-                    memory
-                        .fill_ranges
-                        .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
-                    re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut memory.fill_ranges);
-                    memory.initialize();
-                    self.fill_pre_dp(&mut memory, rs, qs);
-                    self.fill_post_dp(&mut memory, rs, qs);
-                    let lk = memory.post.get(0, 0).0.ln()
-                        + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>();
-                    let lk2 = {
-                        let (mat, ins, del) = memory.pre.get(qs.len(), rs.len());
-                        (mat + del + ins).ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
-                    };
-                    if 0.0001 < (lk - lk2).abs() {
-                        None
-                    } else {
-                        Some((memory, qs))
-                    }
-                })
-                .fold(PairHiddenMarkovModel::zeros, |mut next, (memory, qs)| {
-                    self.register_naive(&memory, rs, qs, &mut next);
-                    next
-                })
-                .reduce(PairHiddenMarkovModel::zeros, |mut x, y| {
-                    x.merge(&y);
-                    x
-                });
-            next.merge(&folded);
+        let mut rnext = fnext.clone();
+        for datapack in training_datapack.iter() {
+            assert_eq!(datapack.sequences.len(), datapack.operations.len());
+            let baum_welch = self.baum_welch(datapack, radius);
+            let rs = datapack.consensus;
+            for (memory, qs, direction) in baum_welch {
+                match direction {
+                    true => self.forward().register_naive(&memory, rs, qs, &mut fnext),
+                    false => self.reverse().register_naive(&memory, rs, qs, &mut rnext),
+                };
+            }
         }
-        next.normalize();
-        *self = next;
+        fnext.normalize();
+        rnext.normalize();
+        *self = PairHiddenMarkovModelOnStrands::new(fnext, rnext);
     }
     pub fn new(forward: PairHiddenMarkovModel, reverse: PairHiddenMarkovModel) -> Self {
         Self { forward, reverse }
