@@ -1,8 +1,7 @@
 // TODO: This file is too large. Split into several files.
-
-use crate::bialignment::guided::bootstrap_ops;
 use crate::bialignment::guided::re_fill_fill_range;
 use crate::dptable::DPTable;
+use crate::op::bootstrap_ops;
 use crate::op::Op;
 use serde::{Deserialize, Serialize};
 use std::f64::MIN_POSITIVE;
@@ -401,7 +400,7 @@ impl PairHiddenMarkovModel {
                     let (_, fallback) =
                         crate::bialignment::guided::edit_dist_guided(rs, qs, ops, rad);
                     *ops = fallback;
-                    let (qx, ax, rx) = crate::recover(rs, qs, ops);
+                    let (qx, ax, rx) = crate::op::recover(rs, qs, ops);
                     for ((qx, ax), rx) in qx.chunks(200).zip(ax.chunks(200)).zip(rx.chunks(200)) {
                         trace!("{}", String::from_utf8_lossy(qx));
                         trace!("{}", String::from_utf8_lossy(ax));
@@ -2096,97 +2095,97 @@ pub mod tests {
             }
         }
     }
-    #[test]
-    fn modification_table2() {
-        use crate::gen_seq;
-        let coverage = 10;
-        let radius = 20;
-        let prof = gen_seq::ProfileWithContext::default();
-        let seed = 36;
-        let len = 500;
-        let mut rng: rand_xoshiro::Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(seed);
-        let template: Vec<_> = gen_seq::generate_seq(&mut rng, len);
-        let seqs: Vec<_> = (0..coverage)
-            .map(|_| gen_seq::introduce_randomness_with_context(&template, &mut rng, &prof))
-            .collect();
-        let hmm = super::PairHiddenMarkovModel::default();
-        let template = crate::ternary_consensus_by_chunk(&seqs, radius);
-        let query = &seqs[0];
-        let (modif_table, ops) = {
-            let mut memory = Memory::with_capacity(template.len(), radius);
-            let ops = bootstrap_ops(template.len(), query.len());
-            let lk = hmm.update(&mut memory, &template, query, &ops).unwrap();
-            println!("LK\t{}", lk);
-            (memory.mod_table, ops)
-        };
-        let mut memory = Memory::with_capacity(template.len(), radius);
-        let mut mod_version = template.clone();
-        println!("{}", seed);
-        // Mutation error
-        for (j, modif_table) in modif_table
-            .chunks_exact(NUM_ROW)
-            .take(template.len())
-            .enumerate()
-        {
-            println!("{}", j);
-            let orig = mod_version[j];
-            for (&base, lk_m) in b"ACGT".iter().zip(modif_table) {
-                mod_version[j] = base;
-                let lk = hmm.update(&mut memory, &mod_version, query, &ops).unwrap();
-                assert!((lk - lk_m).abs() < 0.0001, "{},{},mod", lk, lk_m);
-                println!("M\t{}\t{}", j, (lk - lk_m).abs());
-                mod_version[j] = orig;
-            }
-            // Insertion error
-            for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
-                mod_version.insert(j, base);
-                let lk = hmm.update(&mut memory, &mod_version, query, &ops).unwrap();
-                assert!((lk - lk_m).abs() < 0.0001, "{},{}", lk, lk_m);
-                println!("I\t{}\t{}", j, (lk - lk_m).abs());
-                mod_version.remove(j);
-            }
-            // Copying mod
-            for len in (0..COPY_SIZE).filter(|c| j + c < template.len()) {
-                let lk_m = modif_table[8 + len];
-                let mod_version: Vec<_> = template[..j + len + 1]
-                    .iter()
-                    .chain(template[j..].iter())
-                    .copied()
-                    .collect();
-                let lk = hmm.update(&mut memory, &mod_version, query, &ops).unwrap();
-                println!("C\t{}\t{}\t{}", j, len, (lk - lk_m).abs());
-                assert!((lk - lk_m).abs() < 0.0001, "{},{}", lk, lk_m);
-            }
-            // Deletion error
-            for len in (0..DEL_SIZE).filter(|d| j + d < template.len()) {
-                let lk_m = modif_table[8 + COPY_SIZE + len];
-                let mod_version: Vec<_> = template[..j]
-                    .iter()
-                    .chain(template[j + len + 1..].iter())
-                    .copied()
-                    .collect();
-                let lk = hmm.update(&mut memory, &mod_version, query, &ops).unwrap();
-                println!("D\t{}\t{}\t{}", j, len, lk - lk_m);
-                assert!(
-                    (lk - lk_m).abs() < 0.01,
-                    "{},{},{}",
-                    lk,
-                    lk_m,
-                    String::from_utf8_lossy(&template)
-                );
-            }
-        }
-        let modif_table = modif_table
-            .chunks_exact(NUM_ROW)
-            .nth(template.len())
-            .unwrap();
-        for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
-            mod_version.push(base);
-            let lk = hmm.update(&mut memory, &mod_version, query, &ops).unwrap();
-            assert!((lk - lk_m).abs() < 1.0001);
-            mod_version.pop();
-        }
-    }
+    // #[test]
+    // fn modification_table2() {
+    //     use crate::gen_seq;
+    //     let coverage = 10;
+    //     let radius = 20;
+    //     let prof = gen_seq::ProfileWithContext::default();
+    //     let seed = 36;
+    //     let len = 500;
+    //     let mut rng: rand_xoshiro::Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(seed);
+    //     let template: Vec<_> = gen_seq::generate_seq(&mut rng, len);
+    //     let seqs: Vec<_> = (0..coverage)
+    //         .map(|_| gen_seq::introduce_randomness_with_context(&template, &mut rng, &prof))
+    //         .collect();
+    //     let hmm = super::PairHiddenMarkovModel::default();
+    //     let template = crate::ternary_consensus_by_chunk(&seqs, radius);
+    //     let query = &seqs[0];
+    //     let (modif_table, ops) = {
+    //         let mut memory = Memory::with_capacity(template.len(), radius);
+    //         let ops = bootstrap_ops(template.len(), query.len());
+    //         let lk = hmm.update(&mut memory, &template, query, &ops).unwrap();
+    //         println!("LK\t{}", lk);
+    //         (memory.mod_table, ops)
+    //     };
+    //     let mut memory = Memory::with_capacity(template.len(), radius);
+    //     let mut mod_version = template.clone();
+    //     println!("{}", seed);
+    //     // Mutation error
+    //     for (j, modif_table) in modif_table
+    //         .chunks_exact(NUM_ROW)
+    //         .take(template.len())
+    //         .enumerate()
+    //     {
+    //         println!("{}", j);
+    //         let orig = mod_version[j];
+    //         for (&base, lk_m) in b"ACGT".iter().zip(modif_table) {
+    //             mod_version[j] = base;
+    //             let lk = hmm.update(&mut memory, &mod_version, query, &ops).unwrap();
+    //             assert!((lk - lk_m).abs() < 0.0001, "{},{},mod", lk, lk_m);
+    //             println!("M\t{}\t{}", j, (lk - lk_m).abs());
+    //             mod_version[j] = orig;
+    //         }
+    //         // Insertion error
+    //         for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
+    //             mod_version.insert(j, base);
+    //             let lk = hmm.update(&mut memory, &mod_version, query, &ops).unwrap();
+    //             assert!((lk - lk_m).abs() < 0.0001, "{},{}", lk, lk_m);
+    //             println!("I\t{}\t{}", j, (lk - lk_m).abs());
+    //             mod_version.remove(j);
+    //         }
+    //         // Copying mod
+    //         for len in (0..COPY_SIZE).filter(|c| j + c < template.len()) {
+    //             let lk_m = modif_table[8 + len];
+    //             let mod_version: Vec<_> = template[..j + len + 1]
+    //                 .iter()
+    //                 .chain(template[j..].iter())
+    //                 .copied()
+    //                 .collect();
+    //             let lk = hmm.update(&mut memory, &mod_version, query, &ops).unwrap();
+    //             println!("C\t{}\t{}\t{}", j, len, (lk - lk_m).abs());
+    //             assert!((lk - lk_m).abs() < 0.0001, "{},{}", lk, lk_m);
+    //         }
+    //         // Deletion error
+    //         for len in (0..DEL_SIZE).filter(|d| j + d < template.len()) {
+    //             let lk_m = modif_table[8 + COPY_SIZE + len];
+    //             let mod_version: Vec<_> = template[..j]
+    //                 .iter()
+    //                 .chain(template[j + len + 1..].iter())
+    //                 .copied()
+    //                 .collect();
+    //             let lk = hmm.update(&mut memory, &mod_version, query, &ops).unwrap();
+    //             println!("D\t{}\t{}\t{}", j, len, lk - lk_m);
+    //             assert!(
+    //                 (lk - lk_m).abs() < 0.01,
+    //                 "{},{},{}",
+    //                 lk,
+    //                 lk_m,
+    //                 String::from_utf8_lossy(&template)
+    //             );
+    //         }
+    //     }
+    //     let modif_table = modif_table
+    //         .chunks_exact(NUM_ROW)
+    //         .nth(template.len())
+    //         .unwrap();
+    //     for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
+    //         mod_version.push(base);
+    //         let lk = hmm.update(&mut memory, &mod_version, query, &ops).unwrap();
+    //         assert!((lk - lk_m).abs() < 1.0001);
+    //         mod_version.pop();
+    //     }
+    // }
     #[test]
     fn polish_test() {
         let hmm = PairHiddenMarkovModel::default();

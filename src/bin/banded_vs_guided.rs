@@ -58,7 +58,7 @@ fn run_bench(len: usize, coverage: usize, error_rate: f64, rad: usize, seed: u64
             let (btime, bdist) = {
                 let start = std::time::Instant::now();
                 let consensus =
-                    kiley::bialignment::polish_until_converge_banded(&draft, &seqs, rad);
+                    kiley::bialignment::banded::polish_until_converge(&draft, &seqs, rad);
                 let end = std::time::Instant::now();
                 ((end - start).as_millis(), edit_dist(&template, &consensus))
             };

@@ -6,6 +6,44 @@ pub enum Op {
     Del,
 }
 
+impl Op {
+    /// Convert this operation by flipping the reference and the query.
+    pub fn rev(&self) -> Self {
+        match *self {
+            Op::Del => Op::Ins,
+            Op::Ins => Op::Del,
+            x => x,
+        }
+    }
+}
+
+pub(crate) fn bootstrap_ops(rlen: usize, qlen: usize) -> Vec<Op> {
+    let (mut qpos, mut rpos) = (0, 0);
+    let mut ops = Vec::with_capacity(rlen + qlen);
+    let map_coef = rlen as f64 / qlen as f64;
+    while qpos < qlen && rpos < rlen {
+        let corresp_rpos = (qpos as f64 * map_coef).round() as usize;
+        match corresp_rpos.cmp(&rpos) {
+            std::cmp::Ordering::Less => {
+                qpos += 1;
+                ops.push(Op::Ins);
+            }
+            std::cmp::Ordering::Equal => {
+                qpos += 1;
+                rpos += 1;
+                ops.push(Op::Match);
+            }
+            std::cmp::Ordering::Greater => {
+                rpos += 1;
+                ops.push(Op::Del);
+            }
+        }
+    }
+    ops.extend(std::iter::repeat(Op::Ins).take(qlen - qpos));
+    ops.extend(std::iter::repeat(Op::Del).take(rlen - rpos));
+    ops
+}
+
 impl std::fmt::Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use std::fmt::Write;

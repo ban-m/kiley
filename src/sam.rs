@@ -151,12 +151,13 @@ impl Record {
     pub fn seq(&self) -> &str {
         &self.seq
     }
+    /// Mapped position (1-based!)
     pub fn pos(&self) -> usize {
         self.pos
     }
     /// Return the mapping region with respect to the query(0-based).
     /// If wanted to get the range with respect to reference, use `get_range` instead.
-    pub fn mapped_region(&self) -> (usize, usize) {
+    pub fn query_aligned_region(&self) -> (usize, usize) {
         use self::Op::*; // 0-BASED!!!!!
         let (head_clip, middle, _tail_clip, _) =
             self.cigar().iter().fold((0, 0, 0, true), |acc, x| match x {
@@ -171,7 +172,7 @@ impl Record {
     }
     /// Return the mapping region with respect to the reference(0-based).
     /// If wanted to get the range with respect to the query, use `mapped_region` instead.
-    pub fn get_range(&self) -> (usize, usize) {
+    pub fn refr_aligned_region(&self) -> (usize, usize) {
         // Return the position of the genome(measured in template). 0-BASED!!!!
         let start = self.pos;
         if start == 0 {
@@ -293,84 +294,84 @@ pub fn parse_cigar_string(cigar: &str) -> Vec<Op> {
     ops
 }
 
-/// Reconstruct bam alignmnet and output pritty strings.
-/// The seq1 should be the query, while seq2 is the reference.
-/// The first position where the reference consumed should be `pos`.
-/// The return value consists of three vectors of characters,
-/// first for the query, second for operations, and the third for
-/// reference. As to the user can output digit, the output value is vectors,
-/// instead of `String`s.
-/// Note that the sequences should be 'revcomp'ed if the alignment is revcomp.
-pub fn recover_alignment(
-    iter: &[Op],
-    seq1: &[u8],
-    seq2: &[u8],
-    pos: usize,
-) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-    let empty_string = |len| (0..len).map(|_| " ").collect::<String>();
-    use Op::*;
-    let (mut seq1_with_gap, mut seq2_with_gap, mut operations) = (vec![], vec![], vec![]);
-    let (mut seq1idx, mut seq2idx) = (0, pos - 1);
-    let seq1_header = match iter[0] {
-        SoftClip(l) | HardClip(l) => {
-            seq1idx += l;
-            format!("[head {:05} base]", l)
-        }
-        _ => "[head 00000 base]".to_string(),
-    };
-    let seq2_header = format!("[head {:05} base]", pos);
-    let ops_header = empty_string("[head 00000 base]".len());
-    seq1_with_gap.extend(seq1_header.as_bytes());
-    seq2_with_gap.extend(seq2_header.as_bytes());
-    operations.extend(ops_header.as_bytes());
-    for op in iter {
-        match op {
-            Align(l) => {
-                let l = *l as usize;
-                seq1_with_gap.extend_from_slice(&seq1[seq1idx..(seq1idx + l)]);
-                seq2_with_gap.extend_from_slice(&seq2[seq2idx..(seq2idx + l)]);
-                operations.extend(match_mismatch(
-                    &seq1[seq1idx..(seq1idx + l)],
-                    &seq2[seq2idx..(seq2idx + l)],
-                ));
-                seq1idx += l;
-                seq2idx += l;
-            }
-            Deletion(l) => {
-                let l = *l as usize;
-                seq1_with_gap.extend(vec![b'-'; l]);
-                seq2_with_gap.extend_from_slice(&seq2[seq2idx..(seq2idx + l)]);
-                operations.extend(vec![b' '; l]);
-                seq2idx += l;
-            }
-            Insertion(l) => {
-                let l = *l as usize;
-                seq1_with_gap.extend_from_slice(&seq1[seq1idx..(seq1idx + l)]);
-                seq2_with_gap.extend(vec![b'-'; l]);
-                operations.extend(vec![b' '; l]);
-                seq1idx += l;
-            }
-            _ => {}
-        }
-    }
-    let seq1_footer = match iter.last().unwrap() {
-        SoftClip(l) | HardClip(l) => format!("[tail {:05} bese]", l),
-        _ => "[tail 00000 base]".to_string(),
-    };
-    let seq2_footer = format!("[tail {:05} base]", seq2.len() - seq2idx);
-    let ops_footer = empty_string("[tail 00000 base]".len());
-    seq1_with_gap.extend(seq1_footer.as_bytes());
-    seq2_with_gap.extend(seq2_footer.as_bytes());
-    operations.extend(ops_footer.as_bytes());
-    (seq1_with_gap, operations, seq2_with_gap)
-}
+// /// Reconstruct bam alignmnet and output pretty strings.
+// /// The seq1 should be the query, while seq2 is the reference.
+// /// The first position where the reference consumed should be `pos`.
+// /// The return value consists of three vectors of characters,
+// /// first for the query, second for operations, and the third for
+// /// reference. As to the user can output digit, the output value is vectors,
+// /// instead of `String`s.
+// /// Note that the sequences should be 'revcomp'ed if the alignment is revcomp.
+// pub fn recover_alignment(
+//     iter: &[Op],
+//     seq1: &[u8],
+//     seq2: &[u8],
+//     pos: usize,
+// ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+//     let empty_string = |len| (0..len).map(|_| " ").collect::<String>();
+//     use Op::*;
+//     let (mut seq1_with_gap, mut seq2_with_gap, mut operations) = (vec![], vec![], vec![]);
+//     let (mut seq1idx, mut seq2idx) = (0, pos - 1);
+//     let seq1_header = match iter[0] {
+//         SoftClip(l) | HardClip(l) => {
+//             seq1idx += l;
+//             format!("[head {:05} base]", l)
+//         }
+//         _ => "[head 00000 base]".to_string(),
+//     };
+//     let seq2_header = format!("[head {:05} base]", pos);
+//     let ops_header = empty_string("[head 00000 base]".len());
+//     seq1_with_gap.extend(seq1_header.as_bytes());
+//     seq2_with_gap.extend(seq2_header.as_bytes());
+//     operations.extend(ops_header.as_bytes());
+//     for op in iter {
+//         match op {
+//             Align(l) => {
+//                 let l = *l as usize;
+//                 seq1_with_gap.extend_from_slice(&seq1[seq1idx..(seq1idx + l)]);
+//                 seq2_with_gap.extend_from_slice(&seq2[seq2idx..(seq2idx + l)]);
+//                 operations.extend(match_mismatch(
+//                     &seq1[seq1idx..(seq1idx + l)],
+//                     &seq2[seq2idx..(seq2idx + l)],
+//                 ));
+//                 seq1idx += l;
+//                 seq2idx += l;
+//             }
+//             Deletion(l) => {
+//                 let l = *l as usize;
+//                 seq1_with_gap.extend(vec![b'-'; l]);
+//                 seq2_with_gap.extend_from_slice(&seq2[seq2idx..(seq2idx + l)]);
+//                 operations.extend(vec![b' '; l]);
+//                 seq2idx += l;
+//             }
+//             Insertion(l) => {
+//                 let l = *l as usize;
+//                 seq1_with_gap.extend_from_slice(&seq1[seq1idx..(seq1idx + l)]);
+//                 seq2_with_gap.extend(vec![b'-'; l]);
+//                 operations.extend(vec![b' '; l]);
+//                 seq1idx += l;
+//             }
+//             _ => {}
+//         }
+//     }
+//     let seq1_footer = match iter.last().unwrap() {
+//         SoftClip(l) | HardClip(l) => format!("[tail {:05} bese]", l),
+//         _ => "[tail 00000 base]".to_string(),
+//     };
+//     let seq2_footer = format!("[tail {:05} base]", seq2.len() - seq2idx);
+//     let ops_footer = empty_string("[tail 00000 base]".len());
+//     seq1_with_gap.extend(seq1_footer.as_bytes());
+//     seq2_with_gap.extend(seq2_footer.as_bytes());
+//     operations.extend(ops_footer.as_bytes());
+//     (seq1_with_gap, operations, seq2_with_gap)
+// }
 
-fn match_mismatch(xs: &[u8], ys: &[u8]) -> Vec<u8> {
-    xs.iter()
-        .zip(ys.iter())
-        .map(|(x, y)| if x == y { b'|' } else { b'X' })
-        .collect()
-}
+// fn match_mismatch(xs: &[u8], ys: &[u8]) -> Vec<u8> {
+//     xs.iter()
+//         .zip(ys.iter())
+//         .map(|(x, y)| if x == y { b'|' } else { b'X' })
+//         .collect()
+// }
 
 #[test]
 fn cigar_parse() {

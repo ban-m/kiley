@@ -1,3 +1,4 @@
+// Generic DP table.
 #[derive(Debug, Clone)]
 pub struct DPTable<T> {
     // Total memory
