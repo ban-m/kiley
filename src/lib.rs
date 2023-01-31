@@ -8,6 +8,7 @@ pub mod hmm;
 pub mod op;
 mod padseq;
 mod polishing;
+pub use op::Op;
 use std::collections::HashMap;
 pub mod sam;
 // Samll value.
