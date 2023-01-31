@@ -10,12 +10,14 @@ mod padseq;
 mod polishing;
 use std::collections::HashMap;
 pub mod sam;
+// Samll value.
+const EP: f64 = -10000000000000000000000000000000f64;
 
 /// Configuration struct for polishing a sequence.
 #[derive(Debug, Clone)]
 pub struct PolishConfig {
     radius: usize,
-    hmm: hmm::guided::PairHiddenMarkovModel,
+    hmm: hmm::PairHiddenMarkovModel,
     chunk_size: usize,
     overlap: usize,
     // max_coverage: usize,
@@ -30,7 +32,7 @@ impl PolishConfig {
         overlap: usize,
         //        seed: u64,
     ) -> Self {
-        let hmm = hmm::guided::PairHiddenMarkovModel::default();
+        let hmm = hmm::PairHiddenMarkovModel::default();
         Self {
             radius,
             hmm,
@@ -46,7 +48,7 @@ impl PolishConfig {
         // max_coverage: usize,
         overlap: usize,
         // seed: u64,
-        hmm: hmm::guided::PairHiddenMarkovModel,
+        hmm: hmm::PairHiddenMarkovModel,
     ) -> Self {
         Self {
             radius,
@@ -135,6 +137,16 @@ fn edlib_global(target: &[u8], query: &[u8]) -> Vec<op::Op> {
         Some(aln) => aln.iter().map(|x| EDLIB2KILEY[*x as usize]).collect(),
         None => vec![],
     }
+}
+
+pub fn logsumexp(xs: &[f64]) -> f64 {
+    if xs.is_empty() {
+        return 0.;
+    }
+    let max = xs.iter().max_by(|x, y| x.partial_cmp(y).unwrap()).unwrap();
+    let sum = xs.iter().map(|x| (x - max).exp()).sum::<f64>().ln();
+    assert!(sum >= 0., "{:?}->{}", xs, sum);
+    max + sum
 }
 
 // /// Polish draft sequence by queries.

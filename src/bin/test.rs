@@ -14,7 +14,7 @@ fn main() -> std::io::Result<()> {
         ins: 0.02,
     };
     let draft = gen_seq::introduce_randomness(&seq, &mut rng, &profile);
-    let hmm = kiley::hmm::guided::PairHiddenMarkovModel::default();
+    let hmm = kiley::hmm::PairHiddenMarkovModel::default();
     for _ in 0..200 {
         let len = rng.gen_range(300..500);
         let query = gen_seq::introduce_randomness(&seq[len..], &mut rng, &profile);

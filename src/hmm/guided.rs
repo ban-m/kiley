@@ -1,9 +1,21 @@
 // TODO: This file is too large. Split into several files.
+use super::PairHiddenMarkovModel;
+use super::State;
+use super::BASE_TABLE;
 use crate::bialignment::guided::re_fill_fill_range;
 use crate::dptable::DPTable;
 use crate::op::bootstrap_ops;
 use crate::op::Op;
-use serde::{Deserialize, Serialize};
+fn sum((x, y, z): (f64, f64, f64)) -> f64 {
+    x + y + z
+}
+
+pub const COPY_SIZE: usize = 3;
+pub const DEL_SIZE: usize = 3;
+pub const NUM_ROW: usize = 8 + COPY_SIZE + DEL_SIZE;
+// After introducing mutation, we would take INACTIVE_TIME bases just as-is.
+pub const INACTIVE_TIME: usize = 5;
+
 use std::f64::MIN_POSITIVE;
 
 #[derive(Debug, Clone)]
@@ -24,350 +36,8 @@ impl HMMConfig {
     }
 }
 
-fn sum((x, y, z): (f64, f64, f64)) -> f64 {
-    x + y + z
-}
-
-const fn base_table() -> [usize; 256] {
-    let mut slots = [0; 256];
-    slots[b'A' as usize] = 0;
-    slots[b'C' as usize] = 1;
-    slots[b'G' as usize] = 2;
-    slots[b'T' as usize] = 3;
-    slots[b'a' as usize] = 0;
-    slots[b'c' as usize] = 1;
-    slots[b'g' as usize] = 2;
-    slots[b't' as usize] = 3;
-    slots
-}
-const BASE_TABLE: [usize; 256] = base_table();
-
-pub const COPY_SIZE: usize = 3;
-pub const DEL_SIZE: usize = 3;
-pub const NUM_ROW: usize = 8 + COPY_SIZE + DEL_SIZE;
-// After introducing mutation, we would take INACTIVE_TIME bases just as-is.
-pub const INACTIVE_TIME: usize = 5;
-
-/// HMM. As a rule of thumb, we do not take logarithm of each field; Scaling would be
-/// better both in performance and computational stability.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PairHiddenMarkovModel {
-    /// Prob from mat.
-    /// Pr{Mat->Mat},
-    pub mat_mat: f64,
-    /// Pr{Mat->Ins}
-    pub mat_ins: f64,
-    /// Pr{Mat->Del}
-    pub mat_del: f64,
-    /// Pr{Ins->Mat}
-    pub ins_mat: f64,
-    /// Pr{Ins->Ins}
-    pub ins_ins: f64,
-    /// Pr{Ins->Del}
-    pub ins_del: f64,
-    /// Pr{Del->Mat}.
-    pub del_mat: f64,
-    /// Pr{Del -> Ins},
-    pub del_ins: f64,
-    /// Pr{Del->Del}
-    pub del_del: f64,
-    /// 4 * ref_base + query_base = Pr{Query|Ref}
-    pub mat_emit: [f64; 16],
-    /// 4 * prev_base + query_base = Pr{Query|Previous Query}.
-    /// The last four slot is the initial emittion, 1/4.
-    pub ins_emit: [f64; 20],
-}
-
-impl crate::gen_seq::Generate for PairHiddenMarkovModel {
-    fn gen<R: rand::Rng>(&self, seq: &[u8], rng: &mut R) -> Vec<u8> {
-        use rand::seq::SliceRandom;
-        let states = [Op::Match, Op::Del, Op::Ins];
-        let mut current = Op::Match;
-        let mut gen = vec![];
-        let mut seq = seq.iter().peekable();
-        while seq.peek().is_some() {
-            current = *states
-                .choose_weighted(rng, |to| self.weight(current, *to))
-                .unwrap();
-            match current {
-                Op::Match => {
-                    let base = BASE_TABLE[*seq.next().unwrap() as usize];
-                    let distr = &self.mat_emit[4 * base..4 * base + 4];
-                    let pos = *[0, 1, 2, 3].choose_weighted(rng, |&i| distr[i]).unwrap();
-                    gen.push(b"ACGT"[pos]);
-                }
-                Op::Ins => {
-                    assert!(seq.next().is_some());
-                    let prev = gen.last().map(|b| BASE_TABLE[*b as usize]).unwrap_or(4);
-                    let distr = &self.ins_emit[4 * prev..4 * prev + 4];
-                    let pos = *[0, 1, 2, 3].choose_weighted(rng, |&i| distr[i]).unwrap();
-                    gen.push(b"ACGT"[pos]);
-                }
-                Op::Del => assert!(seq.next().is_some()),
-                _ => panic!(),
-            }
-        }
-        gen
-    }
-}
-
-impl std::fmt::Display for PairHiddenMarkovModel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(
-            f,
-            "MAT:{:.3}\t{:.3}\t{:.3}",
-            self.mat_mat, self.mat_ins, self.mat_del
-        )?;
-        writeln!(
-            f,
-            "INS:{:.3}\t{:.3}\t{:.3}",
-            self.ins_mat, self.ins_ins, self.ins_del
-        )?;
-        writeln!(
-            f,
-            "DEL:{:.3}\t{:.3}\t{:.3}",
-            self.del_mat, self.del_ins, self.del_del
-        )?;
-        for obs in self.mat_emit.chunks_exact(4) {
-            let [a, c, g, t] = [obs[0], obs[1], obs[2], obs[3]];
-            writeln!(f, "Obs:{a:.3}\t{c:.3}\t{g:.3}\t{t:.3}")?;
-        }
-        for (i, obs) in self.ins_emit.chunks_exact(4).enumerate() {
-            let [a, c, g, t] = [obs[0], obs[1], obs[2], obs[3]];
-            write!(f, "Ins:{a:.3}\t{c:.3}\t{g:.3}\t{t:.3}")?;
-            if i < 4 {
-                writeln!(f)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum State {
-    Match,
-    Del,
-    Ins,
-}
-
-impl std::default::Default for PairHiddenMarkovModel {
-    fn default() -> Self {
-        let mat = (0.96, 0.02, 0.02);
-        let ins = (0.85, 0.10, 0.05);
-        let del = (0.85, 0.10, 0.05);
-        let mat_emits = vec![
-            vec![0.97, 0.01, 0.01, 0.01],
-            vec![0.01, 0.97, 0.01, 0.01],
-            vec![0.01, 0.01, 0.97, 0.01],
-            vec![0.01, 0.01, 0.01, 0.97],
-        ]
-        .concat();
-        let ins_emits = vec![vec![0.25; 4]; 5].concat();
-        Self::new(mat, ins, del, &mat_emits, &ins_emits)
-    }
-}
-
-impl PairHiddenMarkovModel {
-    fn weight(&self, from: Op, to: Op) -> f64 {
-        match (from, to) {
-            (Op::Match, Op::Match) => self.mat_mat,
-            (Op::Match, Op::Ins) => self.mat_ins,
-            (Op::Match, Op::Del) => self.mat_del,
-            (Op::Ins, Op::Match) => self.ins_mat,
-            (Op::Ins, Op::Ins) => self.ins_ins,
-            (Op::Ins, Op::Del) => self.ins_del,
-            (Op::Del, Op::Match) => self.del_mat,
-            (Op::Del, Op::Ins) => self.del_ins,
-            (Op::Del, Op::Del) => self.del_del,
-            _ => panic!(),
-        }
-    }
-    pub fn new(
-        (mat_mat, mat_ins, mat_del): (f64, f64, f64),
-        (ins_mat, ins_ins, ins_del): (f64, f64, f64),
-        (del_mat, del_ins, del_del): (f64, f64, f64),
-        mat_emit: &[f64],
-        ins_emit: &[f64],
-    ) -> Self {
-        assert_eq!(mat_emit.len(), 16);
-        assert_eq!(ins_emit.len(), 20);
-        assert!(0f64 <= mat_mat && 0f64 <= mat_ins && 0f64 <= mat_del);
-        assert!(0f64 <= ins_mat && 0f64 <= ins_ins && 0f64 <= ins_del);
-        assert!(0f64 <= del_mat && 0f64 <= del_ins && 0f64 <= del_del);
-        assert!(mat_emit.iter().all(|&x| 0f64 <= x));
-        let mat = mat_mat + mat_ins + mat_del;
-        let ins = ins_mat + ins_ins + ins_del;
-        let del = del_mat + del_ins + del_del;
-        let mut mat_emit_norm = [0f64; 16];
-        for (from, to) in mat_emit
-            .chunks_exact(4)
-            .zip(mat_emit_norm.chunks_exact_mut(4))
-        {
-            let sum: f64 = from.iter().sum();
-            to.iter_mut().zip(from).for_each(|(x, y)| *x = *y / sum);
-        }
-        let mut ins_emit_norm = [0f64; 20];
-        for (from, to) in ins_emit
-            .chunks_exact(4)
-            .zip(ins_emit_norm.chunks_exact_mut(4))
-        {
-            let sum: f64 = from.iter().sum();
-            to.iter_mut().zip(from).for_each(|(x, y)| *x = *y / sum);
-        }
-        Self {
-            mat_mat: mat_mat / mat,
-            mat_ins: mat_ins / mat,
-            mat_del: mat_del / mat,
-            ins_mat: ins_mat / ins,
-            ins_ins: ins_ins / ins,
-            ins_del: ins_del / ins,
-            del_mat: del_mat / del,
-            del_ins: del_ins / del,
-            del_del: del_del / del,
-            mat_emit: mat_emit_norm,
-            ins_emit: ins_emit_norm,
-        }
-    }
-    fn uniform(unif: f64) -> Self {
-        Self {
-            mat_mat: unif,
-            mat_ins: unif,
-            mat_del: unif,
-            ins_mat: unif,
-            ins_ins: unif,
-            ins_del: unif,
-            del_mat: unif,
-            del_ins: unif,
-            del_del: unif,
-            mat_emit: [unif; 16],
-            ins_emit: [unif; 20],
-        }
-    }
-    fn zeros() -> Self {
-        Self {
-            mat_mat: 0f64,
-            mat_ins: 0f64,
-            mat_del: 0f64,
-            ins_mat: 0f64,
-            ins_ins: 0f64,
-            ins_del: 0f64,
-            del_mat: 0f64,
-            del_ins: 0f64,
-            del_del: 0f64,
-            mat_emit: [0f64; 16],
-            ins_emit: [0f64; 20],
-        }
-    }
-    fn obs(&self, r: u8, q: u8) -> f64 {
-        let index = (BASE_TABLE[r as usize] << 2) | BASE_TABLE[q as usize];
-        self.mat_emit[index as usize]
-    }
-    fn del(&self, _r: u8) -> f64 {
-        1f64
-    }
-    fn ins(&self, q: u8, prev: Option<u8>) -> f64 {
-        let prev = prev.unwrap_or(4);
-        let index = (BASE_TABLE[prev as usize] << 2) | BASE_TABLE[q as usize];
-        self.ins_emit[index as usize]
-        //        0.25f64
-    }
-
-    fn to_mat(&self, (mat, ins, del): (f64, f64, f64)) -> f64 {
-        mat * self.mat_mat + ins * self.ins_mat + del * self.del_mat
-    }
-    fn to_ins(&self, (mat, ins, del): (f64, f64, f64)) -> f64 {
-        mat * self.mat_ins + ins * self.ins_ins + del * self.del_ins
-    }
-    fn to_del(&self, (mat, ins, del): (f64, f64, f64)) -> f64 {
-        mat * self.mat_del + ins * self.ins_del + del * self.del_del
-    }
-    pub fn eval(&self, rs: &[u8], qs: &[u8], ops: &[Op]) -> f64 {
-        use Op::*;
-        let mut lk = 1f64;
-        let mut current = Match;
-        let (mut qpos, mut rpos) = (0, 0);
-        let ops = ops.iter().map(|&op| match op {
-            Mismatch => Match,
-            x => x,
-        });
-        for op in ops {
-            lk *= match (current, op) {
-                (Match, Match) => self.mat_mat,
-                (Match, Ins) => self.mat_ins,
-                (Match, Del) => self.mat_del,
-                (Ins, Match) => self.ins_mat,
-                (Ins, Ins) => self.ins_ins,
-                (Ins, Del) => self.ins_del,
-                (Del, Match) => self.del_mat,
-                (Del, Ins) => self.del_ins,
-                (Del, Del) => self.del_del,
-                _ => panic!(),
-            };
-            match op {
-                Match => {
-                    lk *= self.obs(qs[qpos], rs[rpos]);
-                    qpos += 1;
-                    rpos += 1;
-                }
-                Ins => {
-                    let prev = (qpos != 0).then(|| qs[qpos - 1]);
-                    lk *= self.ins(qs[qpos], prev);
-                    qpos += 1;
-                }
-                Del => {
-                    lk *= self.del(rs[rpos]);
-                    rpos += 1;
-                }
-                _ => panic!(),
-            };
-            current = op;
-        }
-        lk.ln()
-    }
-    pub fn eval_ln(&self, rs: &[u8], qs: &[u8], ops: &[Op]) -> f64 {
-        use Op::*;
-        let mut lk = 0f64;
-        let mut current = Match;
-        let (mut qpos, mut rpos) = (0, 0);
-        let ops = ops.iter().map(|&op| match op {
-            Mismatch => Match,
-            x => x,
-        });
-        for op in ops {
-            lk += match (current, op) {
-                (Match, Match) => self.mat_mat.ln(),
-                (Match, Ins) => self.mat_ins.ln(),
-                (Match, Del) => self.mat_del.ln(),
-                (Ins, Match) => self.ins_mat.ln(),
-                (Ins, Ins) => self.ins_ins.ln(),
-                (Ins, Del) => self.ins_del.ln(),
-                (Del, Match) => self.del_mat.ln(),
-                (Del, Ins) => self.del_ins.ln(),
-                (Del, Del) => self.del_del.ln(),
-                _ => panic!(),
-            };
-            match op {
-                Match => {
-                    lk += self.obs(qs[qpos], rs[rpos]).ln();
-                    qpos += 1;
-                    rpos += 1;
-                }
-                Ins => {
-                    let prev = (qpos != 0).then(|| qs[qpos - 1]);
-                    lk += self.ins(qs[qpos], prev).ln();
-                    qpos += 1;
-                }
-                Del => {
-                    lk += self.del(rs[rpos]).ln();
-                    rpos += 1;
-                }
-                _ => panic!(),
-            };
-            current = op;
-        }
-        lk
-    }
-    pub fn align(&self, rs: &[u8], qs: &[u8], radius: usize) -> (f64, Vec<Op>) {
+impl super::PairHiddenMarkovModel {
+    pub fn align_guided(&self, rs: &[u8], qs: &[u8], radius: usize) -> (f64, Vec<Op>) {
         let mut ops = bootstrap_ops(rs.len(), qs.len());
         let mut memory = Memory::with_capacity(rs.len(), radius);
         let lk = self.update_aln_path(&mut memory, rs, qs, &mut ops);
@@ -878,7 +548,7 @@ impl PairHiddenMarkovModel {
         self.fill_post_dp(memory, rs, qs);
         memory.post.get(0, 0).0.ln() + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>()
     }
-    pub fn likelihood(&self, rs: &[u8], qs: &[u8], radius: usize) -> f64 {
+    pub fn likelihood_bootstrap(&self, rs: &[u8], qs: &[u8], radius: usize) -> f64 {
         let ops = bootstrap_ops(rs.len(), qs.len());
         self.likelihood_guided(rs, qs, &ops, radius)
     }
@@ -1081,7 +751,7 @@ impl PairHiddenMarkovModel {
     ) {
         let ops: Vec<_> = xss
             .iter()
-            .map(|xs| self.align(template, xs.borrow(), radius).1)
+            .map(|xs| self.align_guided(template, xs.borrow(), radius).1)
             .collect();
         self.fit_by_alignment_with(template, xss, &ops);
     }
@@ -1115,12 +785,12 @@ impl PairHiddenMarkovModel {
             let qbase = BASE_TABLE[xs[qpos] as usize];
             match state {
                 0 => {
-                    mat_emit[rbase | qbase] += 1f64;
+                    mat_emit[(rbase | qbase) as usize] += 1f64;
                     rpos += 1;
                     qpos += 1;
                 }
                 1 => {
-                    ins_emit[rbase | qbase] += 1f64;
+                    ins_emit[(rbase | qbase) as usize] += 1f64;
                     qpos += 1;
                 }
                 _ => {
@@ -1135,14 +805,14 @@ impl PairHiddenMarkovModel {
                     0 => {
                         let rbase = BASE_TABLE[template[rpos] as usize] << 2;
                         let qbase = BASE_TABLE[xs[qpos] as usize];
-                        mat_emit[rbase | qbase] += 1f64;
+                        mat_emit[(rbase | qbase) as usize] += 1f64;
                         rpos += 1;
                         qpos += 1;
                     }
                     1 => {
                         let rbase = BASE_TABLE[template[rpos] as usize] << 2;
                         let qbase = BASE_TABLE[xs[qpos] as usize];
-                        ins_emit[rbase | qbase] += 1f64;
+                        ins_emit[(rbase | qbase) as usize] += 1f64;
                         qpos += 1;
                     }
                     _ => {
@@ -1152,7 +822,7 @@ impl PairHiddenMarkovModel {
             }
         }
         for &base in template.iter() {
-            ins_emit[16 + BASE_TABLE[base as usize]] += 1.0;
+            ins_emit[16 + BASE_TABLE[base as usize] as usize] += 1.0;
         }
         for state in ins_emit.chunks_exact_mut(4) {
             let sum: f64 = state.iter().sum();
@@ -1369,7 +1039,9 @@ impl PairHiddenMarkovModel {
                 let (before, _, _) = mem.pre.get(i, j);
                 let (after, _, _) = mem.post.get(i, j);
                 let lk = (before * after).max(std::f64::MIN_POSITIVE).ln() + scale;
-                mat_probs[BASE_TABLE[r as usize]][BASE_TABLE[q as usize]].push(lk);
+                let refr = BASE_TABLE[r as usize] as usize;
+                let query = BASE_TABLE[q as usize] as usize;
+                mat_probs[refr][query].push(lk);
             }
         }
         for (r, lks) in mat_probs.iter().enumerate() {
@@ -1395,7 +1067,9 @@ impl PairHiddenMarkovModel {
                 let (_, before, _) = mem.pre.get(i, j);
                 let (_, after, _) = mem.post.get(i, j - 1);
                 let lk = (before * after).max(std::f64::MIN_POSITIVE).ln() + scale;
-                ins_probs[BASE_TABLE[prev as usize]][BASE_TABLE[q as usize]].push(lk);
+                let prev = BASE_TABLE[prev as usize] as usize;
+                let output = BASE_TABLE[q as usize] as usize;
+                ins_probs[prev][output].push(lk);
             }
         }
         for (prev, lks) in ins_probs.iter().enumerate() {
@@ -1683,52 +1357,9 @@ fn polish_guided(
     changed_positions
 }
 
-/// Guided version of the pair HMM on the forward and reverse strands.
-#[derive(Debug, Clone)]
-pub struct PairHiddenMarkovModelOnStrands {
-    forward: PairHiddenMarkovModel,
-    reverse: PairHiddenMarkovModel,
-}
-
-#[derive(Debug, Clone)]
-pub struct TrainingDataPack<'a, T, O>
-where
-    T: std::borrow::Borrow<[u8]> + Sync + Send,
-    O: std::borrow::Borrow<[Op]> + Sync + Send,
-{
-    consensus: &'a [u8],
-    directions: &'a [bool],
-    sequences: &'a [T],
-    operations: &'a [O],
-}
-
-impl<'a, T, O> TrainingDataPack<'a, T, O>
-where
-    T: std::borrow::Borrow<[u8]> + Sync + Send,
-    O: std::borrow::Borrow<[Op]> + Sync + Send,
-{
-    pub fn new(
-        consensus: &'a [u8],
-        directions: &'a [bool],
-        sequences: &'a [T],
-        operations: &'a [O],
-    ) -> Self {
-        Self {
-            consensus,
-            directions,
-            sequences,
-            operations,
-        }
-    }
-}
-
-impl PairHiddenMarkovModelOnStrands {
-    pub fn forward(&self) -> &PairHiddenMarkovModel {
-        &self.forward
-    }
-    pub fn reverse(&self) -> &PairHiddenMarkovModel {
-        &self.reverse
-    }
+use super::PairHiddenMarkovModelOnStrands;
+use super::TrainingDataPack;
+impl super::PairHiddenMarkovModelOnStrands {
     fn baum_welch<'a, T, O>(
         &self,
         datapack: &TrainingDataPack<'a, T, O>,
@@ -1800,9 +1431,6 @@ impl PairHiddenMarkovModelOnStrands {
         fnext.normalize();
         rnext.normalize();
         *self = PairHiddenMarkovModelOnStrands::new(fnext, rnext);
-    }
-    pub fn new(forward: PairHiddenMarkovModel, reverse: PairHiddenMarkovModel) -> Self {
-        Self { forward, reverse }
     }
     /// With bootstrap operations and taking numbers.
     /// The returned operations would be consistent with the returned sequence.
@@ -1937,16 +1565,16 @@ pub mod tests {
     #[test]
     fn align() {
         let model = PairHiddenMarkovModel::default();
-        let (lk, ops) = model.align(b"ACCG", b"ACCG", 5);
+        let (lk, ops) = model.align_guided(b"ACCG", b"ACCG", 5);
         eprintln!("{:?}\t{:.3}", ops, lk);
         assert_eq!(ops, vec![Op::Match; 4]);
-        let (lk, ops) = model.align(b"ACCG", b"", 2);
+        let (lk, ops) = model.align_guided(b"ACCG", b"", 2);
         eprintln!("{:?}\t{:.3}", ops, lk);
         assert_eq!(ops, vec![Op::Del; 4]);
-        let (lk, ops) = model.align(b"", b"ACCG", 2);
+        let (lk, ops) = model.align_guided(b"", b"ACCG", 2);
         assert_eq!(ops, vec![Op::Ins; 4]);
         eprintln!("{:?}\t{:.3}", ops, lk);
-        let (lk, ops) = model.align(b"ATGCCGCACAGTCGAT", b"ATCCGC", 5);
+        let (lk, ops) = model.align_guided(b"ATGCCGCACAGTCGAT", b"ATCCGC", 5);
         eprintln!("{:?}\t{:.3}", ops, lk);
         use Op::*;
         let answer = vec![vec![Match; 2], vec![Del], vec![Match; 4], vec![Del; 9]].concat();
@@ -1957,7 +1585,7 @@ pub mod tests {
         let hmm = PairHiddenMarkovModel::default();
         let radius = 50;
         let seq = gen_seq::introduce_randomness(&template, &mut rng, &profile);
-        hmm.align(&template, &seq, radius);
+        hmm.align_guided(&template, &seq, radius);
     }
     #[test]
     fn likelihood() {
@@ -1966,18 +1594,18 @@ pub mod tests {
         let profile = gen_seq::PROFILE;
         let hmm = PairHiddenMarkovModel::default();
         let radius = 50;
-        let same_lk = hmm.likelihood(&template, &template, radius);
-        let (lk, _) = hmm.align(&template, &template, radius);
+        let same_lk = hmm.likelihood_bootstrap(&template, &template, radius);
+        let (lk, _) = hmm.align_guided(&template, &template, radius);
         let expect = (template.len() as f64 - 1f64) * hmm.mat_mat.ln()
             + (template.len() as f64) * hmm.mat_emit[0].ln();
         assert!(lk < same_lk);
         assert!(expect < same_lk, "{},{}", expect, same_lk);
         for i in 0..10 {
             let seq = gen_seq::introduce_randomness(&template, &mut rng, &profile);
-            let lk = hmm.likelihood(&template, &seq, radius);
+            let lk = hmm.likelihood_bootstrap(&template, &seq, radius);
             assert!(lk < same_lk, "{},{},{}", i, same_lk, lk);
             let seq2 = gen_seq::introduce_randomness(&seq, &mut rng, &profile);
-            let lk2 = hmm.likelihood(&template, &seq2, radius);
+            let lk2 = hmm.likelihood_bootstrap(&template, &seq2, radius);
             assert!(lk2 < lk, "{},{},{}", i, lk2, lk);
         }
     }
@@ -2007,7 +1635,7 @@ pub mod tests {
         let lk_e = logsumexp(&lks);
         eprintln!("{:?},{}", lks, lk_e);
         let radius = 5;
-        let lk = hmm.likelihood(seq1, seq2, radius);
+        let lk = hmm.likelihood_bootstrap(seq1, seq2, radius);
         assert!((lk_e - lk).abs() < 0.001, "{},{}", lk_e, lk);
     }
     #[test]

@@ -5,6 +5,7 @@ pub(crate) const GUANINE: u8 = 0b10;
 pub(crate) const THYMINE: u8 = 0b11;
 pub(crate) const GAP: u8 = 0b100;
 pub(crate) const NULL: u8 = 0b101;
+
 const fn lookup_table() -> [u8; 256] {
     let mut slots = [NULL; 256];
     slots[b'A' as usize] = ADENINE;
@@ -48,15 +49,6 @@ impl PadSeq {
         xs.reverse();
         PadSeq(xs)
     }
-    // /// Create from 2-bit encoded sequence.
-    // pub fn from_raw_parts(mut xs: Vec<u8>) -> Self {
-    //     assert!(xs.iter().all(|&x| x < 6));
-    //     xs.extend(std::iter::repeat(NULL).take(Self::OFFSET));
-    //     xs.reverse();
-    //     xs.extend(std::iter::repeat(NULL).take(Self::OFFSET));
-    //     xs.reverse();
-    //     PadSeq(xs)
-    // }
     pub fn get(&self, index: isize) -> Option<&u8> {
         self.0.get((index + Self::OFFSET as isize) as usize)
     }
