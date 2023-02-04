@@ -1,3 +1,4 @@
+/// Alignment operations (Match, Mismatch, Ins, Del).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
     Mismatch,
@@ -57,7 +58,7 @@ impl std::fmt::Display for Op {
     }
 }
 
-/// xs is the reference, ys is the query.
+/// Recorver the three-way alignments. `xs` is the reference, `ys` is the query.
 pub fn recover(xs: &[u8], ys: &[u8], ops: &[Op]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let (mut i, mut j) = (0, 0);
     let (mut xr, mut yr, mut aln) = (vec![], vec![], vec![]);
@@ -93,7 +94,7 @@ pub fn recover(xs: &[u8], ys: &[u8], ops: &[Op]) -> (Vec<u8>, Vec<u8>, Vec<u8>) 
 
 /// Edit operation (Used in polishing phase)
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
-pub enum Edit {
+pub(crate) enum Edit {
     Subst,
     // Insertion before a specified position.
     Insertion,
@@ -103,8 +104,12 @@ pub enum Edit {
 
 /// Fix(or "lift-over") the edit operation `ops` so that the modified operation would be compatible
 /// with the reference after all the `updated_position` editation applied.
-pub fn fix_alignment_path<T>(ops: &mut Vec<Op>, updated_position: T, qlen: usize, rlen: usize)
-where
+pub(crate) fn fix_alignment_path<T>(
+    ops: &mut Vec<Op>,
+    updated_position: T,
+    qlen: usize,
+    rlen: usize,
+) where
     T: std::iter::Iterator<Item = (usize, Edit)>,
 {
     let mut new_ops = Vec::with_capacity(ops.len());

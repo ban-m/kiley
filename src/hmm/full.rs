@@ -1,7 +1,10 @@
+use super::guided::COPY_SIZE;
+use super::guided::DEL_SIZE;
+use super::guided::NUM_ROW;
 use super::DPTable;
-use super::LikelihoodSummary;
 use super::PairHiddenMarkovModel;
 use super::State;
+use crate::logsumexp;
 use crate::op::Op;
 use crate::EP;
 impl PairHiddenMarkovModel {
@@ -11,18 +14,16 @@ impl PairHiddenMarkovModel {
     /// Roughly speaking, it is the value after log-sum-exp-ing all the alignment score.
     /// In HMM term, it is "forward" algorithm.
     /// If you want to get the raw DP table, please call `forward` functionality instead.
-    pub fn likelihood(&self, xs: &[u8], ys: &[u8]) -> (Vec<f64>, f64) {
-        let dptable = self.forward(xs, ys);
-        let lk = dptable.get_total_lk(xs.len(), ys.len());
-        let lks = dptable.lks_in_row();
-        (lks, lk)
+    pub fn likelihood(&self, reference: &[u8], query: &[u8]) -> f64 {
+        let dptable = self.forward(reference, query);
+        let lk = dptable.get_total_lk(query.len(), reference.len());
+        lk
     }
     /// Forward algorithm. Return the raw DP table.
-    pub(crate) fn forward(&self, xs: &[u8], ys: &[u8]) -> DPTable {
-        let xs: Vec<_> = xs.iter().map(crate::padseq::convert_to_twobit).collect();
-        let ys: Vec<_> = ys.iter().map(crate::padseq::convert_to_twobit).collect();
+    pub(crate) fn forward(&self, reference: &[u8], query: &[u8]) -> DPTable {
+        let xs = query;
+        let ys = reference;
         let mut dptable = DPTable::new(xs.len() + 1, ys.len() + 1);
-        let log_del_emit: Vec<_> = self.ins_emit.iter().map(Self::log).collect();
         let log_ins_emit: Vec<_> = self.ins_emit.iter().map(Self::log).collect();
         let log_mat_emit: Vec<_> = self.mat_emit.iter().map(Self::log).collect();
         let (log_del_open, log_ins_open) = (self.mat_del.ln(), self.mat_ins.ln());
@@ -30,59 +31,61 @@ impl PairHiddenMarkovModel {
         let (log_del_from_ins, log_ins_from_del) = (self.ins_del.ln(), self.del_ins.ln());
         let (log_mat_from_del, log_mat_from_ins) = (self.del_mat.ln(), self.ins_mat.ln());
         let log_mat_ext = self.mat_mat.ln();
-        let mut del_accum = 0f64;
-        for (i, &x) in xs.iter().enumerate().map(|(pos, x)| (pos + 1, x)) {
-            *dptable.get_mut(i, 0, State::Match) = EP;
-            del_accum += log_del_emit[x as usize];
-            *dptable.get_mut(i, 0, State::Del) =
-                log_del_open + log_del_ext * (i - 1) as f64 + del_accum;
-            *dptable.get_mut(i, 0, State::Ins) = EP;
+        use super::BASE_TABLE;
+        {
+            let mut ins_accum = 0f64;
+            for (i, &x) in xs.iter().enumerate().map(|(pos, x)| (pos + 1, x)) {
+                let x = BASE_TABLE[x as usize];
+                *dptable.get_mut(i, 0, State::Match) = EP;
+                ins_accum += log_ins_emit[x];
+                *dptable.get_mut(i, 0, State::Ins) =
+                    log_ins_open + log_ins_ext * (i - 1) as f64 + ins_accum;
+                *dptable.get_mut(i, 0, State::Del) = EP;
+            }
         }
-        let mut ins_accum = 0f64;
-        for (j, &y) in ys.iter().enumerate().map(|(pos, y)| (pos + 1, y)) {
-            *dptable.get_mut(0, j, State::Match) = EP;
-            *dptable.get_mut(0, j, State::Del) = EP;
-            ins_accum += log_ins_emit[y as usize];
-            *dptable.get_mut(0, j, State::Ins) =
-                log_ins_open + log_ins_ext * (j - 1) as f64 + ins_accum;
+        {
+            for (j, _) in ys.iter().enumerate().map(|(pos, y)| (pos + 1, y)) {
+                *dptable.get_mut(0, j, State::Match) = EP;
+                *dptable.get_mut(0, j, State::Del) = log_del_open + log_del_ext * (j - 1) as f64;
+                *dptable.get_mut(0, j, State::Ins) = EP;
+            }
         }
         *dptable.get_mut(0, 0, State::Ins) = EP;
         *dptable.get_mut(0, 0, State::Del) = EP;
         for (i, &x) in xs.iter().enumerate().map(|(p, x)| (p + 1, x)) {
             for (j, &y) in ys.iter().enumerate().map(|(p, y)| (p + 1, y)) {
+                let x = BASE_TABLE[x as usize];
+                let y = BASE_TABLE[y as usize];
                 let mat = Self::logsumexp(
                     dptable.get(i - 1, j - 1, State::Match) + log_mat_ext,
                     dptable.get(i - 1, j - 1, State::Del) + log_mat_from_del,
                     dptable.get(i - 1, j - 1, State::Ins) + log_mat_from_ins,
-                ) + log_mat_emit[((x << 2) | y) as usize];
+                ) + log_mat_emit[(x << 2) | y];
                 *dptable.get_mut(i, j, State::Match) = mat;
                 let del = Self::logsumexp(
-                    dptable.get(i - 1, j, State::Match) + log_del_open,
-                    dptable.get(i - 1, j, State::Del) + log_del_ext,
-                    dptable.get(i - 1, j, State::Ins) + log_del_from_ins,
-                ) + log_del_emit[x as usize];
+                    dptable.get(i, j - 1, State::Match) + log_del_open,
+                    dptable.get(i, j - 1, State::Del) + log_del_ext,
+                    dptable.get(i, j - 1, State::Ins) + log_del_from_ins,
+                );
                 *dptable.get_mut(i, j, State::Del) = del;
                 let ins = Self::logsumexp(
-                    dptable.get(i, j - 1, State::Match) + log_ins_open,
-                    dptable.get(i, j - 1, State::Del) + log_ins_from_del,
-                    dptable.get(i, j - 1, State::Ins) + log_ins_ext,
-                ) + log_ins_emit[y as usize];
+                    dptable.get(i - 1, j, State::Match) + log_ins_open,
+                    dptable.get(i - 1, j, State::Del) + log_ins_from_del,
+                    dptable.get(i - 1, j, State::Ins) + log_ins_ext,
+                ) + log_ins_emit[x as usize];
                 *dptable.get_mut(i, j, State::Ins) = ins;
             }
         }
         dptable
     }
-
-    /// Naive implementation of backward algorithm.
-    pub fn backward(&self, xs: &[u8], ys: &[u8]) -> DPTable {
-        let xs: Vec<_> = xs.iter().map(crate::padseq::convert_to_twobit).collect();
-        let ys: Vec<_> = ys.iter().map(crate::padseq::convert_to_twobit).collect();
+    // Naive implementation of backward algorithm.
+    pub(crate) fn backward(&self, reference: &[u8], query: &[u8]) -> DPTable {
+        let ys = reference;
+        let xs = query;
         let mut dptable = DPTable::new(xs.len() + 1, ys.len() + 1);
         *dptable.get_mut(xs.len(), ys.len(), State::Match) = 0f64;
         *dptable.get_mut(xs.len(), ys.len(), State::Del) = 0f64;
         *dptable.get_mut(xs.len(), ys.len(), State::Ins) = 0f64;
-        let mut gap = 0f64;
-        let log_del_emit: Vec<_> = self.ins_emit.iter().map(Self::log).collect();
         let log_ins_emit: Vec<_> = self.ins_emit.iter().map(Self::log).collect();
         let log_mat_emit: Vec<_> = self.mat_emit.iter().map(Self::log).collect();
         let (log_del_open, log_ins_open) = (self.mat_del.ln(), self.mat_ins.ln());
@@ -90,33 +93,39 @@ impl PairHiddenMarkovModel {
         let (log_del_from_ins, log_ins_from_del) = (self.ins_del.ln(), self.del_ins.ln());
         let (log_mat_from_del, log_mat_from_ins) = (self.del_mat.ln(), self.ins_mat.ln());
         let log_mat_ext = self.mat_mat.ln();
-        for (i, &x) in xs.iter().enumerate().rev() {
-            gap += log_del_emit[x as usize];
-            *dptable.get_mut(i, ys.len(), State::Del) = log_del_ext * (xs.len() - i) as f64 + gap;
-            *dptable.get_mut(i, ys.len(), State::Ins) =
-                log_del_from_ins + log_del_ext * (xs.len() - i - 1) as f64 + gap;
-            *dptable.get_mut(i, ys.len(), State::Match) =
-                log_del_open + log_del_ext * (xs.len() - i - 1) as f64 + gap;
+        use super::BASE_TABLE;
+        {
+            let mut gap = 0f64;
+            for (i, &x) in xs.iter().enumerate().rev() {
+                let x = BASE_TABLE[x as usize];
+                gap += log_ins_emit[x];
+                *dptable.get_mut(i, ys.len(), State::Ins) =
+                    log_ins_ext * (xs.len() - i) as f64 + gap;
+                *dptable.get_mut(i, ys.len(), State::Del) =
+                    log_ins_from_del + log_ins_ext * (xs.len() - i - 1) as f64 + gap;
+                *dptable.get_mut(i, ys.len(), State::Match) =
+                    log_ins_open + log_ins_ext * (xs.len() - i - 1) as f64 + gap;
+            }
         }
-        gap = 0f64;
-        for (j, &y) in ys.iter().enumerate().rev() {
-            gap += log_ins_emit[y as usize];
-            *dptable.get_mut(xs.len(), j, State::Ins) = log_ins_ext * (ys.len() - j) as f64 + gap;
-            *dptable.get_mut(xs.len(), j, State::Del) =
-                log_ins_from_del + log_ins_ext * (ys.len() - j - 1) as f64 + gap;
-            *dptable.get_mut(xs.len(), j, State::Match) =
-                log_ins_open + log_ins_ext * (ys.len() - j - 1) as f64 + gap;
+        {
+            for (j, _) in ys.iter().enumerate().rev() {
+                *dptable.get_mut(xs.len(), j, State::Del) = log_del_ext * (ys.len() - j) as f64;
+                *dptable.get_mut(xs.len(), j, State::Ins) =
+                    log_del_from_ins + log_del_ext * (ys.len() - j - 1) as f64;
+                *dptable.get_mut(xs.len(), j, State::Match) =
+                    log_del_open + log_del_ext * (ys.len() - j - 1) as f64;
+            }
         }
         for (i, &x) in xs.iter().enumerate().rev() {
             for (j, &y) in ys.iter().enumerate().rev() {
                 // Match state;
+                let x = BASE_TABLE[x as usize];
+                let y = BASE_TABLE[y as usize];
                 let mat = log_mat_ext
-                    + log_mat_emit[(x << 2 | y) as usize]
+                    + log_mat_emit[(x << 2) | y]
                     + dptable.get(i + 1, j + 1, State::Match);
-                let del =
-                    log_del_open + log_del_emit[x as usize] + dptable.get(i + 1, j, State::Del);
-                let ins =
-                    log_ins_open + log_ins_emit[y as usize] + dptable.get(i, j + 1, State::Ins);
+                let del = log_del_open + dptable.get(i, j + 1, State::Del);
+                let ins = log_ins_open + log_ins_emit[x] + dptable.get(i + 1, j, State::Ins);
                 *dptable.get_mut(i, j, State::Match) = Self::logsumexp(mat, del, ins);
                 // Del state.
                 {
@@ -136,181 +145,11 @@ impl PairHiddenMarkovModel {
         }
         dptable
     }
-    /// Return error profile.
-    pub fn get_profile(&self, xs: &[u8], ys: &[u8]) -> LikelihoodSummary {
-        // Forward backward profile
-        let f_dp = self.forward(xs, ys);
-        let b_dp = self.backward(xs, ys);
-        let lk = f_dp.get_total_lk(xs.len(), ys.len());
-        let mut dptable = DPTable::new(xs.len(), ys.len() + 1);
-        for i in 0..xs.len() {
-            for j in 0..ys.len() + 1 {
-                for &s in &[State::Match, State::Del, State::Ins] {
-                    *dptable.get_mut(i, j, s) = f_dp.get(i + 1, j, s) + b_dp.get(i + 1, j, s) - lk;
-                }
-            }
-        }
-        let (mut match_prob, mut deletion_prob, mut insertion_prob) = dptable.lks_in_row_by_state();
-        match_prob.iter_mut().for_each(|x| *x = x.exp());
-        insertion_prob.iter_mut().for_each(|x| *x = x.exp());
-        deletion_prob.iter_mut().for_each(|x| *x = x.exp());
-        let match_bases: Vec<_> = dptable
-            .mat_dp
-            .chunks_exact(dptable.column)
-            .map(|row| {
-                row.iter()
-                    .enumerate()
-                    .max_by(|x, y| (x.1).partial_cmp(y.1).unwrap())
-                    .map(|(j, _)| {
-                        let mut slot = [0; 4];
-                        slot[crate::padseq::LOOKUP_TABLE[ys[j - 1] as usize] as usize] += 1;
-                        slot
-                    })
-                    .unwrap()
-            })
-            .collect();
-        let insertion_bases: Vec<_> = dptable
-            .ins_dp
-            .chunks_exact(dptable.column)
-            .map(|row| {
-                row.iter()
-                    .enumerate()
-                    .max_by(|x, y| (x.1).partial_cmp(y.1).unwrap())
-                    .map(|(j, _)| {
-                        let mut slot = [0u8; 4];
-                        slot[crate::padseq::LOOKUP_TABLE[ys[j - 1] as usize] as usize] += 1;
-                        slot
-                    })
-                    .unwrap()
-            })
-            .collect();
-        // let (likelihood_trajectry, _, _) = f_dp.lks_in_row_by_state();
-        LikelihoodSummary {
-            match_prob,
-            match_bases,
-            insertion_prob,
-            insertion_bases,
-            deletion_prob,
-            total_likelihood: lk,
-            // likelihood_trajectry,
-        }
-    }
-    /// Correcting the template sequence by queries, calculate the
-    /// new likelihoods and alignment summary, which can be used for futher correction.
-    pub fn correct_step<T: std::borrow::Borrow<[u8]>>(
-        &self,
-        template: &[u8],
-        queries: &[T],
-        summary: &LikelihoodSummary,
-    ) -> (Vec<u8>, LikelihoodSummary) {
-        assert!(!queries.is_empty());
-        let new_template = summary.correct(template);
-        let summary: Option<LikelihoodSummary> = queries
-            .iter()
-            .map(|x| self.get_profile(&new_template, x.borrow()))
-            .fold(None, |summary, x| match summary {
-                Some(mut summary) => {
-                    summary.add(&x);
-                    Some(summary)
-                }
-                None => Some(x),
-            });
-        let mut summary = summary.unwrap();
-        summary.div_probs(queries.len() as f64);
-        (new_template, summary)
-    }
-    /// Correct input until convergence.
-    pub fn correct<T: std::borrow::Borrow<[u8]>>(
-        &self,
-        template: &[u8],
-        queries: &[T],
-    ) -> (Vec<u8>, LikelihoodSummary) {
-        let lks: Option<LikelihoodSummary> = queries
-            .iter()
-            .map(|x| self.get_profile(template, x.borrow()))
-            .fold(None, |summary, x| match summary {
-                Some(mut summary) => {
-                    summary.add(&x);
-                    Some(summary)
-                }
-                None => Some(x),
-            });
-        let mut lks = lks.unwrap();
-        lks.div_probs(queries.len() as f64);
-        let mut corrected = template.to_vec();
-        loop {
-            let (new_corrected, new_lks) = self.correct_step(&corrected, queries, &lks);
-            if lks.total_likelihood < new_lks.total_likelihood {
-                corrected = new_corrected;
-                lks = new_lks;
-            } else {
-                break;
-            }
-        }
-        (corrected, lks)
-    }
-    /// Batch function for `get_profile`
-    pub fn get_profiles<T: std::borrow::Borrow<[u8]>>(
-        &self,
-        template: &[u8],
-        queries: &[T],
-    ) -> LikelihoodSummary {
-        assert!(!queries.is_empty());
-        let lks: Option<LikelihoodSummary> = queries
-            .iter()
-            .map(|x| self.get_profile(template, x.borrow()))
-            .fold(None, |summary, x| match summary {
-                Some(mut summary) => {
-                    summary.add(&x);
-                    Some(summary)
-                }
-                None => Some(x),
-            });
-        let mut lks = lks.unwrap();
-        lks.div_probs(queries.len() as f64);
-        lks
-    }
-    pub fn correct_flip<T: std::borrow::Borrow<[u8]>, R: rand::Rng>(
-        &self,
-        template: &[u8],
-        queries: &[T],
-        rng: &mut R,
-        repeat_time: usize,
-    ) -> (Vec<u8>, LikelihoodSummary) {
-        let mut lks = self.get_profiles(template, queries);
-        let mut template = template.to_vec();
-        for _ in 0..repeat_time {
-            let new_template = lks.correct_flip(rng);
-            let new_lks = self.get_profiles(&new_template, queries);
-            let ratio = (new_lks.total_likelihood - lks.total_likelihood)
-                .exp()
-                .min(1f64);
-            if rng.gen_bool(ratio) {
-                template = new_template;
-                lks = new_lks;
-            }
-        }
-        (template, lks)
-    }
     /// Return the alignment path between x and y.
     /// In HMM term, it is "viterbi" algorithm.
-    pub fn align(&self, xs: &[u8], ys: &[u8]) -> (DPTable, Vec<Op>, f64) {
-        let xs: Vec<_> = xs.iter().map(crate::padseq::convert_to_twobit).collect();
-        let ys: Vec<_> = ys.iter().map(crate::padseq::convert_to_twobit).collect();
-        let mut dptable = DPTable::new(xs.len() + 1, ys.len() + 1);
-        *dptable.get_mut(0, 0, State::Ins) = EP;
-        *dptable.get_mut(0, 0, State::Del) = EP;
-        for i in 1..xs.len() + 1 {
-            *dptable.get_mut(i, 0, State::Match) = EP;
-            *dptable.get_mut(i, 0, State::Ins) = EP;
-            *dptable.get_mut(i, 0, State::Del) = EP;
-        }
-        for j in 1..ys.len() + 1 {
-            *dptable.get_mut(0, j, State::Match) = EP;
-            *dptable.get_mut(0, j, State::Ins) = EP;
-            *dptable.get_mut(0, j, State::Del) = EP;
-        }
-        let log_del_emit: Vec<_> = self.ins_emit.iter().map(Self::log).collect();
+    pub fn align(&self, reference: &[u8], query: &[u8]) -> (Vec<Op>, f64) {
+        let xs = query;
+        let ys = reference;
         let log_ins_emit: Vec<_> = self.ins_emit.iter().map(Self::log).collect();
         let log_mat_emit: Vec<_> = self.mat_emit.iter().map(Self::log).collect();
         let (log_del_open, log_ins_open) = (self.mat_del.ln(), self.mat_ins.ln());
@@ -318,22 +157,43 @@ impl PairHiddenMarkovModel {
         let (log_del_from_ins, log_ins_from_del) = (self.ins_del.ln(), self.del_ins.ln());
         let (log_mat_from_del, log_mat_from_ins) = (self.del_mat.ln(), self.ins_mat.ln());
         let log_mat_ext = self.mat_mat.ln();
+        let mut dptable = DPTable::new(xs.len() + 1, ys.len() + 1);
+        *dptable.get_mut(0, 0, State::Ins) = EP;
+        *dptable.get_mut(0, 0, State::Del) = EP;
+        {
+            let mut ins_accum = log_ins_open;
+            for i in 1..xs.len() + 1 {
+                *dptable.get_mut(i, 0, State::Match) = EP;
+                ins_accum += self.ins(xs[i - 1], None).ln();
+                *dptable.get_mut(i, 0, State::Ins) = ins_accum;
+                ins_accum += log_ins_ext;
+                *dptable.get_mut(i, 0, State::Del) = EP;
+            }
+        }
+        {
+            for j in 1..ys.len() + 1 {
+                *dptable.get_mut(0, j, State::Match) = EP;
+                *dptable.get_mut(0, j, State::Ins) = EP;
+                *dptable.get_mut(0, j, State::Del) = log_del_open + (j - 1) as f64 * log_del_ext;
+            }
+        }
         for (i, &x) in xs.iter().enumerate().map(|(p, x)| (p + 1, x)) {
+            let x = super::BASE_TABLE[x as usize];
             for (j, &y) in ys.iter().enumerate().map(|(p, y)| (p + 1, y)) {
+                let y = super::BASE_TABLE[y as usize];
                 let mat = (dptable.get(i - 1, j - 1, State::Match) + log_mat_ext)
                     .max(dptable.get(i - 1, j - 1, State::Ins) + log_mat_from_ins)
                     .max(dptable.get(i - 1, j - 1, State::Del) + log_mat_from_del)
-                    + log_mat_emit[((x << 2) | y) as usize];
+                    + log_mat_emit[(y << 2) | x];
                 *dptable.get_mut(i, j, State::Match) = mat;
-                let del = (dptable.get(i - 1, j, State::Match) + log_del_open)
-                    .max(dptable.get(i - 1, j, State::Del) + log_del_ext)
-                    .max(dptable.get(i - 1, j, State::Ins) + log_del_from_ins)
-                    + log_del_emit[x as usize];
+                let del = (dptable.get(i, j - 1, State::Match) + log_del_open)
+                    .max(dptable.get(i, j - 1, State::Del) + log_del_ext)
+                    .max(dptable.get(i, j - 1, State::Ins) + log_del_from_ins);
                 *dptable.get_mut(i, j, State::Del) = del;
-                let ins = (dptable.get(i, j - 1, State::Match) + log_ins_open)
-                    .max(dptable.get(i, j - 1, State::Del) + log_ins_from_del)
-                    .max(dptable.get(i, j - 1, State::Ins) + log_ins_ext)
-                    + log_ins_emit[y as usize];
+                let ins = (dptable.get(i - 1, j, State::Match) + log_ins_open)
+                    .max(dptable.get(i - 1, j, State::Del) + log_ins_from_del)
+                    .max(dptable.get(i - 1, j, State::Ins) + log_ins_ext)
+                    + log_ins_emit[x as usize];
                 *dptable.get_mut(i, j, State::Ins) = ins;
             }
         }
@@ -346,12 +206,13 @@ impl PairHiddenMarkovModel {
         let mut ops: Vec<Op> = vec![];
         while i > 0 && j > 0 {
             let diff = 0.00000000001;
-            let (x, y) = (xs[i - 1], ys[j - 1]);
+            let x = super::BASE_TABLE[xs[i - 1] as usize];
+            let y = super::BASE_TABLE[ys[j - 1] as usize];
             let lk = dptable.get(i, j, state);
             ops.push(state.into());
             match state {
                 State::Match => {
-                    let mat_lk = lk - log_mat_emit[((x << 2) | y) as usize];
+                    let mat_lk = lk - log_mat_emit[(y << 2) | x];
                     let mat = dptable.get(i - 1, j - 1, State::Match) + log_mat_ext;
                     let del = dptable.get(i - 1, j - 1, State::Del) + log_mat_from_del;
                     let ins = dptable.get(i - 1, j - 1, State::Ins) + log_mat_from_ins;
@@ -367,25 +228,24 @@ impl PairHiddenMarkovModel {
                     j -= 1;
                 }
                 State::Del => {
-                    let del_lk = lk - log_del_emit[x as usize];
-                    let mat = dptable.get(i - 1, j, State::Match) + log_del_open;
-                    let del = dptable.get(i - 1, j, State::Del) + log_del_ext;
-                    let ins = dptable.get(i - 1, j, State::Ins) + log_del_from_ins;
-                    if (del_lk - mat).abs() < diff {
+                    let mat = dptable.get(i, j - 1, State::Match) + log_del_open;
+                    let del = dptable.get(i, j - 1, State::Del) + log_del_ext;
+                    let ins = dptable.get(i, j - 1, State::Ins) + log_del_from_ins;
+                    if (lk - mat).abs() < diff {
                         state = State::Match;
-                    } else if (del_lk - del).abs() < diff {
+                    } else if (lk - del).abs() < diff {
                         state = State::Del;
                     } else {
-                        assert!((del_lk - ins).abs() < diff);
+                        assert!((lk - ins).abs() < diff);
                         state = State::Ins;
                     }
-                    i -= 1;
+                    j -= 1;
                 }
                 State::Ins => {
-                    let ins_lk = lk - log_ins_emit[y as usize];
-                    let mat = dptable.get(i, j - 1, State::Match) + log_ins_open;
-                    let del = dptable.get(i, j - 1, State::Del) + log_ins_from_del;
-                    let ins = dptable.get(i, j - 1, State::Ins) + log_ins_ext;
+                    let ins_lk = lk - log_ins_emit[x as usize];
+                    let mat = dptable.get(i - 1, j, State::Match) + log_ins_open;
+                    let del = dptable.get(i - 1, j, State::Del) + log_ins_from_del;
+                    let ins = dptable.get(i - 1, j, State::Ins) + log_ins_ext;
                     if (ins_lk - mat).abs() < diff {
                         state = State::Match;
                     } else if (ins_lk - del).abs() < diff {
@@ -394,19 +254,283 @@ impl PairHiddenMarkovModel {
                         assert!((ins_lk - ins).abs() < diff);
                         state = State::Ins;
                     }
-                    j -= 1;
+                    i -= 1;
                 }
             }
         }
         while i > 0 {
             i -= 1;
-            ops.push(Op::Del);
+            ops.push(Op::Ins);
         }
         while j > 0 {
             j -= 1;
-            ops.push(Op::Ins);
+            ops.push(Op::Del);
         }
         ops.reverse();
-        (dptable, ops, max_lk)
+        (ops, max_lk)
+    }
+    /// Return the modification table. `Tab[i * NUM_ROW..(i + 1)*NUM_ROW]` record the likelihood when changing the `i` th base of the `rs`.
+    pub fn modification_table_full(&self, rs: &[u8], qs: &[u8]) -> (Vec<f64>, f64) {
+        use crate::LogSumExp;
+        let pre = self.forward(rs, qs);
+        let post = self.backward(rs, qs);
+        let total_len = NUM_ROW * (rs.len() + 1);
+        let mut lse_lks = vec![LogSumExp::new(); total_len];
+        pre.get(qs.len(), rs.len(), State::Match);
+        post.get(qs.len(), rs.len(), State::Match);
+        for (i, &q) in qs.iter().enumerate() {
+            assert!(i <= qs.len());
+            for (j, slots) in lse_lks.chunks_exact_mut(NUM_ROW).enumerate() {
+                assert!(j <= rs.len());
+                let mat_mat = pre.get(i, j, State::Match) + self.mat_mat.ln();
+                let del_mat = pre.get(i, j, State::Del) + self.del_mat.ln();
+                let ins_mat = pre.get(i, j, State::Ins) + self.ins_mat.ln();
+                let mat_del = pre.get(i, j, State::Match) + self.mat_del.ln();
+                let del_del = pre.get(i, j, State::Del) + self.del_del.ln();
+                let ins_del = pre.get(i, j, State::Ins) + self.ins_del.ln();
+                let post_no_del = post.get(i, j, State::Del);
+                let post_del_del = match j < rs.len() {
+                    true => post.get(i, j + 1, State::Del),
+                    false => EP,
+                };
+                let post_mat_mat = match j < rs.len() {
+                    true => post.get(i + 1, j + 1, State::Match),
+                    false => EP,
+                };
+                let post_ins_mat = post.get(i + 1, j, State::Match);
+                b"ACGT".iter().zip(slots.iter_mut()).for_each(|(&b, y)| {
+                    let mat = self.obs(b, q).ln() + post_mat_mat;
+                    let del = self.del(b).ln() + post_del_del;
+                    *y += mat_mat + mat;
+                    *y += del_mat + mat;
+                    *y += ins_mat + mat;
+                    *y += mat_del + del;
+                    *y += del_del + del;
+                    *y += ins_del + del;
+                });
+                b"ACGT"
+                    .iter()
+                    .zip(slots.iter_mut().skip(4))
+                    .for_each(|(&b, y)| {
+                        let mat = self.obs(b, q).ln() + post_ins_mat;
+                        let del = self.del(b).ln() + post_no_del;
+                        *y += mat_mat + mat;
+                        *y += del_mat + mat;
+                        *y += ins_mat + mat;
+                        *y += mat_del + del;
+                        *y += del_del + del;
+                        *y += ins_del + del;
+                    });
+                // Copying the j..j+c bases ...
+                (0..COPY_SIZE)
+                    .filter(|len| j + len < rs.len())
+                    .zip(slots.iter_mut().skip(8))
+                    .for_each(|(len, y)| {
+                        let pos = j + len + 1;
+                        let r = rs[j];
+                        let mat = self.obs(r, q).ln() + post_mat_mat;
+                        let del = self.del(r).ln() + post_del_del;
+                        {
+                            *y += pre.get(i, pos, State::Match) + self.mat_mat.ln() + mat;
+                            *y += pre.get(i, pos, State::Del) + self.del_mat.ln() + mat;
+                            *y += pre.get(i, pos, State::Ins) + self.ins_mat.ln() + mat;
+                        };
+                        {
+                            *y += pre.get(i, pos, State::Match) + self.mat_del.ln() + del;
+                            *y += pre.get(i, pos, State::Del) + self.del_del.ln() + del;
+                            *y += pre.get(i, pos, State::Ins) + self.ins_del.ln() + del;
+                        };
+                    });
+                // deleting the j..j+d bases..
+                (0..DEL_SIZE)
+                    .filter(|d| j + d + 1 < rs.len())
+                    .zip(slots.iter_mut().skip(8 + COPY_SIZE))
+                    .for_each(|(len, y)| {
+                        let post_pos = j + len + 1;
+                        let r = rs[post_pos];
+                        let post_mat_mat = post.get(i + 1, post_pos + 1, State::Match);
+                        let mat = self.obs(r, q).ln() + post_mat_mat;
+                        let post_del_del = post.get(i, post_pos + 1, State::Del);
+                        let del = self.del(r).ln() + post_del_del;
+                        *y += mat_mat + mat;
+                        *y += del_mat + mat;
+                        *y += ins_mat + mat;
+                        *y += mat_del + del;
+                        *y += del_del + del;
+                        *y += ins_del + del;
+                    });
+            }
+        }
+        {
+            let i = qs.len();
+            for (j, slots) in lse_lks.chunks_exact_mut(NUM_ROW).enumerate() {
+                assert!(j <= rs.len());
+                let to_del = {
+                    let mat_to_del = pre.get(i, j, State::Match) + self.mat_del.ln();
+                    let del_to_del = pre.get(i, j, State::Del) + self.del_del.ln();
+                    let ins_to_del = pre.get(i, j, State::Ins) + self.ins_del.ln();
+                    logsumexp(&[mat_to_del, del_to_del, ins_to_del])
+                };
+                let post_no_del = post.get(i, j, State::Del);
+                let post_del_del = match j < rs.len() {
+                    true => post.get(i, j + 1, State::Del),
+                    false => EP,
+                };
+                // Change the j-th base into ...
+                b"ACGT".iter().zip(slots.iter_mut()).for_each(|(&b, y)| {
+                    *y += to_del + post_del_del + self.del(b).ln();
+                });
+                // Insertion before the j-th base ...
+                b"ACGT"
+                    .iter()
+                    .zip(slots.iter_mut().skip(4))
+                    .for_each(|(&b, y)| {
+                        *y += to_del + self.del(b).ln() + post_no_del;
+                    });
+                // Copying the j..j+c bases....
+                (0..COPY_SIZE)
+                    .filter(|len| j + len < rs.len())
+                    .zip(slots.iter_mut().skip(8))
+                    .for_each(|(len, y)| {
+                        let r = rs[j];
+                        let postpos = j + len + 1;
+                        let del = self.del(r).ln() + post_del_del;
+                        *y += pre.get(i, postpos, State::Match) + self.mat_del.ln() + del;
+                        *y += pre.get(i, postpos, State::Del) + self.del_del.ln() + del;
+                        *y += pre.get(i, postpos, State::Ins) + self.ins_del.ln() + del;
+                    });
+                // Deleting the j..j+d bases
+                (0..DEL_SIZE)
+                    .filter(|len| j + len < rs.len())
+                    .zip(slots.iter_mut().skip(8 + COPY_SIZE))
+                    .for_each(|(len, y)| {
+                        let postpos = j + len + 1;
+                        *y += match rs.get(postpos) {
+                            Some(&r) => {
+                                let post_del_del = post.get(i, postpos + 1, State::Del);
+                                to_del + self.del(r).ln() + post_del_del
+                            }
+                            None => pre.get_total_lk(i, j),
+                        };
+                    });
+            }
+        }
+        let slots: Vec<f64> = lse_lks.into_iter().map(|x| x.into()).collect();
+        (slots, pre.get_total_lk(qs.len(), rs.len()))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::gen_seq;
+    use rand::SeedableRng;
+    use rand_xoshiro::Xoshiro256StarStar;
+    #[test]
+    fn align() {
+        let hmm = PairHiddenMarkovModel::default();
+        for seed in 0..10 {
+            let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198 + seed);
+            let template = gen_seq::generate_seq(&mut rng, 70);
+            let profile = gen_seq::PROFILE;
+            let query = gen_seq::introduce_randomness(&template, &mut rng, &profile);
+            let (ops, lk) = hmm.align(&template, &query);
+            let lk_l = hmm.eval_ln(&template, &query, &ops);
+            assert!((lk - lk_l).abs() < 0.0001, "{},{}", lk, lk_l);
+        }
+    }
+    #[test]
+    fn forward() {
+        let template = b"AAAAA";
+        let hmm = PairHiddenMarkovModel::default();
+        let lk = hmm.likelihood(template, template);
+        let len = template.len() as f64;
+        let expected = hmm.mat_mat.ln() * len + hmm.mat_emit[0].ln() * len;
+        // eprintln!("{lk},{expected}");
+        assert!(lk > expected);
+        for seed in 0..10 {
+            let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198 + seed);
+            let template = gen_seq::generate_seq(&mut rng, 70);
+            let profile = gen_seq::PROFILE;
+            let query = gen_seq::introduce_randomness(&template, &mut rng, &profile);
+            let (_, lk) = hmm.align(&template, &query);
+            let lk_f = hmm.likelihood(&template, &query);
+            assert!(lk < lk_f, "{},{}", lk, lk_f);
+        }
+    }
+    #[test]
+    fn modification_table_test() {
+        const ERR_THR: f64 = 1f64;
+        for seed in 0..10 {
+            let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198 + seed);
+            let template = gen_seq::generate_seq(&mut rng, 70);
+            let profile = gen_seq::PROFILE;
+            let hmm = PairHiddenMarkovModel::default();
+            let query = gen_seq::introduce_randomness(&template, &mut rng, &profile);
+            let (modif_table, _) = hmm.modification_table_full(&template, &query);
+            let mut mod_version = template.clone();
+            println!("{}", seed);
+            // Mutation error
+            for (j, modif_table) in modif_table
+                .chunks_exact(NUM_ROW)
+                .take(template.len())
+                .enumerate()
+            {
+                println!("{}", j);
+                let orig = mod_version[j];
+                for (&base, lk_m) in b"ACGT".iter().zip(modif_table) {
+                    mod_version[j] = base;
+                    let lk = hmm.likelihood(&mod_version, &query);
+                    assert!((lk - lk_m).abs() < ERR_THR, "{},{},mod", lk, lk_m);
+                    // println!("M\t{}\t{}", j, (lk - lk_m).abs());
+                    mod_version[j] = orig;
+                }
+                // Insertion error
+                for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
+                    mod_version.insert(j, base);
+                    let lk = hmm.likelihood(&mod_version, &query);
+                    assert!((lk - lk_m).abs() < ERR_THR, "{},{}", lk, lk_m);
+                    // println!("I\t{}\t{}", j, (lk - lk_m).abs());
+                    mod_version.remove(j);
+                }
+                // Copying mod
+                for len in (0..COPY_SIZE).filter(|c| j + c < template.len()) {
+                    let lk_m = modif_table[8 + len];
+                    let mod_version: Vec<_> = template[..j + len + 1]
+                        .iter()
+                        .chain(template[j..].iter())
+                        .copied()
+                        .collect();
+                    let lk = hmm.likelihood(&mod_version, &query);
+                    // println!("C\t{}\t{}\t{}", j, len, (lk - lk_m).abs());
+                    assert!((lk - lk_m).abs() < ERR_THR, "{},{}", lk, lk_m);
+                }
+                // Deletion error
+                for len in (0..DEL_SIZE).filter(|d| j + d + 1 < template.len()) {
+                    let lk_m = modif_table[8 + COPY_SIZE + len];
+                    let mod_version: Vec<_> = template[..j]
+                        .iter()
+                        .chain(template[j + len + 1..].iter())
+                        .copied()
+                        .collect();
+                    let lk = hmm.likelihood(&mod_version, &query);
+                    // println!("D\t{}\t{}\t{}", j, len, lk - lk_m);
+                    assert!(
+                        (lk - lk_m).abs() < ERR_THR,
+                        "{},{},{}",
+                        lk,
+                        lk_m,
+                        template.len(),
+                    );
+                }
+            }
+            let modif_table = modif_table.chunks_exact(NUM_ROW).last().unwrap();
+            for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
+                mod_version.push(base);
+                let lk = hmm.likelihood(&mod_version, &query);
+                assert!((lk - lk_m).abs() < 1.0001, "{},{}", lk, lk_m);
+                mod_version.pop();
+            }
+        }
     }
 }

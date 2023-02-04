@@ -1,10 +1,7 @@
 //! An tiny implementation of pair hidden Markov models.
 use crate::op::Op;
-use rand::Rng;
-pub mod banded;
 pub mod full;
 pub mod guided;
-use crate::logsumexp;
 use crate::EP;
 use serde::{Deserialize, Serialize};
 
@@ -159,6 +156,7 @@ impl PairHiddenMarkovModel {
             _ => panic!(),
         }
     }
+    /// Create a new pair-hidden Markov model.
     pub fn new(
         (mat_mat, mat_ins, mat_del): (f64, f64, f64),
         (ins_mat, ins_ins, ins_del): (f64, f64, f64),
@@ -239,16 +237,14 @@ impl PairHiddenMarkovModel {
         let index = (BASE_TABLE[r as usize] << 2) | BASE_TABLE[q as usize];
         self.mat_emit[index as usize]
     }
-    fn del(&self, _r: u8) -> f64 {
+    const fn del(&self, _r: u8) -> f64 {
         1f64
     }
     fn ins(&self, q: u8, prev: Option<u8>) -> f64 {
         let prev = prev.unwrap_or(4);
         let index = (BASE_TABLE[prev as usize] << 2) | BASE_TABLE[q as usize];
         self.ins_emit[index as usize]
-        //        0.25f64
     }
-
     fn to_mat(&self, (mat, ins, del): (f64, f64, f64)) -> f64 {
         mat * self.mat_mat + ins * self.ins_mat + del * self.del_mat
     }
@@ -258,6 +254,10 @@ impl PairHiddenMarkovModel {
     fn to_del(&self, (mat, ins, del): (f64, f64, f64)) -> f64 {
         mat * self.mat_del + ins * self.ins_del + del * self.del_del
     }
+    /// Return the log-likelihood of the alignment (`ops`).
+    /// It is calculated in a normal, i.e., non-log, space.
+    /// Thus, if the `ops` is long, the returned value might be NaN.
+    /// In that case, use `Self::eval_ln()` instead.
     pub fn eval(&self, rs: &[u8], qs: &[u8], ops: &[Op]) -> f64 {
         use Op::*;
         let mut lk = 1f64;
@@ -301,6 +301,7 @@ impl PairHiddenMarkovModel {
         }
         lk.ln()
     }
+    /// Return the log-likelihood of the alignment (`ops`).
     pub fn eval_ln(&self, rs: &[u8], qs: &[u8], ops: &[Op]) -> f64 {
         use Op::*;
         let mut lk = 0f64;
@@ -346,49 +347,9 @@ impl PairHiddenMarkovModel {
     }
 }
 
-// /// A pair hidden Markov model.
-// /// To access the output prbabilities,
-// /// call `.prob_of()` instead of direct membership access.
-// /// In the membership description below, `X` means some arbitrary state except end state.
-// /// As a principle of thumb, statistics function `*` and `*_banded`
-// /// (`likelihood` and `likelihood_banded`, for example) would return the same type of values.
-// /// If you want to more fine resolution outpt, please consult more specific function such as `forward` or `forward_banded`.
-// #[derive(Debug, Clone)]
-// pub struct PairHiddenMarkovModel {
-//     /// Pr{X->Mat}
-//     pub mat_ext: f64,
-//     pub mat_from_ins: f64,
-//     pub mat_from_del: f64,
-//     /// Pr{Mat->Ins}
-//     pub ins_open: f64,
-//     /// Pr{Mat->Del}
-//     pub del_open: f64,
-//     /// Pr{Ins->Del}
-//     pub del_from_ins: f64,
-//     /// Pr{Del->Ins}.
-//     pub ins_from_del: f64,
-//     /// Pr{Del->Del}
-//     pub del_ext: f64,
-//     /// Pr{Ins->Ins}
-//     pub ins_ext: f64,
-//     // Pr{(-,base)|Del}. Bases are A,C,G,T, '-' and NULL. The last two "bases" are defined just for convinience.
-//     del_emit: [f64; 6],
-//     // Pr{(base,-)|Ins}
-//     ins_emit: [f64; 6],
-//     // Pr{(base,base)|Mat}
-//     mat_emit: [f64; 64],
-// }
-
 /// Shorthand for PairHiddenMarkovModel.
 #[allow(clippy::upper_case_acronyms)]
 pub type PHMM = PairHiddenMarkovModel;
-
-// #[derive(Debug, Clone, Copy)]
-// pub enum State {
-//     Mat,
-//     Del,
-//     Ins,
-// }
 
 impl std::convert::From<State> for usize {
     fn from(state: State) -> usize {
@@ -410,96 +371,7 @@ impl std::convert::From<State> for Op {
     }
 }
 
-// impl std::default::Default for PHMM {
-//     fn default() -> Self {
-//         let match_prob = 0.9;
-//         let gap_ext_prob = 0.08;
-//         let gap_output = [(4f64).recip(); 4];
-//         let match_output = [
-//             [0.9, 0.1 / 3., 0.1 / 3., 0.1 / 3.],
-//             [0.1 / 3., 0.9, 0.1 / 3., 0.1 / 3.],
-//             [0.1 / 3., 0.1 / 3., 0.9, 0.1 / 3.],
-//             [0.1 / 3., 0.1 / 3., 0.1 / 3., 0.9],
-//         ];
-//         let quit_prob = 0.001;
-//         PHMM::as_reversible(
-//             match_prob,
-//             gap_ext_prob,
-//             &gap_output,
-//             &match_output,
-//             quit_prob,
-//         )
-//     }
-// }
-
 impl PHMM {
-    // /// construct a new pair reversible HMM.
-    // /// In reversible, I mean that the HMM is synmetric with respect to switching the reference and the query,
-    // /// and w.r.t reversing the reference sequence and the query sequence.
-    // /// In other words, it has the same probability to transit from deletion/insertion <-> matches,
-    // /// same emittion probability on the deletion/insertion states, and so on.
-    // /// # Example
-    // /// ```rust
-    // /// use kiley::hmm::PHMM;
-    // /// let match_prob = 0.8;
-    // /// let gap_ext_prob = 0.1;
-    // /// let gap_output = [(4f64).recip(); 4];
-    // /// let match_output = [
-    // /// [0.7, 0.1, 0.1, 0.1],
-    // /// [0.1, 0.7, 0.1, 0.1],
-    // /// [0.1, 0.1, 0.7, 0.1],
-    // /// [0.1, 0.1, 0.1, 0.7],
-    // /// ];
-    // /// let quit_prob = 0.001;
-    // /// PHMM::as_reversible(
-    // ///   match_prob,
-    // ///   gap_ext_prob,
-    // ///   &gap_output,
-    // ///   &match_output,
-    // ///   quit_prob,
-    // /// );
-    // /// ```
-    // #[allow(clippy::wrong_self_convention)]
-    // pub fn as_reversible(
-    //     mat: f64,
-    //     gap_ext: f64,
-    //     gap_output: &[f64; 4],
-    //     mat_output: &[[f64; 4]],
-    //     _quit_prob: f64,
-    // ) -> Self {
-    //     assert!(mat.is_sign_positive());
-    //     assert!(gap_ext.is_sign_positive());
-    //     assert!(mat + gap_ext <= 1f64);
-    //     let gap_open = (1f64 - mat) / 2f64;
-    //     let gap_switch = 1f64 - gap_ext - mat;
-    //     // let alive_prob = 1f64 - quit_prob;
-    //     let mut gap_emit = [0f64; 6];
-    //     gap_emit[..4].clone_from_slice(&gap_output[..4]);
-    //     // Maybe we should have the matching function to compute this matrix...
-    //     let mat_emit = {
-    //         let mut slots = [0f64; 8 * 8];
-    //         for i in 0..4 {
-    //             for j in 0..4 {
-    //                 slots[(i << 3) | j] = mat_output[i][j];
-    //             }
-    //         }
-    //         slots
-    //     };
-    //     Self {
-    //         mat_ext: mat,
-    //         mat_from_del: mat,
-    //         mat_from_ins: mat,
-    //         ins_open: gap_open,
-    //         del_open: gap_open,
-    //         ins_from_del: gap_switch,
-    //         del_from_ins: gap_switch,
-    //         del_ext: gap_ext,
-    //         ins_ext: gap_ext,
-    //         del_emit: gap_emit,
-    //         ins_emit: gap_emit,
-    //         mat_emit,
-    //     }
-    // }
     fn log(x: &f64) -> f64 {
         assert!(!x.is_sign_negative());
         if x.abs() > 0.00000001 {
@@ -514,14 +386,14 @@ impl PHMM {
     }
 }
 
-/// A dynamic programming table. It is a serialized 2-d array.
-#[allow(dead_code)]
+/// A dynamic programming table. It is a serialized 2-d array. i -> query, j -> Reference!
 #[derive(Debug, Clone)]
-pub struct DPTable {
+pub(crate) struct DPTable {
     mat_dp: Vec<f64>,
     ins_dp: Vec<f64>,
     del_dp: Vec<f64>,
     column: usize,
+    #[allow(dead_code)]
     row: usize,
 }
 
@@ -556,177 +428,6 @@ impl DPTable {
             self.get(i, j, State::Del),
         )
     }
-    pub fn lks_in_row(&self) -> Vec<f64> {
-        self.mat_dp
-            .chunks_exact(self.column)
-            .zip(self.del_dp.chunks_exact(self.column))
-            .zip(self.ins_dp.chunks_exact(self.column))
-            .map(|((xs, ys), zs)| PHMM::logsumexp(logsumexp(xs), logsumexp(ys), logsumexp(zs)))
-            .collect()
-    }
-    pub fn lks_in_row_by_state(&self) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-        let mat: Vec<_> = self
-            .mat_dp
-            .chunks_exact(self.column)
-            .map(logsumexp)
-            .collect();
-        let ins: Vec<_> = self
-            .ins_dp
-            .chunks_exact(self.column)
-            .map(logsumexp)
-            .collect();
-        let del: Vec<_> = self
-            .del_dp
-            .chunks_exact(self.column)
-            .map(logsumexp)
-            .collect();
-        (mat, del, ins)
-    }
-}
-
-/// A summary of comparison of two sequence.
-#[derive(Debug, Clone)]
-pub struct LikelihoodSummary {
-    /// Match probability for each sequence `xs`. to get corresponding base, access mat_base below.
-    pub match_prob: Vec<f64>,
-    /// Matched base for match state of the i-th base of `xs`
-    pub match_bases: Vec<[u8; 4]>,
-    pub insertion_prob: Vec<f64>,
-    pub insertion_bases: Vec<[u8; 4]>,
-    pub deletion_prob: Vec<f64>,
-    /// Likelihood of alignment between xs and ys.
-    pub total_likelihood: f64,
-    // pub likelihood_trajectry: Vec<f64>,
-}
-
-impl LikelihoodSummary {
-    pub fn add(&mut self, other: &Self) {
-        self.match_prob
-            .iter_mut()
-            .zip(other.match_prob.iter())
-            .for_each(|(x, y)| *x += y);
-        self.insertion_prob
-            .iter_mut()
-            .zip(other.insertion_prob.iter())
-            .for_each(|(x, y)| *x += y);
-        self.deletion_prob
-            .iter_mut()
-            .zip(other.deletion_prob.iter())
-            .for_each(|(x, y)| *x += y);
-        self.match_bases
-            .iter_mut()
-            .zip(other.match_bases.iter())
-            .for_each(|(x, y)| x.iter_mut().zip(y.iter()).for_each(|(x, y)| *x += y));
-        self.insertion_bases
-            .iter_mut()
-            .zip(other.insertion_bases.iter())
-            .for_each(|(x, y)| x.iter_mut().zip(y.iter()).for_each(|(x, y)| *x += y));
-        self.total_likelihood += other.total_likelihood;
-    }
-    pub fn div_probs(&mut self, r: f64) {
-        self.match_prob.iter_mut().for_each(|x| *x /= r);
-        self.deletion_prob.iter_mut().for_each(|x| *x /= r);
-        self.insertion_prob.iter_mut().for_each(|x| *x /= r);
-    }
-    /// Flipping a suspicious erroneous position.
-    pub fn correct_flip<R: Rng>(&self, rng: &mut R) -> Vec<u8> {
-        let mut template: Vec<_> = self
-            .match_bases
-            .iter()
-            .map(|x| Self::choose_max_base(x))
-            .collect();
-        let chunks = Self::chunk_by_homopolymer(&template);
-        if rng.gen_bool(0.5) {
-            // const THRESHOLD: f64 = 0.1;
-            let (position, _) = chunks
-                .iter()
-                .map(|&(start, end)| {
-                    let sum = self.deletion_prob[start..end].iter().sum::<f64>();
-                    (start, sum)
-                })
-                .max_by(|x, y| (x.1).partial_cmp(&y.1).unwrap())
-                .unwrap();
-            template.remove(position);
-        } else {
-            let (start, end, _) = chunks
-                .iter()
-                .map(|&(start, end)| {
-                    let sum = self.insertion_prob[start..end].iter().sum::<f64>();
-                    (start, end, sum)
-                })
-                .max_by(|x, y| (x.1).partial_cmp(&y.1).unwrap())
-                .unwrap();
-            let (position, base) = {
-                let position = (start..end)
-                    .max_by(|&x, &y| {
-                        self.insertion_prob[x]
-                            .partial_cmp(&self.insertion_prob[y])
-                            .unwrap()
-                    })
-                    .unwrap();
-                let base = self.insertion_bases[position]
-                    .iter()
-                    .enumerate()
-                    .max_by_key(|x| x.1)
-                    .map(|(idx, _)| b"ACGT"[idx])
-                    .unwrap();
-                (position, base)
-            };
-            template.insert(position, base);
-        };
-        template
-    }
-    pub fn correct(&self, _template: &[u8]) -> Vec<u8> {
-        // First, correct all substitution errors.
-        let template: Vec<_> = self
-            .match_bases
-            .iter()
-            .map(|x| Self::choose_max_base(x))
-            .collect();
-        // First, lets chunk the template by homopolymer run.
-        let intervals = Self::chunk_by_homopolymer(&template);
-        let mut polished_seq = vec![];
-        for (start, end) in intervals {
-            // Check if there is some insertion.
-            // If there is, then, we do not remove any base and only care about insertions.
-            // Note that the last putative insertion would be allowed.
-            let some_ins = (start..end - 1).any(|i| 0.75 < self.insertion_prob[i]);
-            if some_ins {
-                let ziped = template.iter().zip(self.insertion_bases.iter());
-                for (&mat, ins) in ziped.take(end).skip(start) {
-                    polished_seq.push(mat);
-                    polished_seq.push(Self::choose_max_base(ins));
-                }
-            } else {
-                let del_length =
-                    (self.deletion_prob[start..end].iter().sum::<f64>() / 0.75).floor() as usize;
-                let take_len = (end - start).saturating_sub(del_length);
-                polished_seq.extend(std::iter::repeat(template[start]).take(take_len));
-                if 0.75 < self.insertion_prob[end - 1] {
-                    polished_seq.push(Self::choose_max_base(&self.insertion_bases[end - 1]));
-                }
-            }
-        }
-        polished_seq
-    }
-    fn choose_max_base(xs: &[u8]) -> u8 {
-        let (max_base, _) = xs.iter().enumerate().max_by_key(|x| x.1).unwrap();
-        b"ACGT"[max_base]
-    }
-    fn chunk_by_homopolymer(template: &[u8]) -> Vec<(usize, usize)> {
-        let mut intervals = vec![];
-        let mut start = 0;
-        while start < template.len() {
-            let base = template[start];
-            let mut end = start;
-            while end < template.len() && template[end] == base {
-                end += 1;
-            }
-            intervals.push((start, end));
-            start = end;
-        }
-        intervals
-    }
 }
 
 /// Guided version of the pair HMM on the forward and reverse strands.
@@ -737,17 +438,21 @@ pub struct PairHiddenMarkovModelOnStrands {
 }
 
 impl PairHiddenMarkovModelOnStrands {
+    /// Return the model on the forward strand.
     pub fn forward(&self) -> &PairHiddenMarkovModel {
         &self.forward
     }
+    /// Return the model on the reverse strand.
     pub fn reverse(&self) -> &PairHiddenMarkovModel {
         &self.reverse
     }
+    /// Create a new instance.
     pub fn new(forward: PairHiddenMarkovModel, reverse: PairHiddenMarkovModel) -> Self {
         Self { forward, reverse }
     }
 }
 
+/// Dataset used to train the parameters of a [`PairHiddenMarkovModelOnStrands`]
 #[derive(Debug, Clone)]
 pub struct TrainingDataPack<'a, T, O>
 where
@@ -765,6 +470,7 @@ where
     T: std::borrow::Borrow<[u8]> + Sync + Send,
     O: std::borrow::Borrow<[Op]> + Sync + Send,
 {
+    /// Create a new datasets. They consist of the template (`consensus`), `directions` of the aligned `sequences` with `operations`.
     pub fn new(
         consensus: &'a [u8],
         directions: &'a [bool],
@@ -786,286 +492,19 @@ pub mod tests {
     #[test]
     fn align() {
         let phmm = PHMM::default();
-        let (_table, ops, lk) = phmm.align(b"ACCG", b"ACCG");
+        let (ops, lk) = phmm.align(b"ACCG", b"ACCG");
         eprintln!("{:?}\t{:.3}", ops, lk);
         assert_eq!(ops, vec![Op::Match; 4]);
-        let (_table, ops, lk) = phmm.align(b"ACCG", b"");
+        let (ops, lk) = phmm.align(b"ACCG", b"");
         eprintln!("{:?}\t{:.3}", ops, lk);
         assert_eq!(ops, vec![Op::Del; 4]);
-        let (_table, ops, lk) = phmm.align(b"", b"ACCG");
+        let (ops, lk) = phmm.align(b"", b"ACCG");
         assert_eq!(ops, vec![Op::Ins; 4]);
         eprintln!("{:?}\t{:.3}", ops, lk);
-        let (_table, ops, lk) = phmm.align(b"ATGCCGCACAGTCGAT", b"ATCCGC");
+        let (ops, lk) = phmm.align(b"ATGCCGCACAGTCGAT", b"ATCCGC");
         eprintln!("{:?}\t{:.3}", ops, lk);
         use Op::*;
         let answer = vec![vec![Match; 2], vec![Del], vec![Match; 4], vec![Del; 9]].concat();
         assert_eq!(ops, answer);
     }
-    // #[test]
-    // fn forward() {
-    //     let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198);
-    //     let template = gen_seq::generate_seq(&mut rng, 300);
-    //     let profile = gen_seq::PROFILE;
-    //     let hmm = PHMM::default();
-    //     for i in 0..10 {
-    //         let seq = gen_seq::introduce_randomness(&template, &mut rng, &profile);
-    //         let (_, lkb) = hmm.likelihood_banded(&template, &seq, 100).unwrap();
-    //         let (_, lk) = hmm.likelihood(&template, &seq);
-    //         assert!((lkb - lk).abs() < 10., "{},{},{}", i, lkb, lk);
-    //     }
-    // }
-    // #[test]
-    // fn forward_short() {
-    //     let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198);
-    //     let template = gen_seq::generate_seq(&mut rng, 10);
-    //     let hmm = PHMM::default();
-    //     for i in 0..10 {
-    //         let seq = gen_seq::introduce_errors(&template, &mut rng, 1, 1, 1);
-    //         let (_, lkb) = hmm.likelihood_banded(&template, &seq, 5).unwrap();
-    //         let (_, lk) = hmm.likelihood(&template, &seq);
-    //         if (lkb - lk).abs() > 0.1 {
-    //             eprintln!("{}", String::from_utf8_lossy(&template));
-    //             eprintln!("{}", String::from_utf8_lossy(&seq));
-    //         }
-    //         assert!((lkb - lk).abs() < 1f64, "{},{},{}", i, lkb, lk);
-    //     }
-    // }
-    // #[test]
-    // fn forward_banded_test() {
-    //     let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198);
-    //     let template = gen_seq::generate_seq(&mut rng, 30);
-    //     let hmm = PHMM::default();
-    //     let radius = 4;
-    //     for _ in 0..10 {
-    //         let seq = gen_seq::introduce_errors(&template, &mut rng, 1, 1, 1);
-    //         let (fwd, centers) = hmm.forward_banded(&template, &seq, radius);
-    //         let k = (template.len() + seq.len()) as isize;
-    //         let u_in_dp = (template.len() + radius) as isize - centers[k as usize];
-    //         assert!(fwd.get_check(k, u_in_dp, State::Match).is_some());
-    //         let table = hmm.forward(&template, &seq);
-    //         let lk_banded = PHMM::logsumexp(
-    //             fwd.get(k, u_in_dp, State::Match),
-    //             fwd.get(k, u_in_dp, State::Del),
-    //             fwd.get(k, u_in_dp, State::Ins),
-    //         );
-    //         let lk = table.get_total_lk(template.len(), seq.len());
-    //         assert!((lk - lk_banded).abs() < 0.001, "{},{}", lk, lk_banded);
-    //         let state = State::Del;
-    //         for i in 0..template.len() + 1 {
-    //             for j in 0..seq.len() + 1 {
-    //                 let x = table.get(i, j, state);
-    //                 if EP < x {
-    //                     print!("{:.1}\t", x);
-    //                 } else {
-    //                     print!("{:.1}\t", 1f64);
-    //                 }
-    //             }
-    //             println!();
-    //         }
-    //         println!();
-    //         let mut dump = vec![vec![EP; seq.len() + 1]; template.len() + 1];
-    //         // for k in 0..template.len() + seq.len() + 1 {
-    //         for (k, center) in centers
-    //             .iter()
-    //             .enumerate()
-    //             .take(template.len() + seq.len() + 1)
-    //         {
-    //             // let center = centers[k];
-    //             for (pos, &lk) in fwd.get_row(k as isize, state).iter().enumerate() {
-    //                 let u = pos as isize + center - radius as isize;
-    //                 let (i, j) = (u, k as isize - u);
-    //                 if (0..template.len() as isize + 1).contains(&i)
-    //                     && (0..seq.len() as isize + 1).contains(&j)
-    //                 {
-    //                     dump[i as usize][j as usize] = lk;
-    //                 }
-    //             }
-    //         }
-    //         for line in dump {
-    //             for x in line {
-    //                 if EP < x {
-    //                     print!("{:.1}\t", x);
-    //                 } else {
-    //                     print!("{:.1}\t", 1f64);
-    //                 }
-    //             }
-    //             println!();
-    //         }
-    //         println!();
-    //         for (k, center) in centers
-    //             .iter()
-    //             .enumerate()
-    //             .take(template.len() + seq.len() + 1)
-    //         {
-    //             // for k in 0..template.len() + seq.len() + 1 {
-    //             //     let center = centers[k];
-    //             let k = k as isize;
-    //             for (u, ((&mat, &del), &ins)) in fwd
-    //                 .get_row(k, State::Match)
-    //                 .iter()
-    //                 .zip(fwd.get_row(k, State::Del).iter())
-    //                 .zip(fwd.get_row(k, State::Ins).iter())
-    //                 .enumerate()
-    //                 .take(2 * radius - 2)
-    //                 .skip(2)
-    //             {
-    //                 let u = u as isize + center - radius as isize;
-    //                 let i = u;
-    //                 let j = k as isize - u;
-    //                 if 0 <= u && u <= template.len() as isize && 0 <= j && j <= seq.len() as isize {
-    //                     let (i, j) = (i as usize, j as usize);
-    //                     assert!((table.get(i, j, State::Match) - mat).abs() < 2.);
-    //                     let del_exact = table.get(i, j, State::Del);
-    //                     if 2f64 < (del_exact - del).abs() {
-    //                         println!("{},{}", i, j);
-    //                     }
-    //                     assert!((del_exact - del).abs() < 2., "E{},B{}", del_exact, del);
-    //                     let ins_exact = table.get(i, j, State::Ins);
-    //                     assert!((ins_exact - ins).abs() < 2., "{},{}", ins_exact, ins);
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
-    // #[test]
-    // fn backward_banded_test() {
-    //     let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198);
-    //     let template = gen_seq::generate_seq(&mut rng, 30);
-    //     let hmm = PHMM::default();
-    //     let radius = 5;
-    //     for _ in 0..10 {
-    //         let seq = gen_seq::introduce_errors(&template, &mut rng, 1, 1, 1);
-    //         let (_, centers) = hmm.forward_banded(&template, &seq, radius);
-    //         let table = hmm.backward(&template, &seq);
-    //         let bwd = hmm.backward_banded(&template, &seq, radius, &centers);
-    //         println!();
-    //         let state = State::Del;
-    //         for i in 0..template.len() + 1 {
-    //             for j in 0..seq.len() + 1 {
-    //                 print!("{:.1}\t", table.get(i, j, state));
-    //             }
-    //             println!();
-    //         }
-    //         println!();
-
-    //         println!();
-    //         let mut dump = vec![vec![EP; seq.len() + 1]; template.len() + 1];
-    //         for (k, center) in centers
-    //             .iter()
-    //             .enumerate()
-    //             .take(template.len() + seq.len() + 1)
-    //         {
-    //             // for k in 0..template.len() + seq.len() + 1 {
-    //             //     let center = centers[k];
-    //             let k = k as isize;
-    //             for (pos, &lk) in bwd.get_row(k, state).iter().enumerate() {
-    //                 let u = pos as isize + center - radius as isize;
-    //                 let (i, j) = (u, k as isize - u);
-    //                 if (0..template.len() as isize + 1).contains(&i)
-    //                     && (0..seq.len() as isize + 1).contains(&j)
-    //                 {
-    //                     dump[i as usize][j as usize] = lk;
-    //                 }
-    //             }
-    //         }
-    //         for line in dump {
-    //             for x in line {
-    //                 if EP < x {
-    //                     print!("{:.1}\t", x);
-    //                 } else {
-    //                     print!("{:.1}\t", 1f64);
-    //                 }
-    //             }
-    //             println!();
-    //         }
-    //         for (k, center) in centers
-    //             .iter()
-    //             .enumerate()
-    //             .take(template.len() + seq.len() + 1)
-    //         {
-    //             // for k in 0..template.len() + seq.len() + 1 {
-    //             //     let center = centers[k];
-    //             let k = k as isize;
-    //             for (u, ((&mat, &del), &ins)) in bwd
-    //                 .get_row(k, State::Match)
-    //                 .iter()
-    //                 .zip(bwd.get_row(k, State::Del).iter())
-    //                 .zip(bwd.get_row(k, State::Ins).iter())
-    //                 .enumerate()
-    //                 .take(2 * radius - 1)
-    //                 .skip(2)
-    //             {
-    //                 let u = u as isize + center - radius as isize;
-    //                 let (i, j) = (u, k as isize - u);
-    //                 if 0 <= u && u <= template.len() as isize && 0 <= j && j <= seq.len() as isize {
-    //                     let (i, j) = (i as usize, j as usize);
-    //                     let mat_exact = table.get(i, j, State::Match);
-    //                     assert!(
-    //                         (mat_exact - mat).abs() < 2.,
-    //                         "{},{},{},{}",
-    //                         mat_exact,
-    //                         mat,
-    //                         i,
-    //                         j
-    //                     );
-    //                     let diff = (table.get(i, j, State::Del) - del).abs() < 2f64;
-    //                     assert!(diff, "{},{},{}", diff, i, j);
-    //                     let diff = (table.get(i, j, State::Ins) - ins).abs() < 2.;
-    //                     assert!(diff, "{},{}", i, j);
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
-    // #[test]
-    // fn forward_backward_test() {
-    //     let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198);
-    //     let template = gen_seq::generate_seq(&mut rng, 100);
-    //     let hmm = PHMM::default();
-    //     let radius = 10;
-    //     let profile = gen_seq::Profile {
-    //         sub: 0.01,
-    //         del: 0.01,
-    //         ins: 0.01,
-    //     };
-    //     for _ in 0..100 {
-    //         let seq = gen_seq::introduce_randomness(&template, &mut rng, &profile);
-    //         let profile_exact = hmm.get_profile(&template, &seq);
-    //         let profile_banded = hmm.get_profile_banded(&template, &seq, radius).unwrap();
-    //         assert!((profile_banded.total_likelihood - profile_exact.total_likelihood).abs() < 0.1);
-    //         for (x, y) in profile_banded
-    //             .match_prob
-    //             .iter()
-    //             .zip(profile_exact.match_prob.iter())
-    //         {
-    //             assert!((x - y).abs() < 0.1f64);
-    //         }
-    //         for (x, y) in profile_banded
-    //             .deletion_prob
-    //             .iter()
-    //             .zip(profile_exact.deletion_prob.iter())
-    //         {
-    //             assert!((x - y).abs() < 0.1f64);
-    //         }
-    //         for (x, y) in profile_banded
-    //             .insertion_prob
-    //             .iter()
-    //             .zip(profile_exact.insertion_prob.iter())
-    //         {
-    //             assert!((x - y).abs() < 0.1f64);
-    //         }
-    //         for (x, y) in profile_banded
-    //             .match_bases
-    //             .iter()
-    //             .zip(profile_exact.match_bases.iter())
-    //         {
-    //             let diff = x
-    //                 .iter()
-    //                 .zip(y.iter())
-    //                 .map(|(x, y)| (x != y) as u8)
-    //                 .sum::<u8>();
-    //             assert_eq!(diff, 0, "{:?},{:?}", x, y);
-    //         }
-    //     }
-    // }
 }

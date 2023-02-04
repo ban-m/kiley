@@ -1,14 +1,14 @@
 use crate::bialignment;
 use crate::op::Op;
 use crate::padseq;
-use crate::sam;
 use crate::PolishConfig;
 use crate::SeqRecord;
+use bio_utils::sam;
 use rayon::prelude::*;
 
-pub(super) fn polish_single<I, S, J, T>(
+pub(crate) fn polish_single<I, S, J, T>(
     template: &SeqRecord<I, S>,
-    alignments: &[(&sam::Record, &SeqRecord<J, T>)],
+    alignments: &[(&bio_utils::sam::Record, &SeqRecord<J, T>)],
     config: &PolishConfig,
 ) -> SeqRecord<String, Vec<u8>>
 where
@@ -292,70 +292,3 @@ fn revcmp(xs: &[u8]) -> Vec<u8> {
         .rev()
         .collect()
 }
-
-// fn edlib_global(target: &[u8], query: &[u8]) -> Vec<Op> {
-//     let task = edlib_sys::AlignTask::Alignment;
-//     let mode = edlib_sys::AlignMode::Global;
-//     let aln = edlib_sys::align(query, target, mode, task);
-//     use Op::*;
-//     const EDLIB2KILEY: [Op; 4] = [Match, Ins, Del, Mismatch];
-//     assert!(aln.operations().is_some());
-//     match aln.operations() {
-//         Some(aln) => aln.iter().map(|x| EDLIB2KILEY[*x as usize]).collect(),
-//         None => vec![],
-//     }
-// }
-
-// // Split reads into size intervals. Note that the last chunks is merged the 2nd last one.
-// fn partition_query<'a>(
-//     draft: &[u8],
-//     query: &'a [u8],
-//     split_positions: &[usize],
-// ) -> Vec<(usize, &'a [u8])> {
-//     assert!(!split_positions.is_empty());
-//     let ops = edlib_global(draft, query);
-//     let (mut i, mut j) = (0, 0);
-//     let mut q_split_position = vec![];
-//     let mut target_poss = split_positions.iter();
-//     let mut target_pos = match target_poss.next() {
-//         Some(&res) => res,
-//         None => return vec![(0, query)],
-//     };
-//     for op in ops {
-//         match op {
-//             Op::Match | Op::Mismatch => {
-//                 if i == target_pos {
-//                     q_split_position.push(j);
-//                     target_pos = match target_poss.next() {
-//                         Some(&res) => res,
-//                         None => break,
-//                     };
-//                 }
-//                 i += 1;
-//                 j += 1;
-//             }
-//             Op::Del => {
-//                 if i == target_pos {
-//                     q_split_position.push(j);
-//                     target_pos = match target_poss.next() {
-//                         Some(&res) => res,
-//                         None => break,
-//                     };
-//                 }
-//                 i += 1;
-//             }
-//             Op::Ins => j += 1,
-//         }
-//     }
-//     assert_eq!(q_split_position.len(), split_positions.len());
-//     let mut split: Vec<_> = q_split_position
-//         .windows(2)
-//         .enumerate()
-//         .map(|(bin, w)| (bin, &query[w[0]..w[1]]))
-//         .collect();
-//     let query_last = *q_split_position
-//         .last()
-//         .unwrap_or_else(|| panic!("{}", line!()));
-//     split.push((split_positions.len() - 1, &query[query_last..]));
-//     split
-// }

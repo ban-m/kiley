@@ -1,30 +1,22 @@
-use kiley::gen_seq;
-use rand::Rng;
-use rand::SeedableRng;
-use rand_xoshiro::Xoroshiro128PlusPlus;
-fn main() -> std::io::Result<()> {
-    env_logger::init();
-    let len = 500;
-    let seed = 2032;
-    let mut rng: Xoroshiro128PlusPlus = SeedableRng::seed_from_u64(seed);
-    let seq = gen_seq::generate_seq(&mut rng, len);
-    let profile = gen_seq::Profile {
-        sub: 0.02,
-        del: 0.02,
-        ins: 0.02,
+const SEED: u64 = 4320948;
+const HMMLEN: usize = 100;
+fn main() {
+    use rand::SeedableRng;
+    use rand_xoshiro::Xoshiro256StarStar;
+    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
+    let profile = kiley::gen_seq::Profile {
+        sub: 0.01,
+        del: 0.01,
+        ins: 0.01,
     };
-    let draft = gen_seq::introduce_randomness(&seq, &mut rng, &profile);
-    let hmm = kiley::hmm::PairHiddenMarkovModel::default();
-    for _ in 0..200 {
-        let len = rng.gen_range(300..500);
-        let query = gen_seq::introduce_randomness(&seq[len..], &mut rng, &profile);
-        let ops = kiley::bialignment::global(&draft, &query, 1, -1, -1, -3).1;
-        let len = hmm
-            .modification_table(&draft, &query, 20, &ops)
-            .unwrap()
-            .0
-            .len();
-        println!("{len}");
+    let mut time = std::time::Duration::new(0, 0);
+    let phmm = kiley::hmm::PHMM::default();
+    for _ in 0..100 {
+        let template = kiley::gen_seq::generate_seq(&mut rng, HMMLEN);
+        let seq = kiley::gen_seq::introduce_randomness(&template, &mut rng, &profile);
+        let start = std::time::Instant::now();
+        phmm.modification_table_full(&template, &seq);
+        time += std::time::Instant::now() - start;
     }
-    Ok(())
+    println!("{}", time.as_millis());
 }

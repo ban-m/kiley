@@ -150,7 +150,7 @@ fn hmm_naive(b: &mut test::Bencher) {
 }
 
 #[bench]
-fn hmm_banded(b: &mut test::Bencher) {
+fn hmm_modif_table_full(b: &mut test::Bencher) {
     let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
     let profile = kiley::gen_seq::Profile {
         sub: 0.01,
@@ -161,6 +161,6 @@ fn hmm_banded(b: &mut test::Bencher) {
     b.iter(|| {
         let template = kiley::gen_seq::generate_seq(&mut rng, HMMLEN);
         let seq = kiley::gen_seq::introduce_randomness(&template, &mut rng, &profile);
-        test::black_box(phmm.likelihood_banded(&template, &seq, 20))
+        test::black_box(phmm.modification_table_full(&template, &seq))
     });
 }
