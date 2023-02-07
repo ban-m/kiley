@@ -431,7 +431,7 @@ impl DPTable {
 }
 
 /// Guided version of the pair HMM on the forward and reverse strands.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PairHiddenMarkovModelOnStrands {
     forward: PairHiddenMarkovModel,
     reverse: PairHiddenMarkovModel,
