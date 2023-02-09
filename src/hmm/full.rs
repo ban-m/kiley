@@ -1,9 +1,9 @@
-use super::guided::COPY_SIZE;
-use super::guided::DEL_SIZE;
-use super::guided::NUM_ROW;
 use super::DPTable;
 use super::PairHiddenMarkovModel;
 use super::State;
+use super::COPY_SIZE;
+use super::DEL_SIZE;
+use super::NUM_ROW;
 use crate::logsumexp;
 use crate::op::Op;
 use crate::EP;

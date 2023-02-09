@@ -9,10 +9,10 @@ use crate::op::Op;
 fn sum((x, y, z): (f64, f64, f64)) -> f64 {
     x + y + z
 }
+use super::COPY_SIZE;
+use super::DEL_SIZE;
+use super::NUM_ROW;
 
-pub const COPY_SIZE: usize = 3;
-pub const DEL_SIZE: usize = 3;
-pub const NUM_ROW: usize = 8 + COPY_SIZE + DEL_SIZE;
 // After introducing mutation, we would take INACTIVE_TIME bases just as-is.
 pub const INACTIVE_TIME: usize = 5;
 
@@ -1414,23 +1414,43 @@ impl super::PairHiddenMarkovModelOnStrands {
         T: std::borrow::Borrow<[u8]> + Sync + Send,
         O: std::borrow::Borrow<[Op]> + Sync + Send,
     {
+        use rayon::prelude::*;
         const INIT_WEIGHT: f64 = 0.0005;
-        let mut fnext = PairHiddenMarkovModel::uniform(INIT_WEIGHT);
-        let mut rnext = fnext.clone();
-        for datapack in training_datapack.iter() {
-            assert_eq!(datapack.sequences.len(), datapack.operations.len());
-            let baum_welch = self.baum_welch(datapack, radius);
-            let rs = datapack.consensus;
-            for (memory, qs, direction) in baum_welch {
-                match direction {
-                    true => self.forward().register_naive(&memory, rs, qs, &mut fnext),
-                    false => self.reverse().register_naive(&memory, rs, qs, &mut rnext),
-                };
-            }
+        fn init_model() -> PairHiddenMarkovModelOnStrands {
+            let forward = PairHiddenMarkovModel::zeros();
+            let reverse = PairHiddenMarkovModel::zeros();
+            PairHiddenMarkovModelOnStrands::new(forward, reverse)
         }
-        fnext.normalize();
-        rnext.normalize();
-        *self = PairHiddenMarkovModelOnStrands::new(fnext, rnext);
+        let mut next = training_datapack
+            .par_iter()
+            .flat_map(|datapack| {
+                assert_eq!(datapack.sequences.len(), datapack.operations.len());
+                self.baum_welch(datapack, radius)
+                    .into_par_iter()
+                    .map(move |(memory, qs, direction)| (memory, qs, direction, datapack.consensus))
+            })
+            .fold(init_model, |mut model, (memory, qs, direction, rs)| {
+                match direction {
+                    true => self
+                        .forward()
+                        .register_naive(&memory, rs, qs, &mut model.forward),
+                    false => self
+                        .reverse()
+                        .register_naive(&memory, rs, qs, &mut model.reverse),
+                };
+                model
+            })
+            .reduce(
+                || init_model(),
+                |mut next, part| {
+                    next.forward.merge(&part.forward);
+                    next.reverse.merge(&part.reverse);
+                    next
+                },
+            );
+        next.forward.normalize();
+        next.reverse.normalize();
+        *self = next;
     }
     /// With bootstrap operations and taking numbers.
     /// The returned operations would be consistent with the returned sequence.

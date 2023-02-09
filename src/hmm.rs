@@ -2,8 +2,13 @@
 use crate::op::Op;
 pub mod full;
 pub mod guided;
+pub mod guided_antidiagonal;
 use crate::EP;
 use serde::{Deserialize, Serialize};
+
+pub const COPY_SIZE: usize = 3;
+pub const DEL_SIZE: usize = 3;
+pub const NUM_ROW: usize = 8 + COPY_SIZE + DEL_SIZE;
 
 const fn base_table() -> [usize; 256] {
     let mut slots = [0; 256];
@@ -489,6 +494,8 @@ where
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use rand::SeedableRng;
+    use rand_xoshiro::Xoshiro256PlusPlus;
     #[test]
     fn align() {
         let phmm = PHMM::default();
@@ -506,5 +513,23 @@ pub mod tests {
         use Op::*;
         let answer = vec![vec![Match; 2], vec![Del], vec![Match; 4], vec![Del; 9]].concat();
         assert_eq!(ops, answer);
+    }
+    #[test]
+    fn hmm_full_guided() {
+        let len = 100;
+        let hmm = PairHiddenMarkovModel::default();
+        let profile = crate::gen_seq::Profile::new(0.01, 0.01, 0.01);
+        for seed in 0..100 {
+            let mut rng: Xoshiro256PlusPlus = SeedableRng::seed_from_u64(seed);
+            let template = crate::gen_seq::generate_seq(&mut rng, len);
+            let query = crate::gen_seq::introduce_randomness(&template, &mut rng, &profile);
+            let (path_full, lk_full) = hmm.align(&template, &query);
+            let (path_guided, lk_guided) = hmm.align(&template, &query);
+            assert_eq!(path_full, path_guided);
+            assert!((lk_full - lk_guided).abs() < 0.001);
+            let likelihood_full = hmm.likelihood(&template, &query);
+            let likelihood_guided = hmm.likelihood_guided(&template, &query, &path_full, 20);
+            assert!((likelihood_full - likelihood_guided).abs() < 0.001);
+        }
     }
 }
