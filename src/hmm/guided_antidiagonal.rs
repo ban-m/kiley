@@ -46,16 +46,18 @@ fn filling_region(ops: &[Op], radius: usize, rlen: usize, qlen: usize) -> Vec<(u
             Op::Del => position_at_antidiagonal.push(qpos),
         }
     }
-    position_at_antidiagonal
-        .iter()
-        .enumerate()
-        .map(|(anti_d, &x)| {
-            let radius_start = radius.max(x).max(x.saturating_sub(anti_d));
-            let start = x.saturating_sub(radius);
-            let end = (x + radius).min(qlen) + 1;
-            (start, end)
-        })
-        .collect()
+    todo!()
+    // position_at_antidiagonal
+    //     .iter()
+    //     .enumerate()
+    //     .map(|(anti_d, &x)| {
+    //         let radius_start = radius.max(x).max(x.saturating_sub(anti_d));
+    //         let radius_end = radius.min()
+    //         let start = x.saturating_sub(radius);
+    //         let end = (x + radius).min(qlen) + 1;
+    //         (start, end)
+    //     })
+    //     .collect()
 }
 
 #[derive(Debug, Clone)]
