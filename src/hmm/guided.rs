@@ -4,6 +4,7 @@ use super::State;
 use super::BASE_TABLE;
 use crate::bialignment::guided::re_fill_fill_range;
 use crate::dptable::DPTable;
+use crate::hmm::polish_by_modification_table;
 use crate::op::bootstrap_ops;
 use crate::op::Op;
 fn sum((x, y, z): (f64, f64, f64)) -> f64 {
@@ -16,41 +17,18 @@ use super::NUM_ROW;
 // After introducing mutation, we would take INACTIVE_TIME bases just as-is.
 pub const INACTIVE_TIME: usize = 5;
 
+use super::HMMPolishConfig;
 use std::f64::MIN_POSITIVE;
 
-#[derive(Debug, Clone)]
-/// Configurations
-pub struct HMMConfig {
-    pub radius: usize,
-    pub take_num: usize,
-    pub ignore_edge: usize,
-}
-
-impl HMMConfig {
-    pub fn new(radius: usize, take_num: usize, ignore_edge: usize) -> Self {
-        Self {
-            radius,
-            take_num,
-            ignore_edge,
-        }
-    }
-}
-
 impl super::PairHiddenMarkovModel {
-    pub fn align_guided(&self, rs: &[u8], qs: &[u8], radius: usize) -> (f64, Vec<Op>) {
+    pub fn align_guided_bootstrap(&self, rs: &[u8], qs: &[u8], radius: usize) -> (f64, Vec<Op>) {
         let mut ops = bootstrap_ops(rs.len(), qs.len());
         let mut memory = Memory::with_capacity(rs.len(), radius);
         let lk = self.update_aln_path(&mut memory, rs, qs, &mut ops);
         assert!(lk <= 0.0, "{},{:?}", lk, self);
         (lk, ops)
     }
-    pub fn update_aln_path(
-        &self,
-        memory: &mut Memory,
-        rs: &[u8],
-        qs: &[u8],
-        ops: &mut Vec<Op>,
-    ) -> f64 {
+    fn update_aln_path(&self, memory: &mut Memory, rs: &[u8], qs: &[u8], ops: &mut Vec<Op>) -> f64 {
         memory.set_fill_ranges(rs.len(), qs.len(), ops);
         memory.initialize();
         self.fill_viterbi(memory, rs, qs);
@@ -428,6 +406,7 @@ impl super::PairHiddenMarkovModel {
                     .filter(|len| j + len < rs.len())
                     .zip(slots.iter_mut().skip(8))
                     .for_each(|(len, y)| {
+                        // ToDo: Has a bug? It seems that the number of scaling factor is somewhat different....
                         let pos = j + len + 1;
                         let r = rs[j];
                         let mat = self.obs(r, q) * post_mat_mat;
@@ -548,7 +527,7 @@ impl super::PairHiddenMarkovModel {
         self.fill_post_dp(memory, rs, qs);
         memory.post.get(0, 0).0.ln() + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>()
     }
-    pub fn likelihood_bootstrap(&self, rs: &[u8], qs: &[u8], radius: usize) -> f64 {
+    pub fn likelihood_guided_bootstrap(&self, rs: &[u8], qs: &[u8], radius: usize) -> f64 {
         let ops = bootstrap_ops(rs.len(), qs.len());
         self.likelihood_guided(rs, qs, &ops, radius)
     }
@@ -565,18 +544,18 @@ impl super::PairHiddenMarkovModel {
         assert!(!(mat + ins + del).is_nan(), "{},{},{}", mat, ins, del);
         (mat + del + ins).ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
     }
-    pub fn likelihood_guided_post(&self, rs: &[u8], qs: &[u8], ops: &[Op], radius: usize) -> f64 {
-        let mut memory = Memory::with_capacity(rs.len(), radius);
-        memory.fill_ranges.clear();
-        memory
-            .fill_ranges
-            .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
-        re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut memory.fill_ranges);
-        memory.initialize();
-        self.fill_post_dp(&mut memory, rs, qs);
-        memory.post.get(0, 0).0.ln() + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>()
-    }
-    pub fn modification_table(
+    // fn likelihood_guided_post(&self, rs: &[u8], qs: &[u8], ops: &[Op], radius: usize) -> f64 {
+    //     let mut memory = Memory::with_capacity(rs.len(), radius);
+    //     memory.fill_ranges.clear();
+    //     memory
+    //         .fill_ranges
+    //         .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
+    //     re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut memory.fill_ranges);
+    //     memory.initialize();
+    //     self.fill_post_dp(&mut memory, rs, qs);
+    //     memory.post.get(0, 0).0.ln() + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>()
+    // }
+    pub fn modification_table_guided(
         &self,
         rs: &[u8],
         qs: &[u8],
@@ -587,44 +566,23 @@ impl super::PairHiddenMarkovModel {
         let lk = self.update(&mut memory, rs, qs, ops)?;
         Some((memory.mod_table, lk))
     }
-
     /// With bootstrap operations and taking numbers.
     /// The returned operations would be consistent with the returned sequence.
     /// Only the *first* `take_num` seuqneces would be used to polish,
     /// but the operations of the rest are also updated accordingly.
     /// This is (slightly) faster than the usual/full polishing...
-    pub fn polish_until_converge_with_take<T, O>(
+    pub fn polish_until_converge_guided<T, O>(
         &self,
         draft: &[u8],
         xs: &[T],
         ops: &mut [O],
-        radius: usize,
-        take_num: usize,
+        config: &HMMPolishConfig,
     ) -> Vec<u8>
     where
         T: std::borrow::Borrow<[u8]>,
         O: std::borrow::BorrowMut<Vec<Op>>,
     {
-        let config = HMMConfig::new(radius, take_num, 0);
-        self.polish_until_converge_with_conf(draft, xs, ops, &config)
-    }
-    /// With bootstrap operations and taking numbers.
-    /// The returned operations would be consistent with the returned sequence.
-    /// Only the *first* `take_num` seuqneces would be used to polish,
-    /// but the operations of the rest are also updated accordingly.
-    /// This is (slightly) faster than the usual/full polishing...
-    pub fn polish_until_converge_with_conf<T, O>(
-        &self,
-        draft: &[u8],
-        xs: &[T],
-        ops: &mut [O],
-        config: &HMMConfig,
-    ) -> Vec<u8>
-    where
-        T: std::borrow::Borrow<[u8]>,
-        O: std::borrow::BorrowMut<Vec<Op>>,
-    {
-        let &HMMConfig {
+        let &HMMPolishConfig {
             radius,
             take_num,
             ignore_edge,
@@ -667,18 +625,11 @@ impl super::PairHiddenMarkovModel {
                     *lk = -1000000000000000000000000000000f64;
                 }
             }
-            let changed_pos = polish_guided(&mut template, &modif_table, current_lk, inactive);
-            let edit_path = changed_pos.iter().map(|&(pos, op)| {
-                if op < 4 {
-                    (pos, crate::op::Edit::Subst)
-                } else if op < 8 {
-                    (pos, crate::op::Edit::Insertion)
-                } else if op < 8 + COPY_SIZE {
-                    (pos, crate::op::Edit::Copy(op - 8 + 1))
-                } else {
-                    (pos, crate::op::Edit::Deletion(op - 8 - COPY_SIZE + 1))
-                }
-            });
+            let changed_pos =
+                polish_by_modification_table(&mut template, &modif_table, current_lk, inactive);
+            let edit_path = changed_pos
+                .iter()
+                .map(|&(pos, op)| (pos, super::usize_to_edit_op(op)));
             for (ops, seq) in ops.iter_mut().zip(xs.iter()) {
                 let ops = ops.borrow_mut();
                 let seq = seq.borrow();
@@ -703,7 +654,6 @@ impl super::PairHiddenMarkovModel {
                         let edop = crate::edlib_global(&template, seq);
                         let lk2 = self.lk(&mut memory, &template, seq, &edop);
                         if lk + 0.1 < lk2 {
-                            // trace!("{t}\t{i}\t{:.3}\t{:.3}", lk, lk2);
                             *ops = edop;
                             true
                         } else {
@@ -718,19 +668,7 @@ impl super::PairHiddenMarkovModel {
         }
         template
     }
-    /// With bootstrap operations. The returned operations would be
-    /// consistent with the returned sequence.
-    pub fn polish_until_converge_with<T: std::borrow::Borrow<[u8]>>(
-        &self,
-        draft: &[u8],
-        xs: &[T],
-        ops: &mut [Vec<Op>],
-        radius: usize,
-    ) -> Vec<u8> {
-        let config = HMMConfig::new(radius, xs.len(), 0);
-        self.polish_until_converge_with_conf(draft, xs, ops, &config)
-    }
-    pub fn polish_until_converge<T: std::borrow::Borrow<[u8]>>(
+    pub fn polish_until_converge_guided_bootstrap<T: std::borrow::Borrow<[u8]>>(
         &self,
         template: &[u8],
         xs: &[T],
@@ -740,115 +678,10 @@ impl super::PairHiddenMarkovModel {
             .iter()
             .map(|seq| bootstrap_ops(template.len(), seq.borrow().len()))
             .collect();
-        let config = HMMConfig::new(radius, xs.len(), 0);
-        self.polish_until_converge_with_conf(template, xs, &mut ops, &config)
+        let config = HMMPolishConfig::new(radius, xs.len(), 0);
+        self.polish_until_converge_guided(template, xs, &mut ops, &config)
     }
-    pub fn fit_by_alignment<T: std::borrow::Borrow<[u8]>, O: std::borrow::Borrow<[Op]>>(
-        &mut self,
-        template: &[u8],
-        xss: &[T],
-        radius: usize,
-    ) {
-        let ops: Vec<_> = xss
-            .iter()
-            .map(|xs| self.align_guided(template, xs.borrow(), radius).1)
-            .collect();
-        self.fit_by_alignment_with(template, xss, &ops);
-    }
-    pub fn fit_by_alignment_with<T: std::borrow::Borrow<[u8]>, O: std::borrow::Borrow<[Op]>>(
-        &mut self,
-        template: &[u8],
-        xss: &[T],
-        ops: &[O],
-    ) {
-        // From -> To. Mat, Ins, Del = 0, 1, 2
-        fn op_to_state(op: Op) -> usize {
-            match op {
-                Op::Mismatch => 0,
-                Op::Match => 0,
-                Op::Ins => 1,
-                Op::Del => 2,
-            }
-        }
-        let mut transitions = [[1f64; 3]; 3];
-        let mut mat_emit = [1f64; 16];
-        let mut ins_emit = [1f64; 20];
-        for (ops, xs) in ops.iter().zip(xss.iter()) {
-            let ops = ops.borrow();
-            let xs = xs.borrow();
-            if ops.len() < 2 {
-                continue;
-            }
-            let mut state = op_to_state(ops[0]);
-            let (mut rpos, mut qpos) = (0, 0);
-            let rbase = BASE_TABLE[template[rpos] as usize] << 2;
-            let qbase = BASE_TABLE[xs[qpos] as usize];
-            match state {
-                0 => {
-                    mat_emit[(rbase | qbase) as usize] += 1f64;
-                    rpos += 1;
-                    qpos += 1;
-                }
-                1 => {
-                    ins_emit[(rbase | qbase) as usize] += 1f64;
-                    qpos += 1;
-                }
-                _ => {
-                    rpos += 1;
-                }
-            }
-            for op in ops.iter().skip(1) {
-                let next = op_to_state(*op);
-                transitions[state][next] += 1f64;
-                state = next;
-                match state {
-                    0 => {
-                        let rbase = BASE_TABLE[template[rpos] as usize] << 2;
-                        let qbase = BASE_TABLE[xs[qpos] as usize];
-                        mat_emit[(rbase | qbase) as usize] += 1f64;
-                        rpos += 1;
-                        qpos += 1;
-                    }
-                    1 => {
-                        let rbase = BASE_TABLE[template[rpos] as usize] << 2;
-                        let qbase = BASE_TABLE[xs[qpos] as usize];
-                        ins_emit[(rbase | qbase) as usize] += 1f64;
-                        qpos += 1;
-                    }
-                    _ => {
-                        rpos += 1;
-                    }
-                }
-            }
-        }
-        for &base in template.iter() {
-            ins_emit[16 + BASE_TABLE[base as usize] as usize] += 1.0;
-        }
-        for state in ins_emit.chunks_exact_mut(4) {
-            let sum: f64 = state.iter().sum();
-            state.iter_mut().for_each(|x| *x /= sum);
-        }
-        for state in mat_emit.chunks_exact_mut(4) {
-            let sum: f64 = state.iter().sum();
-            state.iter_mut().for_each(|x| *x /= sum);
-        }
-        for from_state in transitions.iter_mut() {
-            let sum: f64 = from_state.iter().sum();
-            from_state.iter_mut().for_each(|x| *x /= sum);
-        }
-        self.ins_emit = ins_emit;
-        self.mat_emit = mat_emit;
-        self.mat_mat = transitions[0][0];
-        self.mat_ins = transitions[0][1];
-        self.mat_del = transitions[0][2];
-        self.ins_mat = transitions[1][0];
-        self.ins_ins = transitions[1][1];
-        self.ins_del = transitions[1][2];
-        self.del_mat = transitions[2][0];
-        self.del_ins = transitions[2][1];
-        self.del_del = transitions[2][2];
-    }
-    pub fn fit_naive_with<T: std::borrow::Borrow<[u8]>, O: std::borrow::Borrow<[Op]>>(
+    pub fn fit_guided<T: std::borrow::Borrow<[u8]>, O: std::borrow::Borrow<[Op]>>(
         &mut self,
         template: &[u8],
         xss: &[T],
@@ -884,7 +717,7 @@ impl super::PairHiddenMarkovModel {
         next.normalize();
         *self = next;
     }
-    pub fn fit_naive_with_par<T, O>(&mut self, template: &[u8], xss: &[T], ops: &[O], radius: usize)
+    pub fn fig_guided_par<T, O>(&mut self, template: &[u8], xss: &[T], ops: &[O], radius: usize)
     where
         T: std::borrow::Borrow<[u8]> + Sync + Send,
         O: std::borrow::Borrow<[Op]> + Sync + Send,
@@ -933,7 +766,7 @@ impl super::PairHiddenMarkovModel {
         next.normalize();
         *self = next;
     }
-    pub fn fit_multiple_with_par<S, T, O>(
+    pub fn fit_guided_par_multiple<S, T, O>(
         &mut self,
         training_triples: &[(S, &[T], &[O])],
         radius: usize,
@@ -987,18 +820,7 @@ impl super::PairHiddenMarkovModel {
         next.normalize();
         *self = next;
     }
-    pub fn fit_naive<T: std::borrow::Borrow<[u8]>>(
-        &mut self,
-        template: &[u8],
-        xss: &[T],
-        radius: usize,
-    ) {
-        let ops: Vec<_> = xss
-            .iter()
-            .map(|seq| bootstrap_ops(template.len(), seq.borrow().len()))
-            .collect();
-        self.fit_naive_with(template, xss, &ops, radius);
-    }
+
     fn register_naive(&self, mem: &Memory, rs: &[u8], qs: &[u8], next: &mut Self) {
         // Scaling factors
         // i => sum_{t=0}^{i} ln C_F[t]
@@ -1191,7 +1013,7 @@ fn logsumexp(xs: &[f64]) -> f64 {
     }
 }
 
-pub struct Memory {
+struct Memory {
     pre: DPTable<(f64, f64, f64)>,
     post: DPTable<(f64, f64, f64)>,
     // Scaling factor.
@@ -1206,10 +1028,7 @@ pub struct Memory {
 
 impl Memory {
     const MIN_RADIUS: usize = 4;
-    pub fn mod_table(&self) -> &[f64] {
-        &self.mod_table
-    }
-    pub fn with_capacity(rlen: usize, radius: usize) -> Self {
+    fn with_capacity(rlen: usize, radius: usize) -> Self {
         let fill_ranges = Vec::with_capacity(radius * rlen * 3);
         let mod_table = Vec::with_capacity(radius * rlen * 3);
         Self {
@@ -1281,82 +1100,6 @@ impl Memory {
     }
 }
 
-// Minimum required improvement on the likelihood.
-// In a desirable case, it is exactly zero, but as a matter of fact,
-// the likelihood is sometimes wobble between very small values,
-// so this "min-requirement" is nessesarry.
-const MIN_UP: f64 = 0.00001;
-
-// TODO:Maybe we should choose a position to be changed by window.
-fn polish_guided(
-    template: &mut Vec<u8>,
-    modif_table: &[f64],
-    current_lk: f64,
-    inactive: usize,
-) -> Vec<(usize, usize)> {
-    let orig_len = template.len();
-    let mut changed_positions = vec![];
-    let mut modif_table = modif_table.chunks_exact(NUM_ROW);
-    let mut pos = 0;
-    while let Some(row) = modif_table.next() {
-        if row.iter().any(|x| x.is_nan()) {
-            panic!("{:?}", row);
-        }
-        let (op, &lk) = row
-            .iter()
-            .enumerate()
-            .max_by(|x, y| (x.1).partial_cmp(y.1).unwrap())
-            .unwrap();
-        if current_lk + MIN_UP < lk && pos < orig_len {
-            changed_positions.push((pos, op));
-            if op < 4 {
-                // Mutateion.
-                template.push(b"ACGT"[op]);
-                pos += 1;
-            } else if op < 8 {
-                // Insertion before this base.
-                template.push(b"ACGT"[op - 4]);
-                template.push(template[pos]);
-                pos += 1;
-            } else if op < 8 + COPY_SIZE {
-                // copy from here to here + (op - 8) + 1 base
-                let len = (op - 8) + 1;
-                for i in pos..pos + len {
-                    template.push(template[i]);
-                }
-                template.push(template[pos]);
-                pos += 1;
-            } else if op < NUM_ROW {
-                // Delete from here to here + 1 + (op - 8 - COPY_SIZE).
-                let del_size = op - 8 - COPY_SIZE + 1;
-                pos += del_size;
-                (0..del_size - 1).filter_map(|_| modif_table.next()).count();
-            } else {
-                unreachable!()
-            }
-            for i in pos..(pos + inactive).min(orig_len) {
-                template.push(template[i]);
-            }
-            pos = (pos + inactive).min(orig_len);
-            (0..inactive).filter_map(|_| modif_table.next()).count();
-        } else if pos < orig_len {
-            template.push(template[pos]);
-            pos += 1;
-        } else if current_lk + MIN_UP < lk && (4..8).contains(&op) {
-            changed_positions.push((pos, op));
-            // Here, we need to consider the last insertion...
-            template.push(b"ACGT"[op - 4]);
-        }
-    }
-    assert_eq!(pos, orig_len);
-    let mut idx = 0;
-    template.retain(|_| {
-        idx += 1;
-        orig_len < idx
-    });
-    changed_positions
-}
-
 use super::PairHiddenMarkovModelOnStrands;
 use super::TrainingDataPack;
 impl super::PairHiddenMarkovModelOnStrands {
@@ -1406,7 +1149,7 @@ impl super::PairHiddenMarkovModelOnStrands {
             })
             .collect()
     }
-    pub fn fit_multiple_with_par<'a, T, O>(
+    pub fn fig_guided_par_multiple<'a, T, O>(
         &mut self,
         training_datapack: &[TrainingDataPack<'a, T, O>],
         radius: usize,
@@ -1448,6 +1191,10 @@ impl super::PairHiddenMarkovModelOnStrands {
                     next
                 },
             );
+        next.forward
+            .merge(&PairHiddenMarkovModel::uniform(INIT_WEIGHT));
+        next.reverse
+            .merge(&PairHiddenMarkovModel::uniform(INIT_WEIGHT));
         next.forward.normalize();
         next.reverse.normalize();
         *self = next;
@@ -1458,19 +1205,19 @@ impl super::PairHiddenMarkovModelOnStrands {
     /// but the operations of the rest are also updated accordingly.
     /// This is (slightly) faster than the usual/full polishing...
     /// strands: `true` if forward.
-    pub fn polish_until_converge_with_conf<T, O>(
+    pub fn polish_until_converge_guided<T, O>(
         &self,
         draft: &[u8],
         xs: &[T],
         ops: &mut [O],
         strands: &[bool],
-        config: &HMMConfig,
+        config: &HMMPolishConfig,
     ) -> Vec<u8>
     where
         T: std::borrow::Borrow<[u8]>,
         O: std::borrow::BorrowMut<Vec<Op>>,
     {
-        let &HMMConfig {
+        let &HMMPolishConfig {
             radius,
             take_num,
             ignore_edge,
@@ -1517,18 +1264,11 @@ impl super::PairHiddenMarkovModelOnStrands {
                     *lk = -1000000000000000000000000000000f64;
                 }
             }
-            let changed_pos = polish_guided(&mut template, &modif_table, current_lk, inactive);
-            let edit_path = changed_pos.iter().map(|&(pos, op)| {
-                if op < 4 {
-                    (pos, crate::op::Edit::Subst)
-                } else if op < 8 {
-                    (pos, crate::op::Edit::Insertion)
-                } else if op < 8 + COPY_SIZE {
-                    (pos, crate::op::Edit::Copy(op - 8 + 1))
-                } else {
-                    (pos, crate::op::Edit::Deletion(op - 8 - COPY_SIZE + 1))
-                }
-            });
+            let changed_pos =
+                polish_by_modification_table(&mut template, &modif_table, current_lk, inactive);
+            let edit_path = changed_pos
+                .iter()
+                .map(|&(pos, op)| (pos, super::usize_to_edit_op(op)));
             for (ops, seq) in ops.iter_mut().zip(xs.iter()) {
                 let ops = ops.borrow_mut();
                 let seq = seq.borrow();
@@ -1540,7 +1280,6 @@ impl super::PairHiddenMarkovModelOnStrands {
                 if matches!(current_max,Some(lk) if current_lk < lk + 0.1) {
                     break 'outer;
                 }
-                // trace!("NOWLK\t{}", current_lk);
                 current_max = Some(current_lk);
                 let is_updated = ops
                     .iter_mut()
@@ -1558,7 +1297,6 @@ impl super::PairHiddenMarkovModelOnStrands {
                         let edop = crate::edlib_global(&template, seq);
                         let lk2 = model.lk(&mut memory, &template, seq, &edop);
                         if lk + 0.1 < lk2 {
-                            // trace!("{t}\t{i}\t{:.3}\t{:.3}", lk, lk2);
                             *ops = edop;
                             true
                         } else {
@@ -1567,7 +1305,7 @@ impl super::PairHiddenMarkovModelOnStrands {
                     })
                     .fold(false, |is_updated, b| is_updated | b);
                 if !is_updated {
-                    break 'outer;
+                    return template;
                 }
             }
         }
@@ -1585,16 +1323,16 @@ pub mod tests {
     #[test]
     fn align() {
         let model = PairHiddenMarkovModel::default();
-        let (lk, ops) = model.align_guided(b"ACCG", b"ACCG", 5);
+        let (lk, ops) = model.align_guided_bootstrap(b"ACCG", b"ACCG", 5);
         eprintln!("{:?}\t{:.3}", ops, lk);
         assert_eq!(ops, vec![Op::Match; 4]);
-        let (lk, ops) = model.align_guided(b"ACCG", b"", 2);
+        let (lk, ops) = model.align_guided_bootstrap(b"ACCG", b"", 2);
         eprintln!("{:?}\t{:.3}", ops, lk);
         assert_eq!(ops, vec![Op::Del; 4]);
-        let (lk, ops) = model.align_guided(b"", b"ACCG", 2);
+        let (lk, ops) = model.align_guided_bootstrap(b"", b"ACCG", 2);
         assert_eq!(ops, vec![Op::Ins; 4]);
         eprintln!("{:?}\t{:.3}", ops, lk);
-        let (lk, ops) = model.align_guided(b"ATGCCGCACAGTCGAT", b"ATCCGC", 5);
+        let (lk, ops) = model.align_guided_bootstrap(b"ATGCCGCACAGTCGAT", b"ATCCGC", 5);
         eprintln!("{:?}\t{:.3}", ops, lk);
         use Op::*;
         let answer = vec![vec![Match; 2], vec![Del], vec![Match; 4], vec![Del; 9]].concat();
@@ -1605,7 +1343,7 @@ pub mod tests {
         let hmm = PairHiddenMarkovModel::default();
         let radius = 50;
         let seq = gen_seq::introduce_randomness(&template, &mut rng, &profile);
-        hmm.align_guided(&template, &seq, radius);
+        hmm.align_guided_bootstrap(&template, &seq, radius);
     }
     #[test]
     fn likelihood() {
@@ -1614,18 +1352,18 @@ pub mod tests {
         let profile = gen_seq::PROFILE;
         let hmm = PairHiddenMarkovModel::default();
         let radius = 50;
-        let same_lk = hmm.likelihood_bootstrap(&template, &template, radius);
-        let (lk, _) = hmm.align_guided(&template, &template, radius);
+        let same_lk = hmm.likelihood_guided_bootstrap(&template, &template, radius);
+        let (lk, _) = hmm.align_guided_bootstrap(&template, &template, radius);
         let expect = (template.len() as f64 - 1f64) * hmm.mat_mat.ln()
             + (template.len() as f64) * hmm.mat_emit[0].ln();
         assert!(lk < same_lk);
         assert!(expect < same_lk, "{},{}", expect, same_lk);
         for i in 0..10 {
             let seq = gen_seq::introduce_randomness(&template, &mut rng, &profile);
-            let lk = hmm.likelihood_bootstrap(&template, &seq, radius);
+            let lk = hmm.likelihood_guided_bootstrap(&template, &seq, radius);
             assert!(lk < same_lk, "{},{},{}", i, same_lk, lk);
             let seq2 = gen_seq::introduce_randomness(&seq, &mut rng, &profile);
-            let lk2 = hmm.likelihood_bootstrap(&template, &seq2, radius);
+            let lk2 = hmm.likelihood_guided_bootstrap(&template, &seq2, radius);
             assert!(lk2 < lk, "{},{},{}", i, lk2, lk);
         }
     }
@@ -1655,7 +1393,7 @@ pub mod tests {
         let lk_e = logsumexp(&lks);
         eprintln!("{:?},{}", lks, lk_e);
         let radius = 5;
-        let lk = hmm.likelihood_bootstrap(seq1, seq2, radius);
+        let lk = hmm.likelihood_guided_bootstrap(seq1, seq2, radius);
         assert!((lk_e - lk).abs() < 0.001, "{},{}", lk_e, lk);
     }
     #[test]
@@ -1829,7 +1567,7 @@ pub mod tests {
         for (&base, lk_m) in b"ACGT".iter().zip(&modif_table[4..]) {
             mod_version.push(base);
             let lk = hmm.update(&mut memory, &mod_version, query, &ops).unwrap();
-            assert!((lk - lk_m).abs() < 1.0001);
+            assert!((lk - lk_m).abs() < 0.0001);
             mod_version.pop();
         }
     }
@@ -1841,7 +1579,8 @@ pub mod tests {
             let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198 + seed);
             let template = gen_seq::generate_seq(&mut rng, 70);
             let diff = gen_seq::introduce_errors(&template, &mut rng, 2, 2, 2);
-            let polished = hmm.polish_until_converge(&diff, &[template.as_slice()], radius);
+            let polished =
+                hmm.polish_until_converge_guided_bootstrap(&diff, &[template.as_slice()], radius);
             if polished != template {
                 println!("{}", String::from_utf8_lossy(&polished));
                 println!("{}", String::from_utf8_lossy(&template));
@@ -1859,7 +1598,7 @@ pub mod tests {
             let seqs: Vec<_> = (0..20)
                 .map(|_| gen_seq::introduce_randomness(&template, &mut rng, &profile))
                 .collect();
-            let polished = hmm.polish_until_converge(&diff, &seqs, radius);
+            let polished = hmm.polish_until_converge_guided_bootstrap(&diff, &seqs, radius);
             if polished != template {
                 println!("{}", String::from_utf8_lossy(&polished));
                 println!("{}", String::from_utf8_lossy(&template));
@@ -1897,7 +1636,7 @@ pub mod tests {
         let seqs: Vec<_> = (0..20)
             .map(|_| gen_seq::introduce_randomness(&answer, &mut rng, &profile))
             .collect();
-        let polished = hmm.polish_until_converge(&template, &seqs, radius);
+        let polished = hmm.polish_until_converge_guided_bootstrap(&template, &seqs, radius);
         if polished != answer {
             println!("{}", String::from_utf8_lossy(&polished));
             println!("{}", String::from_utf8_lossy(&answer));

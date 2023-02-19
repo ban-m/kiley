@@ -74,7 +74,7 @@ fn viterbi_guided_hmm_ops(b: &mut test::Bencher) {
         let template = kiley::gen_seq::generate_seq(&mut rng, 500);
         let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
         let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
-        hmm.align_guided(&xs, &ys, band)
+        hmm.align_guided_bootstrap(&xs, &ys, band)
     });
 }
 
@@ -88,7 +88,7 @@ fn likelihood_guided_hmm_ops(b: &mut test::Bencher) {
         let template = kiley::gen_seq::generate_seq(&mut rng, 500);
         let xs = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
         let ys = kiley::gen_seq::introduce_randomness(&template, &mut rng, prof);
-        hmm.likelihood_bootstrap(&xs, &ys, band)
+        hmm.likelihood_guided_bootstrap(&xs, &ys, band)
     });
 }
 

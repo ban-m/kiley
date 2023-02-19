@@ -1,22 +1,50 @@
-const SEED: u64 = 4320948;
-const HMMLEN: usize = 100;
+use kiley::gen_seq::Generate;
+macro_rules! elapsed {
+    ($a:expr) => {{
+        let start = std::time::Instant::now();
+        let return_value = $a;
+        let end = std::time::Instant::now();
+        (return_value, (end - start))
+    }};
+}
+
 fn main() {
     use rand::SeedableRng;
     use rand_xoshiro::Xoshiro256StarStar;
-    let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(SEED);
     let profile = kiley::gen_seq::Profile {
         sub: 0.01,
         del: 0.01,
         ins: 0.01,
     };
-    let mut time = std::time::Duration::new(0, 0);
-    let phmm = kiley::hmm::PHMM::default();
-    for _ in 0..100 {
-        let template = kiley::gen_seq::generate_seq(&mut rng, HMMLEN);
-        let seq = kiley::gen_seq::introduce_randomness(&template, &mut rng, &profile);
-        let start = std::time::Instant::now();
-        phmm.modification_table_full(&template, &seq);
-        time += std::time::Instant::now() - start;
+    let len = 2_000;
+    let seed = 100;
+    for seed in 0..seed {
+        let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
+        let template = kiley::gen_seq::generate_seq(&mut rng, len);
+        let query = profile.gen(&template, &mut rng);
+        bench(&template, &query, seed);
     }
-    println!("{}", time.as_millis());
+}
+
+const RADIUS: usize = 100;
+fn bench(template: &[u8], query: &[u8], seed: u64) {
+    let hmm = kiley::hmm::PairHiddenMarkovModel::default();
+    let ((lk_g, _), guided) = elapsed!(hmm.align_guided_bootstrap(template, query, RADIUS));
+    let ((lk_f, op_f), full) = elapsed!(hmm.align(template, query));
+    let ((lk_a, op_a), anti) = elapsed!(hmm.align_antidiagonal_bootstrap(template, query, RADIUS));
+    assert!((lk_g - lk_f).abs() < 0.001);
+    assert!(
+        (lk_a - lk_f).abs() < 0.001,
+        "{},{}\n{:?}\n{:?}",
+        lk_f,
+        lk_a,
+        op_f,
+        op_a
+    );
+    println!(
+        "{seed}\t{}\t{}\t{}",
+        full.as_micros(),
+        guided.as_micros(),
+        anti.as_micros()
+    );
 }

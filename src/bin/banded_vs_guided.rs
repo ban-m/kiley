@@ -34,16 +34,6 @@ fn run_bench(len: usize, coverage: usize, error_rate: f64, rad: usize, seed: u64
     let seed = seed + (rad + coverage) as u64;
     use kiley::gen_seq;
     let prof = gen_seq::PROFILE.norm().mul(error_rate);
-    // use kiley::gphmm::*;
-    // let gphmm = GPHMM::<Cond>::new_three_state(0.9, 0.05, 0.05, 0.9);
-    // let mat = (0.8, 0.1, 0.1);
-    // let ins = (0.8, 0.15, 0.05);
-    // let del = (0.85, 0.15);
-    // let mut emission = [0.05 / 3f64; 16];
-    // for i in 0..4 {
-    //     emission[i * 4 + i] = 0.95;
-    // }
-    // let phmm = kiley::hmm::guided::PairHiddenMarkovModel::new(mat, ins, del, &emission);
     let times: Vec<_> = (0..50)
         .into_par_iter()
         .map(|i| {

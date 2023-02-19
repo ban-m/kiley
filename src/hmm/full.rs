@@ -80,8 +80,8 @@ impl PairHiddenMarkovModel {
     }
     // Naive implementation of backward algorithm.
     pub(crate) fn backward(&self, reference: &[u8], query: &[u8]) -> DPTable {
-        let ys = reference;
         let xs = query;
+        let ys = reference;
         let mut dptable = DPTable::new(xs.len() + 1, ys.len() + 1);
         *dptable.get_mut(xs.len(), ys.len(), State::Match) = 0f64;
         *dptable.get_mut(xs.len(), ys.len(), State::Del) = 0f64;
@@ -97,8 +97,12 @@ impl PairHiddenMarkovModel {
         {
             let mut gap = 0f64;
             for (i, &x) in xs.iter().enumerate().rev() {
+                let prev = match 0 < i {
+                    true => BASE_TABLE[xs[i - 1] as usize] << 2,
+                    false => 16,
+                };
                 let x = BASE_TABLE[x as usize];
-                gap += log_ins_emit[x];
+                gap += log_ins_emit[prev | x];
                 *dptable.get_mut(i, ys.len(), State::Ins) =
                     log_ins_ext * (xs.len() - i) as f64 + gap;
                 *dptable.get_mut(i, ys.len(), State::Del) =
@@ -117,21 +121,24 @@ impl PairHiddenMarkovModel {
             }
         }
         for (i, &x) in xs.iter().enumerate().rev() {
+            let prev = match 0 < i {
+                true => BASE_TABLE[xs[i - 1] as usize] << 2,
+                false => 16,
+            };
             for (j, &y) in ys.iter().enumerate().rev() {
                 // Match state;
                 let x = BASE_TABLE[x as usize];
-                let y = BASE_TABLE[y as usize];
-                let mat = log_mat_ext
-                    + log_mat_emit[(x << 2) | y]
-                    + dptable.get(i + 1, j + 1, State::Match);
+                let y = BASE_TABLE[y as usize] << 2;
+                let mat =
+                    log_mat_ext + log_mat_emit[y | x] + dptable.get(i + 1, j + 1, State::Match);
                 let del = log_del_open + dptable.get(i, j + 1, State::Del);
-                let ins = log_ins_open + log_ins_emit[x] + dptable.get(i + 1, j, State::Ins);
+                let ins = log_ins_open + log_ins_emit[prev | x] + dptable.get(i + 1, j, State::Ins);
                 *dptable.get_mut(i, j, State::Match) = Self::logsumexp(mat, del, ins);
                 // Del state.
                 {
                     let mat = mat - log_mat_ext + log_mat_from_del;
                     let del = del - log_del_open + log_del_ext;
-                    let ins = ins - log_ins_open + log_del_from_ins;
+                    let ins = ins - log_ins_open + log_ins_from_del;
                     *dptable.get_mut(i, j, State::Del) = Self::logsumexp(mat, del, ins);
                 }
                 // Ins state
@@ -147,7 +154,7 @@ impl PairHiddenMarkovModel {
     }
     /// Return the alignment path between x and y.
     /// In HMM term, it is "viterbi" algorithm.
-    pub fn align(&self, reference: &[u8], query: &[u8]) -> (Vec<Op>, f64) {
+    pub fn align(&self, reference: &[u8], query: &[u8]) -> (f64, Vec<Op>) {
         let xs = query;
         let ys = reference;
         let log_ins_emit: Vec<_> = self.ins_emit.iter().map(Self::log).collect();
@@ -190,10 +197,18 @@ impl PairHiddenMarkovModel {
                     .max(dptable.get(i, j - 1, State::Del) + log_del_ext)
                     .max(dptable.get(i, j - 1, State::Ins) + log_del_from_ins);
                 *dptable.get_mut(i, j, State::Del) = del;
+                let ins_lk = match (0 < i).then(|| xs[i - 1]) {
+                    Some(b) => {
+                        let prev = super::BASE_TABLE[b as usize];
+                        log_ins_emit[(prev << 2) | x]
+                    }
+                    None => log_ins_emit[16 + x],
+                };
                 let ins = (dptable.get(i - 1, j, State::Match) + log_ins_open)
                     .max(dptable.get(i - 1, j, State::Del) + log_ins_from_del)
                     .max(dptable.get(i - 1, j, State::Ins) + log_ins_ext)
-                    + log_ins_emit[x as usize];
+                    + ins_lk;
+                // + log_ins_emit[x as usize];
                 *dptable.get_mut(i, j, State::Ins) = ins;
             }
         }
@@ -267,10 +282,10 @@ impl PairHiddenMarkovModel {
             ops.push(Op::Del);
         }
         ops.reverse();
-        (ops, max_lk)
+        (max_lk, ops)
     }
     /// Return the modification table. `Tab[i * NUM_ROW..(i + 1)*NUM_ROW]` record the likelihood when changing the `i` th base of the `rs`.
-    pub fn modification_table_full(&self, rs: &[u8], qs: &[u8]) -> (Vec<f64>, f64) {
+    pub fn modification_table(&self, rs: &[u8], qs: &[u8]) -> (Vec<f64>, f64) {
         use crate::LogSumExp;
         let pre = self.forward(rs, qs);
         let post = self.backward(rs, qs);
@@ -434,7 +449,7 @@ mod test {
             let template = gen_seq::generate_seq(&mut rng, 70);
             let profile = gen_seq::PROFILE;
             let query = gen_seq::introduce_randomness(&template, &mut rng, &profile);
-            let (ops, lk) = hmm.align(&template, &query);
+            let (lk, ops) = hmm.align(&template, &query);
             let lk_l = hmm.eval_ln(&template, &query, &ops);
             assert!((lk - lk_l).abs() < 0.0001, "{},{}", lk, lk_l);
         }
@@ -453,7 +468,7 @@ mod test {
             let template = gen_seq::generate_seq(&mut rng, 70);
             let profile = gen_seq::PROFILE;
             let query = gen_seq::introduce_randomness(&template, &mut rng, &profile);
-            let (_, lk) = hmm.align(&template, &query);
+            let (lk, _) = hmm.align(&template, &query);
             let lk_f = hmm.likelihood(&template, &query);
             assert!(lk < lk_f, "{},{}", lk, lk_f);
         }
@@ -467,7 +482,7 @@ mod test {
             let profile = gen_seq::PROFILE;
             let hmm = PairHiddenMarkovModel::default();
             let query = gen_seq::introduce_randomness(&template, &mut rng, &profile);
-            let (modif_table, _) = hmm.modification_table_full(&template, &query);
+            let (modif_table, _) = hmm.modification_table(&template, &query);
             let mut mod_version = template.clone();
             println!("{}", seed);
             // Mutation error

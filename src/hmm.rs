@@ -10,6 +10,38 @@ pub const COPY_SIZE: usize = 3;
 pub const DEL_SIZE: usize = 3;
 pub const NUM_ROW: usize = 8 + COPY_SIZE + DEL_SIZE;
 
+fn usize_to_edit_op(op: usize) -> crate::op::Edit {
+    use crate::op::Edit;
+    assert!(op < NUM_ROW);
+    if op < 4 {
+        Edit::Subst
+    } else if op < 8 {
+        Edit::Insertion
+    } else if op < 8 + COPY_SIZE {
+        Edit::Copy(op - 8 + 1)
+    } else {
+        Edit::Deletion(op - 8 - COPY_SIZE + 1)
+    }
+}
+
+#[derive(Debug, Clone)]
+/// Configurations
+pub struct HMMPolishConfig {
+    pub radius: usize,
+    pub take_num: usize,
+    pub ignore_edge: usize,
+}
+
+impl HMMPolishConfig {
+    pub fn new(radius: usize, take_num: usize, ignore_edge: usize) -> Self {
+        Self {
+            radius,
+            take_num,
+            ignore_edge,
+        }
+    }
+}
+
 const fn base_table() -> [usize; 256] {
     let mut slots = [0; 256];
     slots[b'A' as usize] = 0;
@@ -435,6 +467,81 @@ impl DPTable {
     }
 }
 
+// Minimum required improvement on the likelihood.
+// In a desirable case, it is exactly zero, but as a matter of fact,
+// the likelihood is sometimes wobble between very small values,
+// so this "min-requirement" is nessesarry.
+const MIN_UP: f64 = 0.00001;
+
+pub(crate) fn polish_by_modification_table(
+    template: &mut Vec<u8>,
+    modif_table: &[f64],
+    current_lk: f64,
+    inactive: usize,
+) -> Vec<(usize, usize)> {
+    let orig_len = template.len();
+    let mut changed_positions = vec![];
+    let mut modif_table = modif_table.chunks_exact(NUM_ROW);
+    let mut pos = 0;
+    while let Some(row) = modif_table.next() {
+        if row.iter().any(|x| x.is_nan()) {
+            panic!("{:?}", row);
+        }
+        let (op, &lk) = row
+            .iter()
+            .enumerate()
+            .max_by(|x, y| (x.1).partial_cmp(y.1).unwrap())
+            .unwrap();
+        if current_lk + MIN_UP < lk && pos < orig_len {
+            changed_positions.push((pos, op));
+            if op < 4 {
+                // Mutateion.
+                template.push(b"ACGT"[op]);
+                pos += 1;
+            } else if op < 8 {
+                // Insertion before this base.
+                template.push(b"ACGT"[op - 4]);
+                template.push(template[pos]);
+                pos += 1;
+            } else if op < 8 + COPY_SIZE {
+                // copy from here to here + (op - 8) + 1 base
+                let len = (op - 8) + 1;
+                for i in pos..pos + len {
+                    template.push(template[i]);
+                }
+                template.push(template[pos]);
+                pos += 1;
+            } else if op < NUM_ROW {
+                // Delete from here to here + 1 + (op - 8 - COPY_SIZE).
+                let del_size = op - 8 - COPY_SIZE + 1;
+                pos += del_size;
+                (0..del_size - 1).filter_map(|_| modif_table.next()).count();
+            } else {
+                unreachable!()
+            }
+            for i in pos..(pos + inactive).min(orig_len) {
+                template.push(template[i]);
+            }
+            pos = (pos + inactive).min(orig_len);
+            (0..inactive).filter_map(|_| modif_table.next()).count();
+        } else if pos < orig_len {
+            template.push(template[pos]);
+            pos += 1;
+        } else if current_lk + MIN_UP < lk && (4..8).contains(&op) {
+            changed_positions.push((pos, op));
+            // Here, we need to consider the last insertion...
+            template.push(b"ACGT"[op - 4]);
+        }
+    }
+    assert_eq!(pos, orig_len);
+    let mut idx = 0;
+    template.retain(|_| {
+        idx += 1;
+        orig_len < idx
+    });
+    changed_positions
+}
+
 /// Guided version of the pair HMM on the forward and reverse strands.
 #[derive(Debug, Clone, Default)]
 pub struct PairHiddenMarkovModelOnStrands {
@@ -499,16 +606,16 @@ pub mod tests {
     #[test]
     fn align() {
         let phmm = PHMM::default();
-        let (ops, lk) = phmm.align(b"ACCG", b"ACCG");
+        let (lk, ops) = phmm.align(b"ACCG", b"ACCG");
         eprintln!("{:?}\t{:.3}", ops, lk);
         assert_eq!(ops, vec![Op::Match; 4]);
-        let (ops, lk) = phmm.align(b"ACCG", b"");
+        let (lk, ops) = phmm.align(b"ACCG", b"");
         eprintln!("{:?}\t{:.3}", ops, lk);
         assert_eq!(ops, vec![Op::Del; 4]);
-        let (ops, lk) = phmm.align(b"", b"ACCG");
+        let (lk, ops) = phmm.align(b"", b"ACCG");
         assert_eq!(ops, vec![Op::Ins; 4]);
         eprintln!("{:?}\t{:.3}", ops, lk);
-        let (ops, lk) = phmm.align(b"ATGCCGCACAGTCGAT", b"ATCCGC");
+        let (lk, ops) = phmm.align(b"ATGCCGCACAGTCGAT", b"ATCCGC");
         eprintln!("{:?}\t{:.3}", ops, lk);
         use Op::*;
         let answer = vec![vec![Match; 2], vec![Del], vec![Match; 4], vec![Del; 9]].concat();
@@ -523,8 +630,8 @@ pub mod tests {
             let mut rng: Xoshiro256PlusPlus = SeedableRng::seed_from_u64(seed);
             let template = crate::gen_seq::generate_seq(&mut rng, len);
             let query = crate::gen_seq::introduce_randomness(&template, &mut rng, &profile);
-            let (path_full, lk_full) = hmm.align(&template, &query);
-            let (path_guided, lk_guided) = hmm.align(&template, &query);
+            let (lk_full, path_full) = hmm.align(&template, &query);
+            let (lk_guided, path_guided) = hmm.align(&template, &query);
             assert_eq!(path_full, path_guided);
             assert!((lk_full - lk_guided).abs() < 0.001);
             let likelihood_full = hmm.likelihood(&template, &query);

@@ -1,4 +1,5 @@
 use crate::bialignment;
+use crate::hmm::HMMPolishConfig;
 use crate::op::Op;
 use crate::padseq;
 use crate::PolishConfig;
@@ -25,9 +26,10 @@ where
             true => draft.to_vec(),
             false => {
                 let draft = polish_until_converge_with(draft, &seqs, &mut ops, config.radius);
+                let pconfig = HMMPolishConfig::new(config.radius, seqs.len(), 0);
                 config
                     .hmm
-                    .polish_until_converge_with(&draft, &seqs, &mut ops, config.radius)
+                    .polish_until_converge_guided(&draft, &seqs, &mut ops, &pconfig)
             }
         })
         .fold(Vec::new, |cons: Vec<u8>, chunk: Vec<u8>| {
