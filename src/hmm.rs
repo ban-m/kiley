@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 pub const COPY_SIZE: usize = 3;
 pub const DEL_SIZE: usize = 3;
+pub const COPY_DEL_MAX: usize = 3;
 pub const NUM_ROW: usize = 8 + COPY_SIZE + DEL_SIZE;
 
 fn usize_to_edit_op(op: usize) -> crate::op::Edit {

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use kiley::gen_seq::Generate;
 macro_rules! elapsed {
     ($a:expr) => {{
@@ -16,35 +18,30 @@ fn main() {
         del: 0.01,
         ins: 0.01,
     };
-    let len = 2_000;
-    let seed = 100;
+    let len = 1_000;
+    let seed = 20;
+    let is_anti = std::env::args().nth(1) == Some("anti".to_string());
+    let mut anti = 0;
     for seed in 0..seed {
         let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(seed);
         let template = kiley::gen_seq::generate_seq(&mut rng, len);
         let query = profile.gen(&template, &mut rng);
-        bench(&template, &query, seed);
+        let a = bench(&template, &query, is_anti);
+        anti += a.as_micros();
     }
+    println!("{anti}");
 }
 
 const RADIUS: usize = 100;
-fn bench(template: &[u8], query: &[u8], seed: u64) {
+fn bench(template: &[u8], query: &[u8], is_anti: bool) -> Duration {
     let hmm = kiley::hmm::PairHiddenMarkovModel::default();
-    let ((lk_g, _), guided) = elapsed!(hmm.align_guided_bootstrap(template, query, RADIUS));
-    let ((lk_f, op_f), full) = elapsed!(hmm.align(template, query));
-    let ((lk_a, op_a), anti) = elapsed!(hmm.align_antidiagonal_bootstrap(template, query, RADIUS));
-    assert!((lk_g - lk_f).abs() < 0.001);
-    assert!(
-        (lk_a - lk_f).abs() < 0.001,
-        "{},{}\n{:?}\n{:?}",
-        lk_f,
-        lk_a,
-        op_f,
-        op_a
-    );
-    println!(
-        "{seed}\t{}\t{}\t{}",
-        full.as_micros(),
-        guided.as_micros(),
-        anti.as_micros()
-    );
+    let ops = hmm.align_antidiagonal_bootstrap(template, query, RADIUS).1;
+    // match is_anti {
+    //     true => elapsed!(hmm.likelihood_antidiagonal(template, query, &ops, RADIUS)).1,
+    //     false => elapsed!(hmm.likelihood_guided(template, query, &ops, RADIUS)).1,
+    // }
+    match is_anti {
+        true => elapsed!(hmm.modification_table_antidiagonal(template, query, &ops, RADIUS)).1,
+        false => elapsed!(hmm.modification_table_guided(template, query, &ops, RADIUS)).1,
+    }
 }

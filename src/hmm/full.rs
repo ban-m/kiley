@@ -16,8 +16,7 @@ impl PairHiddenMarkovModel {
     /// If you want to get the raw DP table, please call `forward` functionality instead.
     pub fn likelihood(&self, reference: &[u8], query: &[u8]) -> f64 {
         let dptable = self.forward(reference, query);
-        let lk = dptable.get_total_lk(query.len(), reference.len());
-        lk
+        dptable.get_total_lk(query.len(), reference.len())
     }
     /// Forward algorithm. Return the raw DP table.
     pub(crate) fn forward(&self, reference: &[u8], query: &[u8]) -> DPTable {

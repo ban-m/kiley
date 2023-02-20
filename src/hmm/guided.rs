@@ -544,23 +544,12 @@ impl super::PairHiddenMarkovModel {
         assert!(!(mat + ins + del).is_nan(), "{},{},{}", mat, ins, del);
         (mat + del + ins).ln() + memory.pre_scl.iter().map(|x| x.ln()).sum::<f64>()
     }
-    // fn likelihood_guided_post(&self, rs: &[u8], qs: &[u8], ops: &[Op], radius: usize) -> f64 {
-    //     let mut memory = Memory::with_capacity(rs.len(), radius);
-    //     memory.fill_ranges.clear();
-    //     memory
-    //         .fill_ranges
-    //         .extend(std::iter::repeat((rs.len() + 1, 0)).take(qs.len() + 1));
-    //     re_fill_fill_range(qs.len(), rs.len(), ops, radius, &mut memory.fill_ranges);
-    //     memory.initialize();
-    //     self.fill_post_dp(&mut memory, rs, qs);
-    //     memory.post.get(0, 0).0.ln() + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>()
-    // }
     pub fn modification_table_guided(
         &self,
         rs: &[u8],
         qs: &[u8],
-        radius: usize,
         ops: &[Op],
+        radius: usize,
     ) -> Option<(Vec<f64>, f64)> {
         let mut memory = Memory::with_capacity(rs.len(), radius);
         let lk = self.update(&mut memory, rs, qs, ops)?;
@@ -1183,14 +1172,11 @@ impl super::PairHiddenMarkovModelOnStrands {
                 };
                 model
             })
-            .reduce(
-                || init_model(),
-                |mut next, part| {
-                    next.forward.merge(&part.forward);
-                    next.reverse.merge(&part.reverse);
-                    next
-                },
-            );
+            .reduce(init_model, |mut next, part| {
+                next.forward.merge(&part.forward);
+                next.reverse.merge(&part.reverse);
+                next
+            });
         next.forward
             .merge(&PairHiddenMarkovModel::uniform(INIT_WEIGHT));
         next.reverse

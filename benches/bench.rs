@@ -113,7 +113,7 @@ fn polish_hmm(b: &mut test::Bencher) {
         let xss: Vec<_> = (0..CONS_COV)
             .map(|_| kiley::gen_seq::introduce_randomness(&template, &mut rng, prof))
             .collect();
-        hmm.polish_until_converge(&draft, &xss, CONS_RAD)
+        hmm.polish_until_converge_guided_bootstrap(&draft, &xss, CONS_RAD)
     });
 }
 
@@ -161,6 +161,6 @@ fn hmm_modif_table_full(b: &mut test::Bencher) {
     b.iter(|| {
         let template = kiley::gen_seq::generate_seq(&mut rng, HMMLEN);
         let seq = kiley::gen_seq::introduce_randomness(&template, &mut rng, &profile);
-        test::black_box(phmm.modification_table_full(&template, &seq))
+        test::black_box(phmm.modification_table(&template, &seq))
     });
 }
