@@ -86,6 +86,10 @@ impl<T: Copy> DPTable<T> {
         self.upperbound = ub;
     }
     #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.mem.len()
+    }
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.mem.fill(self.upperbound);
     }

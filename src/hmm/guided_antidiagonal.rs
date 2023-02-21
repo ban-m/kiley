@@ -1,5 +1,4 @@
-use super::{BASE_TABLE, COPY_DEL_MAX};
-use super::{COPY_SIZE, DEL_SIZE, NUM_ROW};
+use super::{BASE_TABLE, COPY_DEL_MAX, COPY_SIZE, DEL_SIZE, NUM_ROW};
 use crate::op::Op;
 use crate::EP;
 // Anti diagonal version of the HMM.
@@ -37,133 +36,151 @@ impl super::PairHiddenMarkovModel {
             self.pre_fill(rs, qs, &fr, &mut dptable, &mut scaling, block_size);
             (dptable, scaling)
         };
+        let pre = (pre.0.as_slice(), pre.1.as_slice());
         let post = {
             let mut scaling = Vec::with_capacity(filling_regions.len() / block_size + 1);
             let mut dptable = vec![(0f64, 0f64, 0f64); fr.total_cells];
             self.post_fill(rs, qs, &fr, &mut dptable, &mut scaling, block_size);
             (dptable, scaling)
         };
+        let post = (post.0.as_slice(), post.1.as_slice());
         let total_len = NUM_ROW * (rs.len() + 1);
         let mut mod_table = vec![0f64; total_len];
         let seqs = (rs, qs);
-        self.modification_table_ad_inner(seqs, &fr, &pre, &post, &mut mod_table, block_size);
+        self.modification_table_ad_inner(seqs, &fr, pre, post, &mut mod_table, block_size);
         mod_table
     }
     fn modification_table_ad_inner(
         &self,
         (rs, qs): (&[u8], &[u8]),
         fr: &FillingRegions,
-        &(ref pre_dp, ref pre_scl): &FBTable,
-        &(ref post_dp, ref post_scl): &FBTable,
+        (pre_dp, pre_scl): FBSlice,
+        (post_dp, post_scl): FBSlice,
         mod_table: &mut [f64],
         block_size: usize,
     ) {
-        let mut slots = [0f64; NUM_ROW];
+        let rslen = rs.len();
         let (max_scale, combined_scl) = combine_scaling_factors(pre_scl, post_scl);
         for (ad, &(offset, start, end)) in fr.offsets.iter().enumerate() {
-            // Len -> additional factor.
-            let post_add = {
-                let mut post_add = [1f64; COPY_DEL_MAX];
-                for (i, s) in post_add.iter_mut().enumerate() {
-                    if (ad + i + 1) % block_size < i + 1 {
-                        *s = post_scl.get(ad / block_size).unwrap_or(&1f64).recip();
-                    }
-                }
-                post_add
-            };
-            let normalize_factors = {
-                let mut slots = [0f64; COPY_SIZE + 1];
-                for (c, s) in slots.iter_mut().enumerate() {
-                    *s = *combined_scl.get((ad + c) / block_size).unwrap_or(&1f64);
-                }
-                slots
-            };
+            let post_add = Self::post_add(ad, block_size, post_scl);
+            let normalize_factors = Self::normalize_factors(ad, block_size, &combined_scl);
             for q_idx in start..end {
-                // slots.iter_mut().for_each(|x| *x = 0f64);
-                let dp_idx = offset + q_idx - start;
-                let r_idx = ad - q_idx;
-                // Caching values.
-                let (pre_mat, pre_ins, pre_del) = pre_dp[dp_idx];
-                let (post_mat, _, post_del) = post_dp[dp_idx];
-                let (ins_consume_mat, q) = match q_idx < qs.len() {
-                    true => (post_dp[fr.idx(ad + 1, q_idx + 1)].0, qs[q_idx]),
-                    false => (0f64, 0),
-                };
-                let mut_consume_mat = match q_idx < qs.len() && r_idx < rs.len() {
-                    true => post_dp[fr.idx(ad + 2, q_idx + 1)].0,
-                    false => 0f64,
-                };
-                let mut_consum_del = match r_idx < rs.len() {
-                    true => post_dp[fr.idx(ad + 1, q_idx)].2,
-                    false => 0f64,
-                };
-                let skip_idx = {
-                    let mut skip_idx = [0; COPY_DEL_MAX];
-                    for (len, s) in skip_idx.iter_mut().enumerate() {
-                        if ad + len + 1 < fr.offsets.len() {
-                            *s = fr.idx(ad + len + 1, q_idx);
-                        }
-                    }
-                    skip_idx
-                };
-                let to_mat = self.to_mat((pre_mat, pre_ins, pre_del));
-                let to_del = self.to_del((pre_mat, pre_ins, pre_del));
-                // Mutate the `rs[r_idx]` into ACGT
-                b"ACGT".iter().zip(slots.iter_mut()).for_each(|(&b, s)| {
-                    let mat = to_mat * self.obs(b, q) * mut_consume_mat;
-                    let del = to_del * self.del(b) * mut_consum_del;
-                    *s = mat * normalize_factors[0] * post_add[1]
-                        + del * normalize_factors[0] * post_add[0];
-                });
-                // Insert a base *before* the `r_idx`.
-                b"ACGT"
-                    .iter()
-                    .zip(slots.iter_mut().skip(4))
-                    .for_each(|(&b, s)| {
-                        let mat = to_mat * self.obs(b, q) * ins_consume_mat;
-                        let additional_factor = post_add[0];
-                        *s = mat * normalize_factors[0] * additional_factor
-                            + to_del * self.del(b) * post_del * normalize_factors[0];
-                    });
-                // Copy the `r_idx`..`r_idx`+c bases of `rs`
-                let copy_size = COPY_SIZE.min(rs.len().saturating_sub(r_idx));
-                (1..copy_size + 1)
-                    .zip(slots.iter_mut().skip(8))
-                    .zip(post_add.iter())
-                    .zip(skip_idx.iter())
-                    .for_each(|(((len, s), additional_factor), &idx)| {
-                        let (pre_mat, _pre_ins, pre_del) = pre_dp[idx];
-                        let lk = pre_mat * post_mat + pre_del * post_del;
-                        let normalize_factor = normalize_factors[len];
-                        *s = lk * normalize_factor / additional_factor;
-                    });
-                // Deleting the `r_idx`..`r_idx + d` bases.
-                let del_size = DEL_SIZE.min(rs.len().saturating_sub(r_idx));
-                slots
-                    .iter_mut()
-                    .skip(8 + COPY_SIZE)
-                    .zip(post_add.iter())
-                    .zip(skip_idx.iter())
-                    .take(del_size)
-                    .for_each(|((s, additional_factor), &idx)| {
-                        let (post_mat, _post_ins, post_del) = post_dp[idx];
-                        let lk = pre_mat * post_mat + pre_del * post_del;
-                        *s = lk * normalize_factors[0] * additional_factor;
-                    });
-                let slot_start = r_idx * NUM_ROW;
-                slots
-                    .iter_mut()
-                    .zip(mod_table.iter_mut().skip(slot_start))
-                    .for_each(|(s, m)| {
-                        *m += *s;
-                        *s = 0f64;
-                    });
+                let idx = (ad, q_idx, offset - start);
+                let seq = (qs, rslen);
+                let dp = (pre_dp, post_dp);
+                let factors = (&normalize_factors, &post_add);
+                self.fill_one(idx, seq, dp, fr, mod_table, factors);
             }
         }
         // Scaling.
+        Self::scaling(mod_table, max_scale);
+    }
+    fn scaling(mod_table: &mut [f64], max_scale: f64) {
         mod_table.iter_mut().for_each(|x| {
             *x = x.ln() + max_scale;
         });
+    }
+    fn normalize_factors(
+        ad: usize,
+        block_size: usize,
+        combined_scl: &[f64],
+    ) -> [f64; COPY_SIZE + 1] {
+        let mut slots = [0f64; COPY_SIZE + 1];
+        for (c, s) in slots.iter_mut().enumerate() {
+            *s = *combined_scl.get((ad + c) / block_size).unwrap_or(&1f64);
+        }
+        slots
+    }
+    fn post_add(ad: usize, block_size: usize, post_scl: &[f64]) -> [f64; COPY_DEL_MAX] {
+        let mut post_add = [1f64; COPY_DEL_MAX];
+        for (i, s) in post_add.iter_mut().enumerate() {
+            if (ad + i + 1) % block_size < i + 1 {
+                *s = post_scl.get(ad / block_size).unwrap_or(&1f64).recip();
+            }
+        }
+        post_add
+    }
+    #[allow(clippy::type_complexity)]
+    fn fill_one(
+        &self,
+        (ad, q_idx, offset): (usize, usize, usize),
+        (qs, rslen): (&[u8], usize),
+        (pre_dp, post_dp): (&[(f64, f64, f64)], &[(f64, f64, f64)]),
+        fr: &FillingRegions,
+        mod_table: &mut [f64],
+        (normalize_factors, post_add): (&[f64; COPY_SIZE + 1], &[f64; COPY_DEL_MAX]),
+    ) {
+        let dp_idx = offset + q_idx;
+        let r_idx = ad - q_idx;
+        let slot_start = (ad - q_idx) * NUM_ROW;
+        let slots = &mut mod_table[slot_start..slot_start + NUM_ROW];
+        let (pre_mat, pre_ins, pre_del) = pre_dp[dp_idx];
+        let (post_mat, _, post_del) = post_dp[dp_idx];
+        let (ins_consume_mat, q) = match q_idx < qs.len() {
+            true => (post_dp[fr.idx(ad + 1, q_idx + 1)].0, qs[q_idx]),
+            false => (0f64, 0),
+        };
+        let mut_consume_del = match r_idx < rslen {
+            true => post_dp[fr.idx(ad + 1, q_idx)].2,
+            false => 0f64,
+        };
+        let mut_consume_mat = match q_idx < qs.len() && r_idx < rslen {
+            true => post_dp[fr.idx(ad + 2, q_idx + 1)].0,
+            false => 0f64,
+        };
+        let skip_idx = {
+            let mut skip_idx = [0; COPY_DEL_MAX];
+            for (len, s) in skip_idx.iter_mut().enumerate() {
+                if ad + len + 1 < fr.offsets.len() {
+                    *s = fr.idx(ad + len + 1, q_idx);
+                }
+            }
+            skip_idx
+        };
+        let to_mat = self.to_mat((pre_mat, pre_ins, pre_del));
+        let to_del = self.to_del((pre_mat, pre_ins, pre_del));
+        // Mutate the `rs[r_idx]` into ACGT
+        b"ACGT".iter().zip(slots.iter_mut()).for_each(|(&b, s)| {
+            let mat = to_mat * self.obs(b, q) * mut_consume_mat;
+            let del = to_del * self.del(b) * mut_consume_del;
+            *s +=
+                mat * normalize_factors[0] * post_add[1] + del * normalize_factors[0] * post_add[0];
+        });
+        // Insert a base *before* the `r_idx`.
+        b"ACGT"
+            .iter()
+            .zip(slots.iter_mut().skip(4))
+            .for_each(|(&b, s)| {
+                let mat = to_mat * self.obs(b, q) * ins_consume_mat;
+                let additional_factor = post_add[0];
+                *s += mat * normalize_factors[0] * additional_factor
+                    + to_del * self.del(b) * post_del * normalize_factors[0];
+            });
+        // Copy the `r_idx`..`r_idx`+c bases of `rs`
+        let copy_size = COPY_SIZE.min(rslen.saturating_sub(r_idx));
+        (1..copy_size + 1)
+            .zip(slots.iter_mut().skip(8))
+            .zip(post_add.iter())
+            .zip(skip_idx.iter())
+            .for_each(|(((len, s), additional_factor), &idx)| {
+                let (pre_mat, _pre_ins, pre_del) = pre_dp[idx];
+                let lk = pre_mat * post_mat + pre_del * post_del;
+                let normalize_factor = normalize_factors[len];
+                *s += lk * normalize_factor / additional_factor;
+            });
+        // Deleting the `r_idx`..`r_idx + d` bases.
+        let del_size = DEL_SIZE.min(rslen.saturating_sub(r_idx));
+        slots
+            .iter_mut()
+            .skip(8 + COPY_SIZE)
+            .zip(post_add.iter())
+            .zip(skip_idx.iter())
+            .take(del_size)
+            .for_each(|((s, additional_factor), &idx)| {
+                let (post_mat, _post_ins, post_del) = post_dp[idx];
+                let lk = pre_mat * post_mat + pre_del * post_del;
+                *s += lk * normalize_factors[0] * additional_factor;
+            });
     }
     #[allow(dead_code)]
     fn pre(&self, rs: &[u8], qs: &[u8], ops: &[Op], radius: usize, block_size: usize) -> FBTable {
@@ -246,7 +263,6 @@ impl super::PairHiddenMarkovModel {
         if (rs.len() + qs.len()) % block_size == 0 {
             scaling.push(1f64);
         }
-        // TODO:We can fasten the array access by using *previous offsets*.
         let mut sum = 3f64;
         let fr = filling_regions;
         for (ad, &(ofs, start, end)) in filling_regions.offsets.iter().enumerate().rev().skip(1) {
@@ -482,18 +498,23 @@ impl super::PairHiddenMarkovModel {
                 center_line.iter().map(|&qpos| (qpos, radius)).collect()
             })
             .collect();
-        // ToDo: Use memory to speed up? (Compare real experiments!)
-        // let block_size = 12;
-        //        let mut memory = Memory::new(block_size);
+        let block_size = 12;
+        let qmax = xss
+            .iter()
+            .map(|x| x.borrow().len())
+            .max()
+            .expect("Reads empty.");
+        let mut memory = Memory::new(block_size, draft.len(), qmax, radius);
         for t in 0..100 {
             let inactive = INACTIVE_TIME + (t * INACTIVE_TIME) % rs.len();
             let mut modif_table = vec![0f64; (rs.len() + 1) * NUM_ROW];
             let mut lk = 0f64;
             for (seq, radius) in std::iter::zip(xss, &radius_reads).take(take_num) {
                 assert_eq!(radius.len(), seq.borrow().len() + rs.len() + 1);
-                let (m_lk, mt) = self.dp(&rs, seq.borrow(), radius);
+                let m_lk = self.dp_memory(&rs, seq.borrow(), radius, &mut memory);
+                let mt = memory.modif_table.as_slice();
                 lk += m_lk;
-                modif_table.iter_mut().zip(&mt).for_each(|(x, y)| *x += y);
+                modif_table.iter_mut().zip(mt).for_each(|(x, y)| *x += y);
             }
             modif_table
                 .iter_mut()
@@ -515,17 +536,13 @@ impl super::PairHiddenMarkovModel {
                 let (ops, xs) = (ops.borrow_mut(), xs.borrow());
                 let (qlen, rlen) = (xs.len(), rs.len());
                 let changed_iter = changed_pos.iter().copied();
-                // Fix path.
                 crate::op::fix_alignment_path(ops, changed_iter, qlen, rlen);
-                // Fix radius.
                 update_radius(ops, &changed_pos, radius_per, default_radius, qlen, rlen);
                 assert_eq!(radius_per.len(), xs.len() + rs.len() + 1);
-                // Fix operations.
-                let filling = radius_to_filling(radius_per, rs.len(), xs.len());
-                let fr = FillingRegions::new(&filling);
-                let mut dptable = vec![(EP, EP, EP); fr.total_cells];
+                memory.fr.update_by_radius(radius_per, rs.len(), xs.len());
+                memory.initialize_aln();
                 *ops = self
-                    .align_antidiagonal_filling(&rs, xs, &fr, &mut dptable)
+                    .align_antidiagonal_filling(&rs, xs, &memory.fr, &mut memory.pre_dp)
                     .1;
             }
             if changed_pos.is_empty() {
@@ -534,31 +551,32 @@ impl super::PairHiddenMarkovModel {
         }
         rs
     }
-    fn dp(&self, rs: &[u8], qs: &[u8], radius: &[(usize, usize)]) -> (f64, Vec<f64>) {
+    fn dp_memory(
+        &self,
+        rs: &[u8],
+        qs: &[u8],
+        radius: &[(usize, usize)],
+        memory: &mut Memory,
+    ) -> f64 {
         assert_eq!(radius.len(), rs.len() + qs.len() + 1);
-        let block_size = 12;
-        let filling_regions = radius_to_filling(radius, rs.len(), qs.len());
-        let fr = FillingRegions::new(&filling_regions);
-        let post = {
-            let mut post_scl = Vec::with_capacity(fr.total_cells / block_size + 1);
-            let mut post_dp = vec![(0f64, 0f64, 0f64); fr.total_cells];
-            self.post_fill(rs, qs, &fr, &mut post_dp, &mut post_scl, block_size);
-            (post_dp, post_scl)
-        };
-        let (pre, lk) = {
-            let mut pre_scl = Vec::with_capacity(fr.total_cells / block_size + 1);
-            let mut pre_dp = vec![(0f64, 0f64, 0f64); fr.total_cells];
-            self.pre_fill(rs, qs, &fr, &mut pre_dp, &mut pre_scl, block_size);
+        memory.fr.update_by_radius(radius, rs.len(), qs.len());
+        memory.initialize(rs.len());
+        let lk = {
+            let (post_dp, post_scl) = (&mut memory.post_dp, &mut memory.post_scl);
+            self.post_fill(rs, qs, &memory.fr, post_dp, post_scl, memory.block_size);
+            let (pre_dp, pre_scl) = (&mut memory.pre_dp, &mut memory.pre_scl);
+            self.pre_fill(rs, qs, &memory.fr, pre_dp, pre_scl, memory.block_size);
             let last_ad = rs.len() + qs.len();
-            let (mat, ins, del) = pre_dp[fr.idx(last_ad, qs.len())];
+            let (mat, ins, del) = pre_dp[memory.fr.idx(last_ad, qs.len())];
             let scale: f64 = pre_scl.iter().map(|scl| scl.ln()).sum();
-            let lk = (mat + ins + del).ln() + scale;
-            ((pre_dp, pre_scl), lk)
+            (mat + ins + del).ln() + scale
         };
-        let total_len = NUM_ROW * (rs.len() + 1);
-        let mut mod_table = vec![0f64; total_len];
-        self.modification_table_ad_inner((rs, qs), &fr, &pre, &post, &mut mod_table, block_size);
-        (lk, mod_table)
+        let post = (memory.post_dp.as_slice(), memory.post_scl.as_slice());
+        let pre = (memory.pre_dp.as_slice(), memory.pre_scl.as_slice());
+        let mod_table = &mut memory.modif_table;
+        let block_size = memory.block_size;
+        self.modification_table_ad_inner((rs, qs), &memory.fr, pre, post, mod_table, block_size);
+        lk
     }
 }
 
@@ -611,58 +629,62 @@ fn combine_scaling_factors(pre_scl: &[f64], post_scl: &[f64]) -> (f64, Vec<f64>)
 }
 
 const INACTIVE_TIME: usize = 4;
-// const MIN_RADIUS: usize = 4;
-// const RAD_SCALE: usize = 2;
+const MIN_RADIUS: usize = 10;
+const RAD_SCALE: usize = 2;
 use crate::op::Edit;
+// TODO: Has a bug? Too small MIN_RADIUS?
 fn update_radius(
     ops: &[Op],
     changed_pos: &[(usize, Edit)],
     radius: &mut Vec<(usize, usize)>,
-    _default: usize,
+    default: usize,
     qlen: usize,
     rlen: usize,
 ) {
-    // TODO: Shrink the radius.
-    let mut changed_pos = changed_pos.iter().peekable();
     let orig_len = radius.len();
     let (mut qpos, mut rpos) = (0, 0);
     let mut offset: isize = 0;
-    if let Some(&&(pos, ed)) = changed_pos.peek() {
-        if pos == rpos {
-            match ed {
-                Edit::Subst => {}
-                Edit::Insertion => offset -= 1,
-                Edit::Copy(l) => offset -= l as isize,
-                Edit::Deletion(l) => offset += l as isize,
-            }
-        }
-        changed_pos.next();
-    }
+    let mut changed_pos = changed_pos.iter().peekable();
+    let mut current_radius = default;
     for &op in ops {
-        let diag = ((qpos + rpos) as isize + offset).max(0) as usize;
+        match changed_pos.peek() {
+            Some(&&(pos, ed)) if pos == rpos => {
+                match ed {
+                    Edit::Subst => {}
+                    Edit::Insertion => offset -= 1,
+                    Edit::Copy(l) => offset -= l as isize,
+                    Edit::Deletion(l) => offset += l as isize,
+                }
+                changed_pos.next();
+                current_radius = default;
+            }
+            _ => {
+                let diag = ((qpos + rpos) as isize + offset).max(0) as usize;
+                current_radius = (current_radius - 1)
+                    .max(radius[diag].1 / RAD_SCALE)
+                    .max(MIN_RADIUS);
+            }
+        };
+        let new_r = current_radius;
         match op {
             Op::Mismatch | Op::Match => {
-                let new_r = radius[diag].1;
                 radius.push((qpos, new_r));
                 rpos += 1;
-                let new_r = radius[diag + 1].1;
                 radius.push((qpos, new_r));
                 qpos += 1;
             }
             Op::Ins => {
-                let new_r = radius[diag].1;
                 radius.push((qpos, new_r));
                 qpos += 1
             }
             Op::Del => {
-                let new_r = radius[diag].1;
                 radius.push((qpos, new_r));
                 rpos += 1;
             }
         }
     }
     let diag = ((qpos + rpos) as isize + offset) as usize;
-    let new_r = radius[diag].1;
+    let new_r = (radius[diag].1 / RAD_SCALE).max(MIN_RADIUS);
     radius.push((qpos, new_r));
     assert_eq!(rpos, rlen);
     assert_eq!(qpos, qlen);
@@ -674,15 +696,6 @@ fn update_radius(
         });
     }
     assert_eq!(radius.len(), qlen + rlen + 1);
-}
-
-fn radius_to_filling(radius: &[(usize, usize)], rlen: usize, qlen: usize) -> Vec<(usize, usize)> {
-    assert_eq!(radius.len(), rlen + qlen + 1);
-    radius
-        .iter()
-        .enumerate()
-        .map(|(ad, &(qpos, radius))| cap(ad, qpos, radius, rlen, qlen))
-        .collect()
 }
 
 fn cap(diag: usize, qpos: usize, radius: usize, rlen: usize, qlen: usize) -> (usize, usize) {
@@ -740,6 +753,13 @@ struct FillingRegions {
 }
 
 impl FillingRegions {
+    fn with_capacity(rlen: usize, qlen: usize, radius: usize) -> Self {
+        let len = 3 * (rlen + qlen) * radius / 2;
+        Self {
+            total_cells: 0,
+            offsets: Vec::with_capacity(len),
+        }
+    }
     fn new(filling_regions: &[(usize, usize)]) -> Self {
         let mut offsets = Vec::with_capacity(filling_regions.len());
         let mut total_cells = 0;
@@ -753,12 +773,80 @@ impl FillingRegions {
         }
     }
     fn idx(&self, ad: usize, qpos: usize) -> usize {
-        let (offset, start, _end) = self.offsets[ad];
-        offset + qpos - start
+        match self.offsets.get(ad) {
+            Some((offset, start, _end)) => offset + qpos - start,
+            None => 0,
+        }
+    }
+    fn update_by_radius(&mut self, radius: &[(usize, usize)], rlen: usize, qlen: usize) {
+        assert_eq!(radius.len(), rlen + qlen + 1);
+        self.total_cells = 0;
+        self.offsets.clear();
+        let regions = radius
+            .iter()
+            .enumerate()
+            .map(|(ad, &(qpos, radius))| cap(ad, qpos, radius, rlen, qlen));
+        for (s, e) in regions {
+            self.offsets.push((self.total_cells, s, e));
+            self.total_cells += e - s;
+        }
     }
 }
 
+type FBSlice<'a> = (&'a [(f64, f64, f64)], &'a [f64]);
 type FBTable = (Vec<(f64, f64, f64)>, Vec<f64>);
+#[derive(Debug, Clone)]
+struct Memory {
+    block_size: usize,
+    modif_table: Vec<f64>,
+    fr: FillingRegions,
+    post_dp: Vec<(f64, f64, f64)>,
+    post_scl: Vec<f64>,
+    pre_dp: Vec<(f64, f64, f64)>,
+    pre_scl: Vec<f64>,
+}
+
+impl Memory {
+    fn new(block_size: usize, rlen: usize, qlen: usize, radius: usize) -> Self {
+        let max_rlen = 3 * rlen / 2;
+        let fr = FillingRegions::with_capacity(rlen, qlen, radius);
+        let dp_size = (max_rlen * qlen) * radius * 2;
+        let ad_len = max_rlen + qlen;
+        Self {
+            block_size,
+            modif_table: Vec::with_capacity(max_rlen),
+            fr,
+            post_dp: Vec::with_capacity(dp_size),
+            post_scl: Vec::with_capacity(ad_len),
+            pre_dp: Vec::with_capacity(dp_size),
+            pre_scl: Vec::with_capacity(ad_len),
+        }
+    }
+    fn initialize(&mut self, rlen: usize) {
+        self.pre_dp.iter_mut().for_each(|x| *x = (0f64, 0f64, 0f64));
+        self.post_dp
+            .iter_mut()
+            .for_each(|x| *x = (0f64, 0f64, 0f64));
+        self.post_scl.clear();
+        self.pre_scl.clear();
+        self.modif_table.iter_mut().for_each(|x| *x = 0f64);
+        let total_cells = self.fr.total_cells;
+        fit_vector(&mut self.modif_table, 0f64, (rlen + 1) * NUM_ROW);
+        fit_vector(&mut self.pre_dp, (0f64, 0f64, 0f64), total_cells);
+        fit_vector(&mut self.post_dp, (0f64, 0f64, 0f64), total_cells);
+    }
+    fn initialize_aln(&mut self) {
+        fit_vector(&mut self.pre_dp, (EP, EP, EP), self.fr.total_cells)
+    }
+}
+
+fn fit_vector<T: Copy>(xs: &mut Vec<T>, elm: T, len: usize) {
+    match xs.len().cmp(&len) {
+        std::cmp::Ordering::Less => xs.extend(std::iter::repeat(elm).take(len - xs.len())),
+        std::cmp::Ordering::Equal => {}
+        std::cmp::Ordering::Greater => xs.truncate(len),
+    }
+}
 
 #[cfg(test)]
 mod test {
