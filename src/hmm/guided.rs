@@ -949,48 +949,6 @@ impl super::PairHiddenMarkovModel {
         next.del_ins += (del_to_ins - from_del).exp();
         next.del_del += (del_to_del - from_del).exp();
     }
-    fn merge(&mut self, other: &Self) {
-        self.mat_mat += other.mat_mat;
-        self.mat_ins += other.mat_ins;
-        self.mat_del += other.mat_del;
-        self.ins_mat += other.ins_mat;
-        self.ins_del += other.ins_del;
-        self.ins_ins += other.ins_ins;
-        self.del_mat += other.del_mat;
-        self.del_del += other.del_del;
-        self.del_ins += other.del_ins;
-        self.mat_emit
-            .iter_mut()
-            .zip(other.mat_emit.iter())
-            .for_each(|(x, y)| *x += y);
-        self.ins_emit
-            .iter_mut()
-            .zip(other.ins_emit.iter())
-            .for_each(|(x, y)| *x += y);
-    }
-
-    fn normalize(&mut self) {
-        let mat_sum = self.mat_mat + self.mat_ins + self.mat_del;
-        self.mat_mat /= mat_sum;
-        self.mat_ins /= mat_sum;
-        self.mat_del /= mat_sum;
-        let ins_sum = self.ins_mat + self.ins_del + self.ins_ins;
-        self.ins_mat /= ins_sum;
-        self.ins_del /= ins_sum;
-        self.ins_ins /= ins_sum;
-        let del_sum = self.del_mat + self.del_del + self.del_ins;
-        self.del_mat /= del_sum;
-        self.del_del /= del_sum;
-        self.del_ins /= del_sum;
-        for obss in self.mat_emit.chunks_exact_mut(4) {
-            let sum: f64 = obss.iter().sum();
-            obss.iter_mut().for_each(|x| *x /= sum);
-        }
-        for inss in self.ins_emit.chunks_exact_mut(4) {
-            let sum: f64 = inss.iter().sum();
-            inss.iter_mut().for_each(|x| *x /= sum);
-        }
-    }
 }
 
 fn logsumexp(xs: &[f64]) -> f64 {
@@ -1092,7 +1050,7 @@ impl Memory {
 use super::PairHiddenMarkovModelOnStrands;
 use super::TrainingDataPack;
 impl super::PairHiddenMarkovModelOnStrands {
-    fn baum_welch<'a, T, O>(
+    fn baum_welch_guided<'a, T, O>(
         &self,
         datapack: &TrainingDataPack<'a, T, O>,
         radius: usize,
@@ -1138,7 +1096,7 @@ impl super::PairHiddenMarkovModelOnStrands {
             })
             .collect()
     }
-    pub fn fig_guided_par_multiple<'a, T, O>(
+    pub fn fit_guided_par_multiple<'a, T, O>(
         &mut self,
         training_datapack: &[TrainingDataPack<'a, T, O>],
         radius: usize,
@@ -1157,7 +1115,7 @@ impl super::PairHiddenMarkovModelOnStrands {
             .par_iter()
             .flat_map(|datapack| {
                 assert_eq!(datapack.sequences.len(), datapack.operations.len());
-                self.baum_welch(datapack, radius)
+                self.baum_welch_guided(datapack, radius)
                     .into_par_iter()
                     .map(move |(memory, qs, direction)| (memory, qs, direction, datapack.consensus))
             })

@@ -271,6 +271,49 @@ impl PairHiddenMarkovModel {
             ins_emit: [0f64; 20],
         }
     }
+    fn merge(&mut self, other: &Self) {
+        self.mat_mat += other.mat_mat;
+        self.mat_ins += other.mat_ins;
+        self.mat_del += other.mat_del;
+        self.ins_mat += other.ins_mat;
+        self.ins_del += other.ins_del;
+        self.ins_ins += other.ins_ins;
+        self.del_mat += other.del_mat;
+        self.del_del += other.del_del;
+        self.del_ins += other.del_ins;
+        self.mat_emit
+            .iter_mut()
+            .zip(other.mat_emit.iter())
+            .for_each(|(x, y)| *x += y);
+        self.ins_emit
+            .iter_mut()
+            .zip(other.ins_emit.iter())
+            .for_each(|(x, y)| *x += y);
+    }
+
+    fn normalize(&mut self) {
+        let mat_sum = self.mat_mat + self.mat_ins + self.mat_del;
+        self.mat_mat /= mat_sum;
+        self.mat_ins /= mat_sum;
+        self.mat_del /= mat_sum;
+        let ins_sum = self.ins_mat + self.ins_del + self.ins_ins;
+        self.ins_mat /= ins_sum;
+        self.ins_del /= ins_sum;
+        self.ins_ins /= ins_sum;
+        let del_sum = self.del_mat + self.del_del + self.del_ins;
+        self.del_mat /= del_sum;
+        self.del_del /= del_sum;
+        self.del_ins /= del_sum;
+        for obss in self.mat_emit.chunks_exact_mut(4) {
+            let sum: f64 = obss.iter().sum();
+            obss.iter_mut().for_each(|x| *x /= sum);
+        }
+        for inss in self.ins_emit.chunks_exact_mut(4) {
+            let sum: f64 = inss.iter().sum();
+            inss.iter_mut().for_each(|x| *x /= sum);
+        }
+    }
+
     fn obs(&self, r: u8, q: u8) -> f64 {
         let index = (BASE_TABLE[r as usize] << 2) | BASE_TABLE[q as usize];
         self.mat_emit[index as usize]
@@ -562,6 +605,13 @@ impl PairHiddenMarkovModelOnStrands {
     /// Create a new instance.
     pub fn new(forward: PairHiddenMarkovModel, reverse: PairHiddenMarkovModel) -> Self {
         Self { forward, reverse }
+    }
+}
+
+impl std::fmt::Display for PairHiddenMarkovModelOnStrands {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "FORWARD\n{}", self.forward)?;
+        write!(f, "REVERSE\n{}", self.reverse)
     }
 }
 

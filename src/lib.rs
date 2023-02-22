@@ -147,15 +147,17 @@ fn logsumexp(xs: &[f64]) -> f64 {
     max + sum
 }
 
-// Streaming logsumexp.
+// Streaming logsumexp. Takes Logged-value, output log(exp(self) + exp(input)).
+// Thus, usual log(exp(x1) + exp(x2) + ... exp(xn)) = (...(LogSumExp::new() + x1) + x2 ... ) + xn
+// Thus struct never allocates a vector, maybe faster than the usual logsumexp(?).
 #[derive(Debug, Clone, Copy)]
-struct LogSumExp {
+pub(crate) struct LogSumExp {
     accum: f64,
     max: f64,
 }
 
 impl LogSumExp {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             accum: 0f64,
             max: std::f64::NEG_INFINITY,

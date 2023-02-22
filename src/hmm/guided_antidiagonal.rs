@@ -1,3 +1,6 @@
+use super::PairHiddenMarkovModel;
+use super::PairHiddenMarkovModelOnStrands;
+use super::TrainingDataPack;
 use super::{BASE_TABLE, COPY_DEL_MAX, COPY_SIZE, DEL_SIZE, NUM_ROW};
 use crate::op::Op;
 use crate::EP;
@@ -15,8 +18,6 @@ impl super::PairHiddenMarkovModel {
         let (dptable, scaling) = self.pre(rs, qs, ops, radius, block_size);
         let (mat, ins, del) = dptable[fr.idx(rs.len() + qs.len(), qs.len())];
         (mat + ins + del).ln() + scaling.iter().map(|s| s.ln()).sum::<f64>()
-        // let (dptable, scaling) = self.post(rs, qs, ops, radius, block_size);
-        // dptable[fr.idx(0, 0)].0.ln() + scaling.iter().map(|scl| scl.ln()).sum::<f64>()
     }
     pub fn modification_table_antidiagonal(
         &self,
@@ -578,6 +579,144 @@ impl super::PairHiddenMarkovModel {
         self.modification_table_ad_inner((rs, qs), &memory.fr, pre, post, mod_table, block_size);
         lk
     }
+    fn register_antidiagonal(&self, memory: &Memory, rs: &[u8], qs: &[u8], next: &mut Self) {
+        use crate::LogSumExp;
+        // Scaling factors T => sum_{t = 0}^{t=T} ln pre_scl[t]
+        let pre_scl: Vec<_> = memory
+            .pre_scl
+            .iter()
+            .scan(0f64, |acc, scl| {
+                *acc += scl.ln();
+                Some(*acc)
+            })
+            .collect();
+        let post_scl: Vec<_> = {
+            let mut post_scl: Vec<_> = memory
+                .post_scl
+                .iter()
+                .rev()
+                .scan(0f64, |acc, scl| {
+                    *acc += scl.ln();
+                    Some(*acc)
+                })
+                .collect();
+            post_scl.reverse();
+            post_scl
+        };
+        let mut mat_probs: [LogSumExp; 16] = [LogSumExp::new(); 16];
+        let mut ins_probs = [LogSumExp::new(); 20];
+        let mut mat_to_mat = LogSumExp::new();
+        let mut mat_to_ins = LogSumExp::new();
+        let mut mat_to_del = LogSumExp::new();
+        let mut ins_to_mat = LogSumExp::new();
+        let mut ins_to_ins = LogSumExp::new();
+        let mut ins_to_del = LogSumExp::new();
+        let mut del_to_mat = LogSumExp::new();
+        let mut del_to_ins = LogSumExp::new();
+        let mut del_to_del = LogSumExp::new();
+        let len = rs.len() + qs.len();
+        let mp = std::f64::MIN_POSITIVE;
+        let block_size = memory.block_size;
+        for (ad, &(offset, start, end)) in memory.fr.offsets.iter().enumerate().take(len) {
+            let scale = pre_scl[ad / memory.block_size] + post_scl[ad / memory.block_size];
+            for q_idx in start..end.min(qs.len()) {
+                let (pre_mat, pre_ins, _) = memory.pre_dp[offset + q_idx - start];
+                let (post_mat, post_ins, _) = memory.post_dp[offset + q_idx - start];
+                let r_idx = ad - q_idx;
+                // We miss the (q_idx, r_idx) = (0,_), (_, 0)'s transition moves. But who cares?
+                if q_idx == 0 || r_idx == 0 {
+                    continue;
+                }
+                let mat_lk = (pre_mat * post_mat).max(std::f64::MIN_POSITIVE).ln() + scale;
+                let ins_lk = (pre_ins * post_ins).max(std::f64::MIN_POSITIVE).ln() + scale;
+                let prev = match 1 < q_idx {
+                    true => BASE_TABLE[qs[q_idx - 2] as usize],
+                    false => 4,
+                };
+                let (q, r) = (qs[q_idx - 1], rs[r_idx - 1]);
+                let mat_slot = (BASE_TABLE[r as usize] << 2) | BASE_TABLE[q as usize];
+                let ins_slot = (prev << 2) | BASE_TABLE[q as usize];
+                mat_probs[mat_slot] += mat_lk;
+                ins_probs[ins_slot] += ins_lk;
+
+                // Transition probs
+                if q_idx == qs.len() || r_idx == rs.len() {
+                    continue;
+                }
+                let indel_scale = pre_scl[ad / block_size] + post_scl[(ad + 1) / block_size];
+                let mat_scale = match post_scl.get((ad + 2) / block_size) {
+                    Some(post) => pre_scl[ad / block_size] + post,
+                    None => 0f64,
+                };
+                let ins_prob = self.ins(qs[q_idx], (0 < q_idx).then(|| qs[q_idx - 1]));
+                let mat_prob = self.obs(rs[r_idx], qs[q_idx]);
+                let del_prob = self.del(rs[r_idx]);
+                let (from_mat, from_ins, from_del) = memory.pre_dp[offset + q_idx - start];
+                let after_mat = match memory.post_dp.get(memory.fr.idx(ad + 2, q_idx + 1)) {
+                    Some(x) => x.0,
+                    None => 0f64,
+                };
+                let after_ins = memory.post_dp[memory.fr.idx(ad + 1, q_idx + 1)].1;
+                let after_del = memory.post_dp[memory.fr.idx(ad + 1, q_idx)].2;
+                // Mat, If possible.
+                if ad + 2 < rs.len() + qs.len() + 1 {
+                    let prob = from_mat * self.mat_mat * mat_prob * after_mat;
+                    mat_to_mat += prob.max(mp).ln() + mat_scale;
+                    let prob = from_del * self.del_mat * mat_prob * after_mat;
+                    del_to_mat += prob.max(mp).ln() + mat_scale;
+                    let prob = from_ins * self.ins_mat * mat_prob * after_mat;
+                    ins_to_mat += prob.max(mp).ln() + mat_scale;
+                }
+                // InDel, No condition.
+                let prob = from_mat * self.mat_ins * ins_prob * after_ins;
+                mat_to_ins += prob.max(mp).ln() + indel_scale;
+                let prob = from_ins * self.ins_ins * ins_prob * after_ins;
+                ins_to_ins += prob.max(mp).ln() + indel_scale;
+                let prob = from_del * self.del_ins * ins_prob * after_ins;
+                del_to_ins += prob.max(mp).ln() + indel_scale;
+
+                let prob = from_mat * self.mat_del * del_prob * after_del;
+                mat_to_del += prob.max(mp).ln() + indel_scale;
+                let prob = from_ins * self.ins_del * del_prob * after_del;
+                ins_to_del += prob.max(mp).ln() + indel_scale;
+                let prob = from_del * self.del_del * del_prob * after_del;
+                del_to_del += prob.max(mp).ln() + indel_scale;
+            }
+        }
+        assert_eq!(next.mat_emit.len(), mat_probs.len());
+        let mat_lks: Vec<f64> = mat_probs.iter().map(|&x| x.into()).collect();
+        let mat_total = crate::logsumexp(&mat_lks);
+        for (next, mat) in next.mat_emit.iter_mut().zip(mat_lks) {
+            *next += (mat - mat_total).exp();
+        }
+        assert_eq!(next.ins_emit.len(), ins_probs.len());
+        let ins_lks: Vec<f64> = ins_probs.iter().map(|&x| x.into()).collect();
+        let ins_total = crate::logsumexp(&ins_lks);
+        for (next, ins) in next.ins_emit.iter_mut().zip(ins_lks) {
+            *next += (ins - ins_total).exp();
+        }
+        let mat_to_mat: f64 = mat_to_mat.into();
+        let mat_to_ins: f64 = mat_to_ins.into();
+        let mat_to_del: f64 = mat_to_del.into();
+        let ins_to_mat: f64 = ins_to_mat.into();
+        let ins_to_ins: f64 = ins_to_ins.into();
+        let ins_to_del: f64 = ins_to_del.into();
+        let del_to_mat: f64 = del_to_mat.into();
+        let del_to_ins: f64 = del_to_ins.into();
+        let del_to_del: f64 = del_to_del.into();
+        let mat = crate::logsumexp(&[mat_to_mat, mat_to_ins, mat_to_del]);
+        let ins = crate::logsumexp(&[ins_to_mat, ins_to_ins, ins_to_del]);
+        let del = crate::logsumexp(&[del_to_mat, del_to_ins, del_to_del]);
+        next.mat_mat = (mat_to_mat - mat).exp();
+        next.mat_ins = (mat_to_ins - mat).exp();
+        next.mat_del = (mat_to_del - mat).exp();
+        next.ins_mat = (ins_to_mat - ins).exp();
+        next.ins_ins = (ins_to_ins - ins).exp();
+        next.ins_del = (ins_to_del - ins).exp();
+        next.del_mat = (del_to_mat - del).exp();
+        next.del_ins = (del_to_ins - del).exp();
+        next.del_del = (del_to_del - del).exp();
+    }
 }
 
 fn div_range(
@@ -790,6 +929,229 @@ impl FillingRegions {
             self.offsets.push((self.total_cells, s, e));
             self.total_cells += e - s;
         }
+    }
+}
+
+impl PairHiddenMarkovModelOnStrands {
+    pub fn modification_table_antidiagonal(
+        &self,
+        rs: &[u8],
+        qs: &[u8],
+        ops: &[Op],
+        radius: usize,
+        is_forward: bool,
+    ) -> Vec<f64> {
+        match is_forward {
+            true => self
+                .forward()
+                .modification_table_antidiagonal(rs, qs, ops, radius),
+            false => self
+                .reverse()
+                .modification_table_antidiagonal(rs, qs, ops, radius),
+        }
+    }
+    pub fn align_antidiagonal(
+        &self,
+        rs: &[u8],
+        qs: &[u8],
+        ops: &[Op],
+        radius: usize,
+        is_forward: bool,
+    ) -> (f64, Vec<Op>) {
+        match is_forward {
+            true => self.forward().align_antidiagonal(rs, qs, ops, radius),
+            false => self.reverse().align_antidiagonal(rs, qs, ops, radius),
+        }
+    }
+    fn baum_welch_antidiagonal<'a, T, O>(
+        &self,
+        datapack: &TrainingDataPack<'a, T, O>,
+        radius: usize,
+    ) -> Vec<(Memory, &'a [u8], bool)>
+    where
+        T: std::borrow::Borrow<[u8]> + Sync + Send,
+        O: std::borrow::Borrow<[Op]> + Sync + Send,
+    {
+        use rayon::prelude::*;
+        let qlen = datapack
+            .sequences
+            .iter()
+            .map(|x| x.borrow().len())
+            .max()
+            .unwrap();
+        let block_size = 12;
+        let ops = datapack.operations.par_iter();
+        let seqs = datapack.sequences.par_iter();
+        let direction = datapack.directions.par_iter();
+        let rs = datapack.consensus;
+        ops.zip(seqs)
+            .zip(direction)
+            .filter_map(|((ops, seq), direction)| {
+                let qs = seq.borrow();
+                let ops = ops.borrow();
+                let radius_range: Vec<_> = center_line(ops)
+                    .iter()
+                    .map(|&qpos| (qpos, radius))
+                    .collect();
+                let mut memory = Memory::new(block_size, rs.len(), qlen, radius);
+                let target = match direction {
+                    true => self.forward(),
+                    false => self.reverse(),
+                };
+                let _lk = target.dp_memory(rs, qs, &radius_range, &mut memory);
+                Some((memory, qs, *direction))
+            })
+            .collect()
+    }
+    pub fn fit_antidiagonal_par_multiple<'a, T, O>(
+        &mut self,
+        training_datapack: &[TrainingDataPack<'a, T, O>],
+        radius: usize,
+    ) where
+        T: std::borrow::Borrow<[u8]> + Sync + Send,
+        O: std::borrow::Borrow<[Op]> + Sync + Send,
+    {
+        use rayon::prelude::*;
+        const INIT_WEIGHT: f64 = 0.0005;
+        fn init_model() -> PairHiddenMarkovModelOnStrands {
+            let forward = PairHiddenMarkovModel::zeros();
+            let reverse = PairHiddenMarkovModel::zeros();
+            PairHiddenMarkovModelOnStrands::new(forward, reverse)
+        }
+        let mut next = training_datapack
+            .par_iter()
+            .flat_map(|datapack| {
+                assert_eq!(datapack.sequences.len(), datapack.operations.len());
+                self.baum_welch_antidiagonal(datapack, radius)
+                    .into_par_iter()
+                    .map(move |(memory, qs, direction)| (memory, qs, direction, datapack.consensus))
+            })
+            .fold(init_model, |mut model, (memory, qs, direction, rs)| {
+                match direction {
+                    true => {
+                        self.forward()
+                            .register_antidiagonal(&memory, rs, qs, &mut model.forward)
+                    }
+                    false => {
+                        self.reverse()
+                            .register_antidiagonal(&memory, rs, qs, &mut model.reverse)
+                    }
+                };
+                model
+            })
+            .reduce(init_model, |mut next, part| {
+                next.forward.merge(&part.forward);
+                next.reverse.merge(&part.reverse);
+                next
+            });
+        next.forward
+            .merge(&PairHiddenMarkovModel::uniform(INIT_WEIGHT));
+        next.reverse
+            .merge(&PairHiddenMarkovModel::uniform(INIT_WEIGHT));
+        next.forward.normalize();
+        next.reverse.normalize();
+        *self = next;
+    }
+    /// With bootstrap operations and taking numbers.
+    /// The returned operations would be consistent with the returned sequence.
+    /// Only the *first* `take_num` seuqneces would be used to polish,
+    /// but the operations of the rest are also updated accordingly.
+    /// This is (slightly) faster than the usual/full polishing...
+    /// strands: `true` if forward.
+    pub fn polish_until_converge_antidiagonal<T, O>(
+        &self,
+        draft: &[u8],
+        xss: &[T],
+        opss: &mut [O],
+        strands: &[bool],
+        config: &super::HMMPolishConfig,
+    ) -> Vec<u8>
+    where
+        T: std::borrow::Borrow<[u8]>,
+        O: std::borrow::BorrowMut<Vec<Op>>,
+    {
+        let &super::HMMPolishConfig {
+            radius,
+            take_num,
+            ignore_edge,
+        } = config;
+        let default_radius = radius;
+        let take_num = take_num.min(xss.len());
+        let mut rs = draft.to_vec();
+        let mut radius_reads: Vec<Vec<_>> = opss
+            .iter()
+            .map(|ops| {
+                let ops = ops.borrow();
+                let center_line = center_line(ops);
+                center_line.iter().map(|&qpos| (qpos, radius)).collect()
+            })
+            .collect();
+        let block_size = 12;
+        let qmax = xss
+            .iter()
+            .map(|x| x.borrow().len())
+            .max()
+            .expect("Reads empty.");
+        let mut memory = Memory::new(block_size, draft.len(), qmax, radius);
+        for t in 0..100 {
+            let inactive = INACTIVE_TIME + (t * INACTIVE_TIME) % rs.len();
+            let mut modif_table = vec![0f64; (rs.len() + 1) * NUM_ROW];
+            let mut lk = 0f64;
+            let stream = xss.iter().zip(&radius_reads).zip(strands).take(take_num);
+            for ((seq, radius), is_forward) in stream {
+                let hmm = match is_forward {
+                    true => self.forward(),
+                    false => self.reverse(),
+                };
+                assert_eq!(radius.len(), seq.borrow().len() + rs.len() + 1);
+                let m_lk = hmm.dp_memory(&rs, seq.borrow(), radius, &mut memory);
+                let mt = memory.modif_table.as_slice();
+                lk += m_lk;
+                modif_table.iter_mut().zip(mt).for_each(|(x, y)| *x += y);
+            }
+            modif_table
+                .iter_mut()
+                .take(ignore_edge)
+                .for_each(|x| *x = lk - 100f64);
+            let len = modif_table.len();
+            modif_table
+                .iter_mut()
+                .skip(len.saturating_sub(ignore_edge))
+                .for_each(|x| *x = lk - 100f64);
+            let changed_pos =
+                super::polish_by_modification_table(&mut rs, &modif_table, lk, inactive);
+            let changed_pos: Vec<_> = changed_pos
+                .iter()
+                .map(|&(pos, op)| (pos, super::usize_to_edit_op(op)))
+                .collect();
+            // let ops_seq = opss.iter_mut().zip(xss.iter());
+            let stream = radius_reads
+                .iter_mut()
+                .zip(xss)
+                .zip(opss.iter_mut())
+                .zip(strands);
+            for (((radius_per, xs), ops), is_forward) in stream {
+                let (ops, xs) = (ops.borrow_mut(), xs.borrow());
+                let (qlen, rlen) = (xs.len(), rs.len());
+                let changed_iter = changed_pos.iter().copied();
+                crate::op::fix_alignment_path(ops, changed_iter, qlen, rlen);
+                update_radius(ops, &changed_pos, radius_per, default_radius, qlen, rlen);
+                assert_eq!(radius_per.len(), xs.len() + rs.len() + 1);
+                memory.fr.update_by_radius(radius_per, rs.len(), xs.len());
+                memory.initialize_aln();
+                let hmm = match is_forward {
+                    true => self.forward(),
+                    false => self.reverse(),
+                };
+                *ops = hmm
+                    .align_antidiagonal_filling(&rs, xs, &memory.fr, &mut memory.pre_dp)
+                    .1;
+            }
+            if changed_pos.is_empty() {
+                break;
+            }
+        }
+        rs
     }
 }
 
@@ -1118,5 +1480,46 @@ mod test {
             let polished = hmm.polish_until_converge_antidiagonal(&draft, &qss, &mut opss, &config);
             assert_eq!(rs, polished);
         }
+    }
+
+    #[test]
+    fn fit_test() {
+        const LEN: usize = 2_000;
+        const COVERAGE: usize = 20;
+        const RADIUS: usize = 50;
+        const PACK: usize = 4;
+        const SEED: u64 = 309482;
+        use crate::{gen_seq::Generate, hmm::TrainingDataPack};
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoroshiro128StarStar;
+
+        let hmm = crate::hmm::PairHiddenMarkovModelOnStrands::default();
+        let mut rng: Xoroshiro128StarStar = SeedableRng::seed_from_u64(SEED);
+        let profile = crate::gen_seq::Profile::new(0.03, 0.03, 0.03);
+        let templates: Vec<_> = (0..PACK)
+            .map(|_| crate::gen_seq::generate_seq(&mut rng, LEN))
+            .collect();
+        let reads: Vec<Vec<_>> = templates
+            .iter()
+            .map(|rs| (0..COVERAGE).map(|_| profile.gen(rs, &mut rng)).collect())
+            .collect();
+        let strands: Vec<Vec<_>> = (0..PACK)
+            .map(|_| (0..COVERAGE).map(|_| rng.gen_bool(0.5)).collect())
+            .collect();
+        let opss: Vec<Vec<_>> = std::iter::zip(&templates, &reads)
+            .map(|(rs, qss)| {
+                qss.iter()
+                    .map(|qs| hmm.forward().align_antidiagonal_bootstrap(rs, qs, RADIUS).1)
+                    .collect()
+            })
+            .collect();
+        let training_data: Vec<_> = std::iter::zip(&templates, &reads)
+            .zip(strands.iter())
+            .zip(opss.iter())
+            .map(|(((rs, qss), strands), ops)| TrainingDataPack::new(rs, strands, qss, ops))
+            .collect();
+        let mut hmm_a = hmm;
+        hmm_a.fit_antidiagonal_par_multiple(&training_data, RADIUS / 2);
+        println!("{hmm_a}");
     }
 }
