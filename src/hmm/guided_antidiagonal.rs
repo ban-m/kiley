@@ -444,7 +444,7 @@ impl super::PairHiddenMarkovModel {
                     } else if max == ins + log_ins_ext {
                         1
                     } else {
-                        assert!(max == del + log_del_from_ins);
+                        assert!(max == del + log_ins_from_del, "{}", max);
                         2
                     }
                 }
