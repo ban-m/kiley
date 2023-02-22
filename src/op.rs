@@ -144,7 +144,6 @@ pub(crate) fn fix_alignment_path<T>(
         op_idx += 1;
         new_ops.push(op);
     }
-    // assert_eq!(op_idx, ops.len());
     let ref_len = new_ops.iter().filter(|&&op| op != Op::Ins).count();
     let qry_len = new_ops.iter().filter(|&&op| op != Op::Del).count();
     assert_eq!((rlen, qlen), (ref_len, qry_len));

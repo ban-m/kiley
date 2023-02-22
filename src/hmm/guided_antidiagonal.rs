@@ -1,7 +1,11 @@
+use std::fmt::Debug;
+
+// TODO: Fallback method when facing with large deletion in a very low error model.
 use super::PairHiddenMarkovModel;
 use super::PairHiddenMarkovModelOnStrands;
 use super::TrainingDataPack;
 use super::{BASE_TABLE, COPY_DEL_MAX, COPY_SIZE, DEL_SIZE, NUM_ROW};
+const BLOCK_SIZE: usize = COPY_DEL_MAX + 1;
 use crate::op::Op;
 use crate::EP;
 // Anti diagonal version of the HMM.
@@ -12,11 +16,10 @@ impl super::PairHiddenMarkovModel {
         self.likelihood_antidiagonal(rs, qs, &ops, radius)
     }
     pub fn likelihood_antidiagonal(&self, rs: &[u8], qs: &[u8], ops: &[Op], radius: usize) -> f64 {
-        let block_size = 5;
         let filling_regions = filling_region(ops, radius, rs.len(), qs.len());
         let fr = FillingRegions::new(&filling_regions);
-        let (dptable, scaling) = self.pre(rs, qs, ops, radius, block_size);
-        let (mat, ins, del) = dptable[fr.idx(rs.len() + qs.len(), qs.len())];
+        let (dptable, scaling) = self.pre(rs, qs, ops, radius);
+        let (mat, ins, del) = dptable[fr.idx(rs.len() + qs.len(), qs.len()).unwrap()];
         (mat + ins + del).ln() + scaling.iter().map(|s| s.ln()).sum::<f64>()
     }
     pub fn modification_table_antidiagonal(
@@ -25,31 +28,30 @@ impl super::PairHiddenMarkovModel {
         qs: &[u8],
         ops: &[Op],
         radius: usize,
-    ) -> Vec<f64> {
-        let block_size = 5;
-        assert!(COPY_SIZE < block_size);
-        assert!(DEL_SIZE < block_size);
+    ) -> (Vec<f64>, f64) {
         let filling_regions = filling_region(ops, radius, rs.len(), qs.len());
         let fr = FillingRegions::new(&filling_regions);
-        let pre = {
-            let mut scaling = Vec::with_capacity(filling_regions.len() / block_size + 3);
+        let (pre, lk) = {
+            let mut scaling = Vec::with_capacity(filling_regions.len() / BLOCK_SIZE + 3);
             let mut dptable = vec![(0f64, 0f64, 0f64); fr.total_cells];
-            self.pre_fill(rs, qs, &fr, &mut dptable, &mut scaling, block_size);
-            (dptable, scaling)
+            self.pre_fill(rs, qs, &fr, &mut dptable, &mut scaling);
+            let (mat, ins, del) = dptable[fr.idx(rs.len() + qs.len(), qs.len()).unwrap()];
+            let lk = (mat + ins + del).ln() + scaling.iter().map(|s| s.ln()).sum::<f64>();
+            ((dptable, scaling), lk)
         };
         let pre = (pre.0.as_slice(), pre.1.as_slice());
         let post = {
-            let mut scaling = Vec::with_capacity(filling_regions.len() / block_size + 1);
+            let mut scaling = Vec::with_capacity(filling_regions.len() / BLOCK_SIZE + 1);
             let mut dptable = vec![(0f64, 0f64, 0f64); fr.total_cells];
-            self.post_fill(rs, qs, &fr, &mut dptable, &mut scaling, block_size);
+            self.post_fill(rs, qs, &fr, &mut dptable, &mut scaling);
             (dptable, scaling)
         };
         let post = (post.0.as_slice(), post.1.as_slice());
         let total_len = NUM_ROW * (rs.len() + 1);
         let mut mod_table = vec![0f64; total_len];
         let seqs = (rs, qs);
-        self.modification_table_ad_inner(seqs, &fr, pre, post, &mut mod_table, block_size);
-        mod_table
+        self.modification_table_ad_inner(seqs, &fr, pre, post, &mut mod_table);
+        (mod_table, lk)
     }
     fn modification_table_ad_inner(
         &self,
@@ -58,13 +60,12 @@ impl super::PairHiddenMarkovModel {
         (pre_dp, pre_scl): FBSlice,
         (post_dp, post_scl): FBSlice,
         mod_table: &mut [f64],
-        block_size: usize,
     ) {
         let rslen = rs.len();
         let (max_scale, combined_scl) = combine_scaling_factors(pre_scl, post_scl);
         for (ad, &(offset, start, end)) in fr.offsets.iter().enumerate() {
-            let post_add = Self::post_add(ad, block_size, post_scl);
-            let normalize_factors = Self::normalize_factors(ad, block_size, &combined_scl);
+            let post_add = Self::post_add(ad, post_scl);
+            let normalize_factors = Self::normalize_factors(ad, &combined_scl);
             for q_idx in start..end {
                 let idx = (ad, q_idx, offset - start);
                 let seq = (qs, rslen);
@@ -78,25 +79,21 @@ impl super::PairHiddenMarkovModel {
     }
     fn scaling(mod_table: &mut [f64], max_scale: f64) {
         mod_table.iter_mut().for_each(|x| {
-            *x = x.ln() + max_scale;
+            *x = x.max(std::f64::MIN_POSITIVE).ln() + max_scale;
         });
     }
-    fn normalize_factors(
-        ad: usize,
-        block_size: usize,
-        combined_scl: &[f64],
-    ) -> [f64; COPY_SIZE + 1] {
+    fn normalize_factors(ad: usize, combined_scl: &[f64]) -> [f64; COPY_SIZE + 1] {
         let mut slots = [0f64; COPY_SIZE + 1];
         for (c, s) in slots.iter_mut().enumerate() {
-            *s = *combined_scl.get((ad + c) / block_size).unwrap_or(&1f64);
+            *s = *combined_scl.get((ad + c) / BLOCK_SIZE).unwrap_or(&1f64);
         }
         slots
     }
-    fn post_add(ad: usize, block_size: usize, post_scl: &[f64]) -> [f64; COPY_DEL_MAX] {
+    fn post_add(ad: usize, post_scl: &[f64]) -> [f64; COPY_DEL_MAX] {
         let mut post_add = [1f64; COPY_DEL_MAX];
         for (i, s) in post_add.iter_mut().enumerate() {
-            if (ad + i + 1) % block_size < i + 1 {
-                *s = post_scl.get(ad / block_size).unwrap_or(&1f64).recip();
+            if (ad + i + 1) % BLOCK_SIZE < i + 1 {
+                *s = post_scl.get(ad / BLOCK_SIZE).unwrap_or(&1f64).recip();
             }
         }
         post_add
@@ -117,23 +114,24 @@ impl super::PairHiddenMarkovModel {
         let slots = &mut mod_table[slot_start..slot_start + NUM_ROW];
         let (pre_mat, pre_ins, pre_del) = pre_dp[dp_idx];
         let (post_mat, _, post_del) = post_dp[dp_idx];
+        let fb = (0f64, 0f64, 0f64);
         let (ins_consume_mat, q) = match q_idx < qs.len() {
-            true => (post_dp[fr.idx(ad + 1, q_idx + 1)].0, qs[q_idx]),
+            true => (fr.get(ad + 1, q_idx + 1, post_dp, fb).0, qs[q_idx]),
             false => (0f64, 0),
         };
         let mut_consume_del = match r_idx < rslen {
-            true => post_dp[fr.idx(ad + 1, q_idx)].2,
+            true => fr.get(ad + 1, q_idx, post_dp, fb).2,
             false => 0f64,
         };
         let mut_consume_mat = match q_idx < qs.len() && r_idx < rslen {
-            true => post_dp[fr.idx(ad + 2, q_idx + 1)].0,
+            true => fr.get(ad + 2, q_idx + 1, post_dp, fb).0,
             false => 0f64,
         };
         let skip_idx = {
             let mut skip_idx = [0; COPY_DEL_MAX];
             for (len, s) in skip_idx.iter_mut().enumerate() {
-                if ad + len + 1 < fr.offsets.len() {
-                    *s = fr.idx(ad + len + 1, q_idx);
+                if let Some(idx) = fr.idx(ad + len + 1, q_idx) {
+                    *s = idx;
                 }
             }
             skip_idx
@@ -163,6 +161,7 @@ impl super::PairHiddenMarkovModel {
             .zip(slots.iter_mut().skip(8))
             .zip(post_add.iter())
             .zip(skip_idx.iter())
+            .filter(|x| *x.1 != 0)
             .for_each(|(((len, s), additional_factor), &idx)| {
                 let (pre_mat, _pre_ins, pre_del) = pre_dp[idx];
                 let lk = pre_mat * post_mat + pre_del * post_del;
@@ -177,6 +176,7 @@ impl super::PairHiddenMarkovModel {
             .zip(post_add.iter())
             .zip(skip_idx.iter())
             .take(del_size)
+            .filter(|x| *x.1 != 0)
             .for_each(|((s, additional_factor), &idx)| {
                 let (post_mat, _post_ins, post_del) = post_dp[idx];
                 let lk = pre_mat * post_mat + pre_del * post_del;
@@ -184,12 +184,12 @@ impl super::PairHiddenMarkovModel {
             });
     }
     #[allow(dead_code)]
-    fn pre(&self, rs: &[u8], qs: &[u8], ops: &[Op], radius: usize, block_size: usize) -> FBTable {
+    fn pre(&self, rs: &[u8], qs: &[u8], ops: &[Op], radius: usize) -> FBTable {
         let filling_regions = filling_region(ops, radius, rs.len(), qs.len());
-        let mut scaling = Vec::with_capacity(filling_regions.len() / block_size + 1);
+        let mut scaling = Vec::with_capacity(filling_regions.len() / BLOCK_SIZE + 1);
         let fr = FillingRegions::new(&filling_regions);
         let mut dptable = vec![(0f64, 0f64, 0f64); fr.total_cells];
-        self.pre_fill(rs, qs, &fr, &mut dptable, &mut scaling, block_size);
+        self.pre_fill(rs, qs, &fr, &mut dptable, &mut scaling);
         (dptable, scaling)
     }
     fn pre_fill(
@@ -199,14 +199,15 @@ impl super::PairHiddenMarkovModel {
         fr: &FillingRegions,
         dptable: &mut [(f64, f64, f64)],
         scaling: &mut Vec<f64>,
-        block_size: usize,
     ) {
-        dptable[fr.idx(0, 0)] = (1f64, 0f64, 0f64);
+        fr.set(0, 0, dptable, (1f64, 0f64, 0f64));
+        let fb = (0f64, 0f64, 0f64);
         let mut sum = 0f64;
         for (ad, &(ofs, start, end)) in fr.offsets.iter().enumerate().skip(1) {
             if start == 0 {
                 let (q_idx, r_idx) = (0, ad);
-                let del_lk = self.to_del(dptable[fr.idx(ad - 1, q_idx)]) * self.del(rs[r_idx - 1]);
+                let del_lk =
+                    self.to_del(fr.get(ad - 1, q_idx, dptable, fb)) * self.del(rs[r_idx - 1]);
                 dptable[ofs + q_idx - start] = (0f64, 0f64, del_lk);
                 sum += del_lk;
             }
@@ -214,7 +215,8 @@ impl super::PairHiddenMarkovModel {
                 let q_idx = end - 1;
                 let q = qs[q_idx - 1];
                 let prev = (1 < q_idx).then(|| qs[q_idx - 2]);
-                let ins_lk = self.to_ins(dptable[fr.idx(ad - 1, q_idx - 1)]) * self.ins(q, prev);
+                let ins_lk =
+                    self.to_ins(fr.get(ad - 1, q_idx - 1, dptable, fb)) * self.ins(q, prev);
                 dptable[ofs + q_idx - start] = (0f64, ins_lk, 0f64);
                 sum += ins_lk;
             }
@@ -224,16 +226,16 @@ impl super::PairHiddenMarkovModel {
             for (q_idx, &q) in qs.iter().enumerate().take(r_end - 1).skip(r_start - 1) {
                 let q_idx = q_idx + 1;
                 let r = rs[ad - q_idx - 1];
-                let mat_lk = self.to_mat(dptable[fr.idx(ad - 2, q_idx - 1)]) * self.obs(r, q);
-                let ins_lk = self.to_ins(dptable[fr.idx(ad - 1, q_idx - 1)]) * self.ins(q, prev);
-                let del_lk = self.to_del(dptable[fr.idx(ad - 1, q_idx)]) * self.del(r);
-                dptable[ofs + q_idx - start] = (mat_lk, ins_lk, del_lk);
-                sum += mat_lk + ins_lk + del_lk;
+                let mat = self.to_mat(fr.get(ad - 2, q_idx - 1, dptable, fb)) * self.obs(r, q);
+                let ins = self.to_ins(fr.get(ad - 1, q_idx - 1, dptable, fb)) * self.ins(q, prev);
+                let del = self.to_del(fr.get(ad - 1, q_idx, dptable, fb)) * self.del(r);
+                dptable[ofs + q_idx - start] = (mat, ins, del);
+                sum += mat + ins + del;
                 prev = Some(q);
             }
-            if (ad + 1) % block_size == 0 || ad == rs.len() + qs.len() {
+            if (ad + 1) % BLOCK_SIZE == 0 || ad == rs.len() + qs.len() {
                 if sum < 1f64 {
-                    div_range(ad, block_size, sum, fr, dptable);
+                    div_range(ad, sum, fr, dptable);
                     scaling.push(sum);
                 } else {
                     scaling.push(1f64);
@@ -243,42 +245,42 @@ impl super::PairHiddenMarkovModel {
         }
     }
     #[allow(dead_code)]
-    fn post(&self, rs: &[u8], qs: &[u8], ops: &[Op], radius: usize, block_size: usize) -> FBTable {
+    fn post(&self, rs: &[u8], qs: &[u8], ops: &[Op], radius: usize) -> FBTable {
         let filling_regions = filling_region(ops, radius, rs.len(), qs.len());
-        let mut scaling = Vec::with_capacity(filling_regions.len() / block_size + 1);
+        let mut scaling = Vec::with_capacity(filling_regions.len() / BLOCK_SIZE + 1);
         let fr = FillingRegions::new(&filling_regions);
         let mut dptable = vec![(0f64, 0f64, 0f64); fr.total_cells];
-        self.post_fill(rs, qs, &fr, &mut dptable, &mut scaling, block_size);
+        self.post_fill(rs, qs, &fr, &mut dptable, &mut scaling);
         (dptable, scaling)
     }
     fn post_fill(
         &self,
         rs: &[u8],
         qs: &[u8],
-        filling_regions: &FillingRegions,
+        fr: &FillingRegions,
         dptable: &mut [(f64, f64, f64)],
         scaling: &mut Vec<f64>,
-        block_size: usize,
     ) {
-        dptable[filling_regions.idx(qs.len() + rs.len(), qs.len())] = (1f64, 1f64, 1f64);
-        if (rs.len() + qs.len()) % block_size == 0 {
+        let fb = (0f64, 0f64, 0f64);
+        fr.set(qs.len() + rs.len(), qs.len(), dptable, (1f64, 1f64, 1f64));
+        if (rs.len() + qs.len()) % BLOCK_SIZE == 0 {
             scaling.push(1f64);
         }
         let mut sum = 3f64;
-        let fr = filling_regions;
-        for (ad, &(ofs, start, end)) in filling_regions.offsets.iter().enumerate().rev().skip(1) {
+        let fr = fr;
+        for (ad, &(ofs, start, end)) in fr.offsets.iter().enumerate().rev().skip(1) {
             for q_idx in (start..end).rev() {
                 let r_idx = ad - q_idx;
                 if r_idx == rs.len() {
                     let q = qs[q_idx];
                     let prev = (0 < q_idx).then(|| qs[q_idx - 1]);
-                    let ins = self.ins(q, prev) * dptable[fr.idx(ad + 1, q_idx + 1)].1;
+                    let ins = self.ins(q, prev) * fr.get(ad + 1, q_idx + 1, dptable, fb).1;
                     let elm = (self.mat_ins * ins, self.ins_ins * ins, self.del_ins * ins);
                     dptable[ofs + q_idx - start] = elm;
                     sum += elm.0 + elm.1 + elm.2;
                 } else if q_idx == qs.len() {
                     let r = rs[r_idx];
-                    let del = self.del(r) * dptable[fr.idx(ad + 1, q_idx)].2;
+                    let del = self.del(r) * fr.get(ad + 1, q_idx, dptable, fb).2;
                     let elm = (self.mat_del * del, self.ins_del * del, self.del_del * del);
                     dptable[ofs + q_idx - start] = elm;
                     sum += elm.0 + elm.1 + elm.2;
@@ -286,9 +288,9 @@ impl super::PairHiddenMarkovModel {
                     let r = rs[r_idx];
                     let q = qs[q_idx];
                     let prev = (0 < q_idx).then(|| qs[q_idx - 1]);
-                    let af_mat = self.obs(r, q) * dptable[fr.idx(ad + 2, q_idx + 1)].0;
-                    let af_ins = self.ins(q, prev) * dptable[fr.idx(ad + 1, q_idx + 1)].1;
-                    let af_del = self.del(r) * dptable[fr.idx(ad + 1, q_idx)].2;
+                    let af_mat = self.obs(r, q) * fr.get(ad + 2, q_idx + 1, dptable, fb).0;
+                    let af_ins = self.ins(q, prev) * fr.get(ad + 1, q_idx + 1, dptable, fb).1;
+                    let af_del = self.del(r) * fr.get(ad + 1, q_idx, dptable, fb).2;
                     let mat = self.mat_mat * af_mat + self.mat_ins * af_ins + self.mat_del * af_del;
                     let ins = self.ins_mat * af_mat + self.ins_ins * af_ins + self.ins_del * af_del;
                     let del = self.del_mat * af_mat + self.del_ins * af_ins + self.del_del * af_del;
@@ -296,9 +298,9 @@ impl super::PairHiddenMarkovModel {
                     sum += mat + ins + del;
                 }
             }
-            if ad % block_size == 0 {
+            if ad % BLOCK_SIZE == 0 {
                 if sum < 1f64 {
-                    div_range(ad, block_size, sum, fr, dptable);
+                    div_range(ad, sum, fr, dptable);
                     scaling.push(sum);
                 } else {
                     scaling.push(1f64);
@@ -336,7 +338,6 @@ impl super::PairHiddenMarkovModel {
         fr: &FillingRegions,
         dptable: &mut [(f64, f64, f64)],
     ) -> (f64, Vec<Op>) {
-        let last_ad = fr.offsets.len() - 1;
         let log_mat_emit: Vec<_> = self.mat_emit.iter().map(Self::log).collect();
         let log_ins_emit: Vec<_> = self.ins_emit.iter().map(Self::log).collect();
         let (log_del_open, log_ins_open) = (self.mat_del.ln(), self.mat_ins.ln());
@@ -344,35 +345,34 @@ impl super::PairHiddenMarkovModel {
         let (log_del_from_ins, log_ins_from_del) = (self.ins_del.ln(), self.del_ins.ln());
         let (log_mat_from_del, log_mat_from_ins) = (self.del_mat.ln(), self.ins_mat.ln());
         let log_mat_ext = self.mat_mat.ln();
-        dptable[fr.idx(0, 0)] = (0f64, EP, EP);
+        let fb = (EP, EP, EP);
+        fr.set(0, 0, dptable, (0f64, EP, EP));
         for ad in 1..rs.len() + qs.len() + 1 {
-            let (_offset, start, end) = fr.offsets[ad];
+            let (offset, start, end) = fr.offsets[ad];
             let mut prev = 16;
             if start == 0 {
-                let (q_idx, r_idx) = (0, ad);
+                let (_q_idx, r_idx) = (0, ad);
                 let del_lk = log_del_open + (r_idx - 1) as f64 * log_del_ext;
-                dptable[fr.idx(ad, q_idx)] = (EP, EP, del_lk);
+                dptable[offset] = (EP, EP, del_lk);
             }
-            if ad == end - 1 {
-                let q_idx = end - 1;
+            if ad + 1 == end {
+                let q_idx = ad;
                 let q = BASE_TABLE[qs[q_idx - 1] as usize];
                 let ins_obs = log_ins_emit[prev | q];
                 prev = q << 2;
-                let (mat, ins, del) = dptable[fr.idx(ad - 1, q_idx - 1)];
+                let (mat, ins, del) = fr.get(ad - 1, q_idx - 1, dptable, fb);
                 let ins_lk = (mat + log_ins_open)
                     .max(ins + log_ins_ext)
                     .max(del + log_ins_from_del)
                     + ins_obs;
-                dptable[fr.idx(ad, q_idx)] = (EP, ins_lk, EP);
+                dptable[offset + q_idx - start] = (EP, ins_lk, EP);
             }
-            let (start, end) = (start.max(1), end.min(ad));
-            for q_idx in start..end {
+            for q_idx in start.max(1)..end.min(ad) {
                 let r_idx = ad - q_idx;
                 let q = BASE_TABLE[qs[q_idx - 1] as usize];
                 let r = BASE_TABLE[rs[r_idx - 1] as usize];
-                assert!(1 < ad);
                 let mat_lk = {
-                    let (mat, ins, del) = dptable[fr.idx(ad - 2, q_idx - 1)];
+                    let (mat, ins, del) = fr.get(ad - 2, q_idx - 1, dptable, fb);
                     (mat + log_mat_ext)
                         .max(del + log_mat_from_del)
                         .max(ins + log_mat_from_ins)
@@ -380,25 +380,25 @@ impl super::PairHiddenMarkovModel {
                 };
                 let ins_lk = {
                     let ins_lk = log_ins_emit[prev | q];
-                    let (mat, ins, del) = dptable[fr.idx(ad - 1, q_idx - 1)];
+                    let (mat, ins, del) = fr.get(ad - 1, q_idx - 1, dptable, fb);
                     (mat + log_ins_open)
                         .max(ins + log_ins_ext)
                         .max(del + log_ins_from_del)
                         + ins_lk
                 };
                 let del_lk = {
-                    let (mat, ins, del) = dptable[fr.idx(ad - 1, q_idx)];
+                    let (mat, ins, del) = fr.get(ad - 1, q_idx, dptable, fb);
                     (mat + log_del_open)
                         .max(ins + log_del_from_ins)
                         .max(del + log_del_ext)
                 };
                 prev = q << 2;
-                dptable[fr.idx(ad, q_idx)] = (mat_lk, ins_lk, del_lk);
+                dptable[offset + q_idx - start] = (mat_lk, ins_lk, del_lk);
             }
         }
         // Traceback.
         let (lk, mut state) = {
-            let (mat, ins, del) = dptable[fr.idx(last_ad, qs.len())];
+            let (mat, ins, del) = dptable[fr.idx(qs.len() + rs.len(), qs.len()).unwrap()];
             let max = mat.max(ins).max(del);
             if max == mat {
                 (max, 0)
@@ -415,9 +415,8 @@ impl super::PairHiddenMarkovModel {
             let ad = r_idx + q_idx;
             state = match state {
                 0 => {
-                    assert!(1 < ad);
                     ops.push(Op::Match);
-                    let (mat, ins, del) = dptable[fr.idx(ad - 2, q_idx - 1)];
+                    let (mat, ins, del) = dptable[fr.idx(ad - 2, q_idx - 1).unwrap()];
                     let max = (mat + log_mat_ext)
                         .max(del + log_mat_from_del)
                         .max(ins + log_mat_from_ins);
@@ -434,7 +433,7 @@ impl super::PairHiddenMarkovModel {
                 }
                 1 => {
                     ops.push(Op::Ins);
-                    let (mat, ins, del) = dptable[fr.idx(ad - 1, q_idx - 1)];
+                    let (mat, ins, del) = dptable[fr.idx(ad - 1, q_idx - 1).unwrap()];
                     let max = (mat + log_ins_open)
                         .max(ins + log_ins_ext)
                         .max(del + log_ins_from_del);
@@ -450,7 +449,7 @@ impl super::PairHiddenMarkovModel {
                 }
                 2 => {
                     ops.push(Op::Del);
-                    let (mat, ins, del) = dptable[fr.idx(ad - 1, q_idx)];
+                    let (mat, ins, del) = dptable[fr.idx(ad - 1, q_idx).unwrap()];
                     let max = (mat + log_del_open)
                         .max(ins + log_del_from_ins)
                         .max(del + log_del_ext);
@@ -499,13 +498,12 @@ impl super::PairHiddenMarkovModel {
                 center_line.iter().map(|&qpos| (qpos, radius)).collect()
             })
             .collect();
-        let block_size = 12;
         let qmax = xss
             .iter()
             .map(|x| x.borrow().len())
             .max()
             .expect("Reads empty.");
-        let mut memory = Memory::new(block_size, draft.len(), qmax, radius);
+        let mut memory = Memory::new(draft.len(), qmax, radius);
         for t in 0..100 {
             let inactive = INACTIVE_TIME + (t * INACTIVE_TIME) % rs.len();
             let mut modif_table = vec![0f64; (rs.len() + 1) * NUM_ROW];
@@ -514,8 +512,19 @@ impl super::PairHiddenMarkovModel {
                 assert_eq!(radius.len(), seq.borrow().len() + rs.len() + 1);
                 let m_lk = self.dp_memory(&rs, seq.borrow(), radius, &mut memory);
                 let mt = memory.modif_table.as_slice();
-                lk += m_lk;
-                modif_table.iter_mut().zip(mt).for_each(|(x, y)| *x += y);
+                if m_lk.is_finite() && mt.iter().all(|x| x.is_finite()) {
+                    lk += m_lk;
+                    modif_table.iter_mut().zip(mt).for_each(|(x, y)| *x += y);
+                } else {
+                    println!("{m_lk}");
+                    for (i, w) in mt
+                        .chunks(NUM_ROW)
+                        .enumerate()
+                        .filter(|(_, w)| w.iter().any(|x| !x.is_finite()))
+                    {
+                        println!("{i}\t{w:?}");
+                    }
+                }
             }
             modif_table
                 .iter_mut()
@@ -564,19 +573,18 @@ impl super::PairHiddenMarkovModel {
         memory.initialize(rs.len());
         let lk = {
             let (post_dp, post_scl) = (&mut memory.post_dp, &mut memory.post_scl);
-            self.post_fill(rs, qs, &memory.fr, post_dp, post_scl, memory.block_size);
+            self.post_fill(rs, qs, &memory.fr, post_dp, post_scl);
             let (pre_dp, pre_scl) = (&mut memory.pre_dp, &mut memory.pre_scl);
-            self.pre_fill(rs, qs, &memory.fr, pre_dp, pre_scl, memory.block_size);
+            self.pre_fill(rs, qs, &memory.fr, pre_dp, pre_scl);
             let last_ad = rs.len() + qs.len();
-            let (mat, ins, del) = pre_dp[memory.fr.idx(last_ad, qs.len())];
+            let (mat, ins, del) = pre_dp[memory.fr.idx(last_ad, qs.len()).unwrap()];
             let scale: f64 = pre_scl.iter().map(|scl| scl.ln()).sum();
             (mat + ins + del).ln() + scale
         };
         let post = (memory.post_dp.as_slice(), memory.post_scl.as_slice());
         let pre = (memory.pre_dp.as_slice(), memory.pre_scl.as_slice());
         let mod_table = &mut memory.modif_table;
-        let block_size = memory.block_size;
-        self.modification_table_ad_inner((rs, qs), &memory.fr, pre, post, mod_table, block_size);
+        self.modification_table_ad_inner((rs, qs), &memory.fr, pre, post, mod_table);
         lk
     }
     fn register_antidiagonal(&self, memory: &Memory, rs: &[u8], qs: &[u8], next: &mut Self) {
@@ -616,9 +624,8 @@ impl super::PairHiddenMarkovModel {
         let mut del_to_del = LogSumExp::new();
         let len = rs.len() + qs.len();
         let mp = std::f64::MIN_POSITIVE;
-        let block_size = memory.block_size;
         for (ad, &(offset, start, end)) in memory.fr.offsets.iter().enumerate().take(len) {
-            let scale = pre_scl[ad / memory.block_size] + post_scl[ad / memory.block_size];
+            let scale = pre_scl[ad / BLOCK_SIZE] + post_scl[ad / BLOCK_SIZE];
             for q_idx in start..end.min(qs.len()) {
                 let (pre_mat, pre_ins, _) = memory.pre_dp[offset + q_idx - start];
                 let (post_mat, post_ins, _) = memory.post_dp[offset + q_idx - start];
@@ -643,21 +650,19 @@ impl super::PairHiddenMarkovModel {
                 if q_idx == qs.len() || r_idx == rs.len() {
                     continue;
                 }
-                let indel_scale = pre_scl[ad / block_size] + post_scl[(ad + 1) / block_size];
-                let mat_scale = match post_scl.get((ad + 2) / block_size) {
-                    Some(post) => pre_scl[ad / block_size] + post,
+                let indel_scale = pre_scl[ad / BLOCK_SIZE] + post_scl[(ad + 1) / BLOCK_SIZE];
+                let mat_scale = match post_scl.get((ad + 2) / BLOCK_SIZE) {
+                    Some(post) => pre_scl[ad / BLOCK_SIZE] + post,
                     None => 0f64,
                 };
                 let ins_prob = self.ins(qs[q_idx], (0 < q_idx).then(|| qs[q_idx - 1]));
                 let mat_prob = self.obs(rs[r_idx], qs[q_idx]);
                 let del_prob = self.del(rs[r_idx]);
                 let (from_mat, from_ins, from_del) = memory.pre_dp[offset + q_idx - start];
-                let after_mat = match memory.post_dp.get(memory.fr.idx(ad + 2, q_idx + 1)) {
-                    Some(x) => x.0,
-                    None => 0f64,
-                };
-                let after_ins = memory.post_dp[memory.fr.idx(ad + 1, q_idx + 1)].1;
-                let after_del = memory.post_dp[memory.fr.idx(ad + 1, q_idx)].2;
+                let fb = (0f64, 0f64, 0f64);
+                let (after_mat, _, _) = memory.fr.get(ad + 2, q_idx + 1, &memory.post_dp, fb);
+                let after_ins = memory.fr.get(ad + 1, q_idx + 1, &memory.post_dp, fb).1;
+                let after_del = memory.fr.get(ad + 1, q_idx, &memory.post_dp, fb).2;
                 // Mat, If possible.
                 if ad + 2 < rs.len() + qs.len() + 1 {
                     let prob = from_mat * self.mat_mat * mat_prob * after_mat;
@@ -719,16 +724,10 @@ impl super::PairHiddenMarkovModel {
     }
 }
 
-fn div_range(
-    ad: usize,
-    block_size: usize,
-    sum: f64,
-    fr: &FillingRegions,
-    dptable: &mut [(f64, f64, f64)],
-) {
-    let bucket = ad / block_size;
-    let b_start = bucket * block_size;
-    let b_end = ((bucket + 1) * block_size).min(fr.offsets.len());
+fn div_range(ad: usize, sum: f64, fr: &FillingRegions, dptable: &mut [(f64, f64, f64)]) {
+    let bucket = ad / BLOCK_SIZE;
+    let b_start = bucket * BLOCK_SIZE;
+    let b_end = ((bucket + 1) * BLOCK_SIZE).min(fr.offsets.len());
     let (start_offset, _, _) = fr.offsets[b_start];
     let (end_offset, start, end) = fr.offsets[b_end - 1];
     let end_offset = end_offset + end - start;
@@ -804,6 +803,7 @@ fn update_radius(
                     .max(MIN_RADIUS);
             }
         };
+        // let new_r = default;
         let new_r = current_radius;
         match op {
             Op::Mismatch | Op::Match => {
@@ -911,10 +911,29 @@ impl FillingRegions {
             total_cells,
         }
     }
-    fn idx(&self, ad: usize, qpos: usize) -> usize {
+    fn get<T: Copy>(&self, ad: usize, qpos: usize, dp: &[T], fallback: T) -> T {
         match self.offsets.get(ad) {
-            Some((offset, start, _end)) => offset + qpos - start,
-            None => 0,
+            Some(&(offset, start, end)) if (start..end).contains(&qpos) => {
+                dp[offset + qpos - start]
+            }
+            _ => fallback,
+        }
+    }
+    fn set<T: Copy>(&self, ad: usize, qpos: usize, dp: &mut [T], val: T) {
+        match self.offsets.get(ad) {
+            Some(&(offset, start, end)) if (start..end).contains(&qpos) => {
+                dp[offset + qpos - start] = val;
+            }
+            _ => {}
+        }
+    }
+
+    fn idx(&self, ad: usize, qpos: usize) -> Option<usize> {
+        match self.offsets.get(ad) {
+            Some(&(offset, start, end)) if (start..end).contains(&qpos) => {
+                Some(offset + qpos - start)
+            }
+            _ => None,
         }
     }
     fn update_by_radius(&mut self, radius: &[(usize, usize)], rlen: usize, qlen: usize) {
@@ -940,7 +959,7 @@ impl PairHiddenMarkovModelOnStrands {
         ops: &[Op],
         radius: usize,
         is_forward: bool,
-    ) -> Vec<f64> {
+    ) -> (Vec<f64>, f64) {
         match is_forward {
             true => self
                 .forward()
@@ -979,7 +998,6 @@ impl PairHiddenMarkovModelOnStrands {
             .map(|x| x.borrow().len())
             .max()
             .unwrap();
-        let block_size = 12;
         let ops = datapack.operations.par_iter();
         let seqs = datapack.sequences.par_iter();
         let direction = datapack.directions.par_iter();
@@ -993,13 +1011,19 @@ impl PairHiddenMarkovModelOnStrands {
                     .iter()
                     .map(|&qpos| (qpos, radius))
                     .collect();
-                let mut memory = Memory::new(block_size, rs.len(), qlen, radius);
+                let mut memory = Memory::new(rs.len(), qlen, radius);
                 let target = match direction {
                     true => self.forward(),
                     false => self.reverse(),
                 };
-                let _lk = target.dp_memory(rs, qs, &radius_range, &mut memory);
-                Some((memory, qs, *direction))
+                let lk = target.dp_memory(rs, qs, &radius_range, &mut memory);
+                let lk_2 =
+                    memory.post_dp[0].0.ln() + memory.post_scl.iter().map(|x| x.ln()).sum::<f64>();
+                if lk.is_finite() && lk_2.is_finite() {
+                    Some((memory, qs, *direction))
+                } else {
+                    None
+                }
             })
             .collect()
     }
@@ -1086,13 +1110,12 @@ impl PairHiddenMarkovModelOnStrands {
                 center_line.iter().map(|&qpos| (qpos, radius)).collect()
             })
             .collect();
-        let block_size = 12;
         let qmax = xss
             .iter()
             .map(|x| x.borrow().len())
             .max()
             .expect("Reads empty.");
-        let mut memory = Memory::new(block_size, draft.len(), qmax, radius);
+        let mut memory = Memory::new(draft.len(), qmax, radius);
         for t in 0..100 {
             let inactive = INACTIVE_TIME + (t * INACTIVE_TIME) % rs.len();
             let mut modif_table = vec![0f64; (rs.len() + 1) * NUM_ROW];
@@ -1106,8 +1129,10 @@ impl PairHiddenMarkovModelOnStrands {
                 assert_eq!(radius.len(), seq.borrow().len() + rs.len() + 1);
                 let m_lk = hmm.dp_memory(&rs, seq.borrow(), radius, &mut memory);
                 let mt = memory.modif_table.as_slice();
-                lk += m_lk;
-                modif_table.iter_mut().zip(mt).for_each(|(x, y)| *x += y);
+                if m_lk.is_finite() && mt.iter().all(|x| x.is_finite()) {
+                    lk += m_lk;
+                    modif_table.iter_mut().zip(mt).for_each(|(x, y)| *x += y);
+                }
             }
             modif_table
                 .iter_mut()
@@ -1120,11 +1145,12 @@ impl PairHiddenMarkovModelOnStrands {
                 .for_each(|x| *x = lk - 100f64);
             let changed_pos =
                 super::polish_by_modification_table(&mut rs, &modif_table, lk, inactive);
+            assert!(modif_table.iter().all(|x| x.is_finite()));
+            // eprintln!("CHANGES\t{t}\t{changed_pos:?}");
             let changed_pos: Vec<_> = changed_pos
                 .iter()
                 .map(|&(pos, op)| (pos, super::usize_to_edit_op(op)))
                 .collect();
-            // let ops_seq = opss.iter_mut().zip(xss.iter());
             let stream = radius_reads
                 .iter_mut()
                 .zip(xss)
@@ -1143,9 +1169,9 @@ impl PairHiddenMarkovModelOnStrands {
                     true => self.forward(),
                     false => self.reverse(),
                 };
-                *ops = hmm
-                    .align_antidiagonal_filling(&rs, xs, &memory.fr, &mut memory.pre_dp)
-                    .1;
+                let (_, new_ops) =
+                    hmm.align_antidiagonal_filling(&rs, xs, &memory.fr, &mut memory.pre_dp);
+                *ops = new_ops;
             }
             if changed_pos.is_empty() {
                 break;
@@ -1159,7 +1185,6 @@ type FBSlice<'a> = (&'a [(f64, f64, f64)], &'a [f64]);
 type FBTable = (Vec<(f64, f64, f64)>, Vec<f64>);
 #[derive(Debug, Clone)]
 struct Memory {
-    block_size: usize,
     modif_table: Vec<f64>,
     fr: FillingRegions,
     post_dp: Vec<(f64, f64, f64)>,
@@ -1169,13 +1194,12 @@ struct Memory {
 }
 
 impl Memory {
-    fn new(block_size: usize, rlen: usize, qlen: usize, radius: usize) -> Self {
+    fn new(rlen: usize, qlen: usize, radius: usize) -> Self {
         let max_rlen = 3 * rlen / 2;
         let fr = FillingRegions::with_capacity(rlen, qlen, radius);
         let dp_size = (max_rlen * qlen) * radius * 2;
         let ad_len = max_rlen + qlen;
         Self {
-            block_size,
             modif_table: Vec::with_capacity(max_rlen),
             fr,
             post_dp: Vec::with_capacity(dp_size),
@@ -1185,10 +1209,6 @@ impl Memory {
         }
     }
     fn initialize(&mut self, rlen: usize) {
-        self.pre_dp.iter_mut().for_each(|x| *x = (0f64, 0f64, 0f64));
-        self.post_dp
-            .iter_mut()
-            .for_each(|x| *x = (0f64, 0f64, 0f64));
         self.post_scl.clear();
         self.pre_scl.clear();
         self.modif_table.iter_mut().for_each(|x| *x = 0f64);
@@ -1277,7 +1297,6 @@ mod test {
     }
     #[test]
     fn lk_post_test() {
-        let block_size = 32;
         for i in 0..100 {
             let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(i);
             let template = gen_seq::generate_seq(&mut rng, 300);
@@ -1286,7 +1305,7 @@ mod test {
             let radius = 50;
             let seq = gen_seq::introduce_randomness(&template, &mut rng, &profile);
             let ops = crate::op::bootstrap_ops(template.len(), seq.len());
-            let (dptable, scale) = hmm.post(&template, &seq, &ops, radius, block_size);
+            let (dptable, scale) = hmm.post(&template, &seq, &ops, radius);
             let lk = post_lk(&dptable, &scale);
             let lk_f = hmm.likelihood(&template, &seq);
             assert!((lk - lk_f).abs() < 0.001, "{},{}", lk, lk_f);
@@ -1302,29 +1321,27 @@ mod test {
             let radius = 30;
             let qs = gen_seq::introduce_randomness(&rs, &mut rng, &profile);
             let ops = crate::op::bootstrap_ops(rs.len(), qs.len());
-            let block_size = 15;
-
             let filling_regions = filling_region(&ops, radius, rs.len(), qs.len());
-            let mut scaling = Vec::with_capacity(filling_regions.len() / block_size + 1);
+            let mut scaling = Vec::with_capacity(filling_regions.len() / BLOCK_SIZE + 1);
             let fr = FillingRegions::new(&filling_regions);
             let mut post_dp = vec![(0f64, 0f64, 0f64); fr.total_cells];
-            hmm.post_fill(&rs, &qs, &fr, &mut post_dp, &mut scaling, block_size);
+            hmm.post_fill(&rs, &qs, &fr, &mut post_dp, &mut scaling);
 
             let answer = hmm.backward(&rs, &qs);
-            let block_num = match (rs.len() + qs.len()) % block_size == 0 {
-                true => (rs.len() + qs.len()) / block_size + 1,
-                false => (rs.len() + qs.len()) / block_size + 1,
+            let block_num = match (rs.len() + qs.len()) % BLOCK_SIZE == 0 {
+                true => (rs.len() + qs.len()) / BLOCK_SIZE + 1,
+                false => (rs.len() + qs.len()) / BLOCK_SIZE + 1,
             };
             assert_eq!(scaling.len(), block_num);
-            for (ad, &(_ofs, start, end)) in fr.offsets.iter().enumerate().rev() {
-                let block = ad / block_size;
+            for (ad, &(ofs, start, end)) in fr.offsets.iter().enumerate().rev() {
+                let block = ad / BLOCK_SIZE;
                 for i in (start..end).rev() {
                     let j = ad - i;
                     if (j.max(i) - j.min(i)) > radius / 2 {
                         continue;
                     }
                     let scale: f64 = scaling.iter().skip(block).map(|x| x.ln()).sum();
-                    let (mat, ins, del) = post_dp[fr.idx(ad, i)];
+                    let (mat, ins, del) = post_dp[ofs + i - start];
                     let mat = mat.ln() + scale;
                     let ins = ins.ln() + scale;
                     let del = del.ln() + scale;
@@ -1354,24 +1371,23 @@ mod test {
             let radius = 30;
             let qs = gen_seq::introduce_randomness(&rs, &mut rng, &profile);
             let ops = crate::op::bootstrap_ops(rs.len(), qs.len());
-            let block_size = 15;
             let filling_regions = filling_region(&ops, radius, rs.len(), qs.len());
             let fr = FillingRegions::new(&filling_regions);
-            let mut scaling = Vec::with_capacity(filling_regions.len() / block_size + 3);
+            let mut scaling = Vec::with_capacity(filling_regions.len() / BLOCK_SIZE + 3);
             let mut pre_dp = vec![(0f64, 0f64, 0f64); fr.total_cells];
-            hmm.pre_fill(&rs, &qs, &fr, &mut pre_dp, &mut scaling, block_size);
+            hmm.pre_fill(&rs, &qs, &fr, &mut pre_dp, &mut scaling);
             let answer = hmm.forward(&rs, &qs);
-            let block_num = (qs.len() + rs.len()) / block_size + 1;
+            let block_num = (qs.len() + rs.len()) / BLOCK_SIZE + 1;
             assert_eq!(block_num, scaling.len());
-            for (ad, &(_ofs, start, end)) in fr.offsets.iter().enumerate().rev() {
-                let block = ad / block_size + 1;
+            for (ad, &(ofs, start, end)) in fr.offsets.iter().enumerate().rev() {
+                let block = ad / BLOCK_SIZE + 1;
                 for i in start..end {
                     let j = ad - i;
                     if (j.max(i) - j.min(i)) > radius / 2 {
                         continue;
                     }
                     let scale: f64 = scaling.iter().take(block).map(|x| x.ln()).sum();
-                    let (mat, ins, del) = pre_dp[fr.idx(ad, i)];
+                    let (mat, ins, del) = pre_dp[ofs + i - start];
                     let mat = mat.ln() + scale;
                     let ins = ins.ln() + scale;
                     let del = del.ln() + scale;
@@ -1402,7 +1418,9 @@ mod test {
             let radius = 50;
             let seq = gen_seq::introduce_randomness(&template, &mut rng, &profile);
             let ops = crate::op::bootstrap_ops(template.len(), seq.len());
-            let modif_table = hmm.modification_table_antidiagonal(&template, &seq, &ops, radius);
+            let modif_table = hmm
+                .modification_table_antidiagonal(&template, &seq, &ops, radius)
+                .0;
             let mut mod_version = template.clone();
             // Mutation error
             let query = &seq;

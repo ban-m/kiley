@@ -140,11 +140,11 @@ impl std::fmt::Display for PairHiddenMarkovModel {
             "DEL:{:.3}\t{:.3}\t{:.3}",
             self.del_mat, self.del_ins, self.del_del
         )?;
-        for obs in self.mat_emit.chunks_exact(4) {
+        for obs in self.mat_emit.chunks(4) {
             let [a, c, g, t] = [obs[0], obs[1], obs[2], obs[3]];
             writeln!(f, "Obs:{a:.3}\t{c:.3}\t{g:.3}\t{t:.3}")?;
         }
-        for (i, obs) in self.ins_emit.chunks_exact(4).enumerate() {
+        for (i, obs) in self.ins_emit.chunks(4).enumerate() {
             let [a, c, g, t] = [obs[0], obs[1], obs[2], obs[3]];
             write!(f, "Ins:{a:.3}\t{c:.3}\t{g:.3}\t{t:.3}")?;
             if i < 4 {
@@ -164,6 +164,17 @@ pub(crate) enum State {
 
 impl std::default::Default for PairHiddenMarkovModel {
     fn default() -> Self {
+        // let mat = (0.973, 0.011, 0.015);
+        // let ins = (0.688, 0.256, 0.056);
+        // let del = (0.664, 0.075, 0.262);
+        // let mat_emits = [
+        //     0.985, 0.005, 0.005, 0.005, 0.005, 0.985, 0.006, 0.005, 0.006, 0.005, 0.983, 0.006,
+        //     0.005, 0.005, 0.005, 0.984,
+        // ];
+        // let ins_emits = [
+        //     0.255, 0.250, 0.234, 0.262, 0.267, 0.257, 0.241, 0.235, 0.265, 0.227, 0.268, 0.240,
+        //     0.271, 0.240, 0.249, 0.241, 0.174, 0.174, 0.478, 0.174,
+        // ];
         let mat = (0.96, 0.02, 0.02);
         let ins = (0.85, 0.10, 0.05);
         let del = (0.85, 0.10, 0.05);
@@ -515,7 +526,7 @@ impl DPTable {
 // In a desirable case, it is exactly zero, but as a matter of fact,
 // the likelihood is sometimes wobble between very small values,
 // so this "min-requirement" is nessesarry.
-const MIN_UP: f64 = 0.00001;
+const MIN_UP: f64 = 0.1f64;
 
 pub(crate) fn polish_by_modification_table(
     template: &mut Vec<u8>,
@@ -536,7 +547,9 @@ pub(crate) fn polish_by_modification_table(
             .enumerate()
             .max_by(|x, y| (x.1).partial_cmp(y.1).unwrap())
             .unwrap();
-        if current_lk + MIN_UP < lk && pos < orig_len {
+        let is_same_mut = op < 4 && b"ACGT"[op] == template[pos];
+        if current_lk + MIN_UP < lk && pos < orig_len && !is_same_mut {
+            // eprintln!("FIND\t{current_lk}\t{lk}\t{pos}\t{op}");
             changed_positions.push((pos, op));
             if op < 4 {
                 // Mutateion.
