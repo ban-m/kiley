@@ -1197,7 +1197,7 @@ impl Memory {
     fn new(rlen: usize, qlen: usize, radius: usize) -> Self {
         let max_rlen = 3 * rlen / 2;
         let fr = FillingRegions::with_capacity(rlen, qlen, radius);
-        let dp_size = (max_rlen * qlen) * radius * 2;
+        let dp_size = (max_rlen + qlen) * radius * 2;
         let ad_len = max_rlen + qlen;
         Self {
             modif_table: Vec::with_capacity(max_rlen),
