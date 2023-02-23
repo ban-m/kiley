@@ -766,8 +766,8 @@ fn combine_scaling_factors(pre_scl: &[f64], post_scl: &[f64]) -> (f64, Vec<f64>)
     (max_scale, combined_scl)
 }
 
-const INACTIVE_TIME: usize = 4;
-const MIN_RADIUS: usize = 10;
+const INACTIVE_TIME: usize = 3;
+const MIN_RADIUS: usize = 8;
 const RAD_SCALE: usize = 2;
 use crate::op::Edit;
 // TODO: Has a bug? Too small MIN_RADIUS?
@@ -803,7 +803,6 @@ fn update_radius(
                     .max(MIN_RADIUS);
             }
         };
-        // let new_r = default;
         let new_r = current_radius;
         match op {
             Op::Mismatch | Op::Match => {
