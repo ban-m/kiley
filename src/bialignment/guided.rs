@@ -922,7 +922,7 @@ pub fn polish_until_converge_with_take<T, O>(
 ) -> Vec<u8>
 where
     T: std::borrow::Borrow<[u8]>,
-    O: std::borrow::BorrowMut<Vec<Op>>,
+    O: std::borrow::BorrowMut<Vec<Op>> + std::hash::Hash,
 {
     let take = take.min(xs.len());
     let mut template = template.to_vec();

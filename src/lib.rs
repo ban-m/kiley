@@ -194,3 +194,33 @@ impl std::convert::From<LogSumExp> for f64 {
         accum.ln() + max
     }
 }
+
+// // Queue to cache sequences (used to check the loops in consensus.)
+// const QUEUE_SIZE: usize = 5;
+// #[derive(Debug, Clone, Default)]
+// struct FixedQueue {
+//     hash_values: [u64; QUEUE_SIZE],
+//     filled: usize,
+// }
+
+// use std::hash::{Hash, Hasher};
+// impl FixedQueue {
+//     fn push<H: Hash>(&mut self, elm: H) {
+//         let slot = self.filled % QUEUE_SIZE;
+//         use std::collections::hash_map::DefaultHasher;
+//         let mut hasher = DefaultHasher::new();
+//         elm.hash(&mut hasher);
+//         self.hash_values[slot] = hasher.finish();
+//         self.filled += 1;
+//     }
+//     fn contains<H: Hash>(&self, elm: H) -> bool {
+//         use std::collections::hash_map::DefaultHasher;
+//         let mut hasher = DefaultHasher::new();
+//         elm.hash(&mut hasher);
+//         let hash_value = hasher.finish();
+//         self.hash_values
+//             .iter()
+//             .take(self.filled)
+//             .any(|&x| x == hash_value)
+//     }
+// }

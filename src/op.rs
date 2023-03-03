@@ -1,5 +1,5 @@
 /// Alignment operations (Match, Mismatch, Ins, Del).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Op {
     Mismatch,
     Match,

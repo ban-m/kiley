@@ -480,7 +480,7 @@ impl super::PairHiddenMarkovModel {
     ) -> Vec<u8>
     where
         T: std::borrow::Borrow<[u8]>,
-        O: std::borrow::BorrowMut<Vec<Op>>,
+        O: std::borrow::BorrowMut<Vec<Op>> + std::hash::Hash,
     {
         let &super::HMMPolishConfig {
             radius,
@@ -1091,7 +1091,7 @@ impl PairHiddenMarkovModelOnStrands {
     ) -> Vec<u8>
     where
         T: std::borrow::Borrow<[u8]>,
-        O: std::borrow::BorrowMut<Vec<Op>>,
+        O: std::borrow::BorrowMut<Vec<Op>> + std::hash::Hash,
     {
         let &super::HMMPolishConfig {
             radius,
@@ -1114,6 +1114,7 @@ impl PairHiddenMarkovModelOnStrands {
             .map(|x| x.borrow().len())
             .max()
             .expect("Reads empty.");
+        // let mut hash_values = crate::FixedQueue::default();
         let mut memory = Memory::new(draft.len(), qmax, radius);
         for t in 0..100 {
             let inactive = INACTIVE_TIME + (t * INACTIVE_TIME) % rs.len();
@@ -1145,7 +1146,19 @@ impl PairHiddenMarkovModelOnStrands {
             let changed_pos =
                 super::polish_by_modification_table(&mut rs, &modif_table, lk, inactive);
             assert!(modif_table.iter().all(|x| x.is_finite()));
-            // eprintln!("CHANGES\t{t}\t{changed_pos:?}");
+            {
+                for &(p, u) in changed_pos.iter() {
+                    let now = modif_table[p * NUM_ROW + u];
+                    let diff = now - lk;
+                    let seq: String = rs
+                        .iter()
+                        .skip(p.saturating_sub(3))
+                        .take(6)
+                        .map(|x| *x as char)
+                        .collect();
+                    trace!("CHANGE\t{t}\t{p}\t{u}\t{now:.1}\t{diff:.1}\t{seq}");
+                }
+            }
             let changed_pos: Vec<_> = changed_pos
                 .iter()
                 .map(|&(pos, op)| (pos, super::usize_to_edit_op(op)))
@@ -1175,6 +1188,11 @@ impl PairHiddenMarkovModelOnStrands {
             if changed_pos.is_empty() {
                 break;
             }
+            // if changed_pos.is_empty() || hash_values.contains((&rs, &opss)) {
+            //     break;
+            // } else {
+            //     hash_values.push((&rs, &opss));
+            // }
         }
         rs
     }
