@@ -7,6 +7,9 @@ Email: ban-m@g.ecc.u-tokyo.ac.jp
 
 ## Overview
 
+![GHAPassing](https://github.com/ban-m/kiley/actions/workflows/ci.yml/badge.svg)
+
+
 In this crate, I implement
 
 - (Banded-)Ternary alignment with edit distance ,
