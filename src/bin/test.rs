@@ -1,6 +1,12 @@
+// Benchmarking the polishing methods implemented in the kiley.
+// It run the different algorithm on the same reads & contig sets,
+// output the error rate of the contig, the error rate of the reads,
+// the elapsed time and the errors after polishing.
+use kiley::gen_seq::Generate;
+use rand::SeedableRng;
+use rand_xoshiro::Xoshiro256StarStar;
 use std::time::Duration;
 
-use kiley::gen_seq::Generate;
 macro_rules! elapsed {
     ($a:expr) => {{
         let start = std::time::Instant::now();
@@ -10,15 +16,14 @@ macro_rules! elapsed {
     }};
 }
 
-fn main() {
-    use rand::SeedableRng;
-    use rand_xoshiro::Xoshiro256StarStar;
-    let profile = kiley::gen_seq::Profile {
-        sub: 0.03,
-        del: 0.03,
-        ins: 0.03,
-    };
+// The error rate of the reads.
+const READ_ERROR_PROFILE: kiley::gen_seq::Profile = kiley::gen_seq::Profile {
+    sub: 0.03,
+    del: 0.03,
+    ins: 0.03,
+};
 
+fn main() {
     let len = 1_000;
     let seed = 2;
     let is_anti = std::env::args().nth(1) == Some("anti".to_string());
@@ -28,6 +33,7 @@ fn main() {
         del: 0.01,
         ins: 0.01,
     };
+    let profile = READ_ERROR_PROFILE;
     let mut diff = 0;
     for seed in 0..seed {
         let coverage = 20;

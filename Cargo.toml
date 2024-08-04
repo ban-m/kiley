@@ -7,16 +7,15 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-clap = "2.33"
 rand = "0.8.5"
 rand_xoshiro = "0.6.0"
-log = "0.4.14"
-bytecount = "0.6.2"
-env_logger = "0.9.0"
-rayon = "1.5.3"
+log = "0.4.22"
+bytecount = "0.6.8"
+env_logger = "0.11.5"
+rayon = "1.10.0"
 edlib_sys = {git = "https://github.com/ban-m/edlib-sys.git", branch = "master"}
 serde = {version = "1.0", features = ["derive"]}
 bio_utils = {git = "https://github.com/ban-m/bio_utils.git", version = "0.3.0"}
 
 [dev-dependencies]
-rayon = "1.5.3"
+rayon = "1.10.0"

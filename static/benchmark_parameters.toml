@@ -1,0 +1,15 @@
+[algorithm_param]
+radius = 10
+
+[sim_param]
+length = 1000
+
+[contig]
+sub = 0.01
+del = 0.01
+ins = 0.01
+
+[read]
+sub = 0.02
+del = 0.02
+ins = 0.02
