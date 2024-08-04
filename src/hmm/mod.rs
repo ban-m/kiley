@@ -100,17 +100,14 @@ impl crate::gen_seq::Generate for PairHiddenMarkovModel {
                 .unwrap();
             match current {
                 Op::Match => {
-                    let base = BASE_TABLE[*seq.next().unwrap() as usize] as usize;
+                    let base = BASE_TABLE[*seq.next().unwrap() as usize];
                     let distr = &self.mat_emit[4 * base..4 * base + 4];
                     let pos = *[0, 1, 2, 3].choose_weighted(rng, |&i| distr[i]).unwrap();
                     gen.push(b"ACGT"[pos]);
                 }
                 Op::Ins => {
                     assert!(seq.next().is_some());
-                    let prev = gen
-                        .last()
-                        .map(|b| BASE_TABLE[*b as usize] as usize)
-                        .unwrap_or(4);
+                    let prev = gen.last().map(|b| BASE_TABLE[*b as usize]).unwrap_or(4);
                     let distr = &self.ins_emit[4 * prev..4 * prev + 4];
                     let pos = *[0, 1, 2, 3].choose_weighted(rng, |&i| distr[i]).unwrap();
                     gen.push(b"ACGT"[pos]);
@@ -178,14 +175,14 @@ impl std::default::Default for PairHiddenMarkovModel {
         let mat = (0.96, 0.02, 0.02);
         let ins = (0.85, 0.10, 0.05);
         let del = (0.85, 0.10, 0.05);
-        let mat_emits = vec![
+        let mat_emits = [
             vec![0.97, 0.01, 0.01, 0.01],
             vec![0.01, 0.97, 0.01, 0.01],
             vec![0.01, 0.01, 0.97, 0.01],
             vec![0.01, 0.01, 0.01, 0.97],
         ]
         .concat();
-        let ins_emits = vec![vec![0.25; 4]; 5].concat();
+        let ins_emits = [[0.25; 4]; 5].concat();
         Self::new(mat, ins, del, &mat_emits, &ins_emits)
     }
 }
@@ -327,7 +324,7 @@ impl PairHiddenMarkovModel {
 
     fn obs(&self, r: u8, q: u8) -> f64 {
         let index = (BASE_TABLE[r as usize] << 2) | BASE_TABLE[q as usize];
-        self.mat_emit[index as usize]
+        self.mat_emit[index]
     }
     const fn del(&self, _r: u8) -> f64 {
         1f64
@@ -335,7 +332,7 @@ impl PairHiddenMarkovModel {
     fn ins(&self, q: u8, prev: Option<u8>) -> f64 {
         let prev = prev.unwrap_or(4);
         let index = (BASE_TABLE[prev as usize] << 2) | BASE_TABLE[q as usize];
-        self.ins_emit[index as usize]
+        self.ins_emit[index]
     }
     fn to_mat(&self, (mat, ins, del): (f64, f64, f64)) -> f64 {
         mat * self.mat_mat + ins * self.ins_mat + del * self.del_mat
@@ -682,7 +679,7 @@ pub mod tests {
         let (lk, ops) = phmm.align(b"ATGCCGCACAGTCGAT", b"ATCCGC");
         eprintln!("{:?}\t{:.3}", ops, lk);
         use Op::*;
-        let answer = vec![vec![Match; 2], vec![Del], vec![Match; 4], vec![Del; 9]].concat();
+        let answer = [vec![Match; 2], vec![Del], vec![Match; 4], vec![Del; 9]].concat();
         assert_eq!(ops, answer);
     }
     #[test]

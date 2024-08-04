@@ -71,7 +71,7 @@ impl PairHiddenMarkovModel {
                     dptable.get(i - 1, j, State::Match) + log_ins_open,
                     dptable.get(i - 1, j, State::Del) + log_ins_from_del,
                     dptable.get(i - 1, j, State::Ins) + log_ins_ext,
-                ) + log_ins_emit[x as usize];
+                ) + log_ins_emit[x];
                 *dptable.get_mut(i, j, State::Ins) = ins;
             }
         }
@@ -211,7 +211,7 @@ impl PairHiddenMarkovModel {
                 *dptable.get_mut(i, j, State::Ins) = ins;
             }
         }
-        let (max_state, max_lk) = vec![State::Match, State::Ins, State::Del]
+        let (max_state, max_lk) = [State::Match, State::Ins, State::Del]
             .iter()
             .map(|&s| (s, dptable.get(xs.len(), ys.len(), s)))
             .max_by(|x, y| (x.1).partial_cmp(&(y.1)).unwrap())
@@ -256,7 +256,7 @@ impl PairHiddenMarkovModel {
                     j -= 1;
                 }
                 State::Ins => {
-                    let ins_lk = lk - log_ins_emit[x as usize];
+                    let ins_lk = lk - log_ins_emit[x];
                     let mat = dptable.get(i - 1, j, State::Match) + log_ins_open;
                     let del = dptable.get(i - 1, j, State::Del) + log_ins_from_del;
                     let ins = dptable.get(i - 1, j, State::Ins) + log_ins_ext;

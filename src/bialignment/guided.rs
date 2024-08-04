@@ -1273,7 +1273,7 @@ pub mod test {
             let pad = crate::gen_seq::generate_seq(&mut rng, 10);
             let prof = crate::gen_seq::PROFILE;
             let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
-            let xs = vec![pad.clone(), xs, pad].concat();
+            let xs = [pad.clone(), xs, pad].concat();
             let (score, ops) = crate::bialignment::global(&xs, &ys, mat, mism, open, ext);
             let (score2, ops2) = infix_guided(&xs, &ys, &ops, 10, param);
             let (xr, ar, yr) = crate::op::recover(&xs, &ys, &ops2);
@@ -1300,8 +1300,8 @@ pub mod test {
             let pad = crate::gen_seq::generate_seq(&mut rng, 10);
             let prof = crate::gen_seq::PROFILE;
             let ys = crate::gen_seq::introduce_randomness(&xs, &mut rng, &prof);
-            let xs = vec![pad.clone(), xs].concat();
-            let ys = vec![ys, pad.clone()].concat();
+            let xs = [pad.clone(), xs].concat();
+            let ys = [ys, pad.clone()].concat();
             let (score, ops) = crate::bialignment::global(&xs, &ys, mat, mism, open, ext);
             let (score2, ops2) = overlap_guided(&xs, &ys, &ops, 10, param);
             let (xr, ar, yr) = crate::op::recover(&xs, &ys, &ops2);

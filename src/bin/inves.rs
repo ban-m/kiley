@@ -24,7 +24,7 @@ fn main() {
         .map(std::io::BufReader::new)
         .unwrap()
         .lines()
-        .filter_map(|x| x.ok())
+        .map_while(Result::ok)
         .map(|line| {
             let fields: Vec<_> = line.split('\t').collect();
             fields[3].as_bytes().to_vec()

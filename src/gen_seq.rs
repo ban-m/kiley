@@ -153,12 +153,10 @@ pub fn introduce_errors<T: rand::Rng>(
     ins: usize,
 ) -> Vec<u8> {
     // Alignment operations.
-    let mut operations = vec![
-        vec![Op::Match; seq.len() - sub - del],
+    let mut operations = [vec![Op::Match; seq.len() - sub - del],
         vec![Op::Mismatch; sub],
         vec![Op::Del; del],
-        vec![Op::Ins; ins],
-    ]
+        vec![Op::Ins; ins]]
     .concat();
     operations.shuffle(rng);
     let mut res = vec![];

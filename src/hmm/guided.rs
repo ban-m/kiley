@@ -511,7 +511,10 @@ impl super::PairHiddenMarkovModel {
         if 0.0001 < (lk - lk2).abs() || lk.is_nan() || lk2.is_nan() {
             trace!("{},{}", lk, lk2);
             trace!("MODEL\t{}", self);
-            let ops: String = ops.iter().map(|x| format!("{}", x)).collect();
+            let ops: String = ops.iter().fold(String::new(), |mut x, y| {
+                x += &format!("{y}");
+                x
+            });
             trace!("OPS\t{}", ops);
             trace!("REF\t{}\t{}", String::from_utf8_lossy(rs), rs.len());
             trace!("QRY\t{}\t{}", String::from_utf8_lossy(qs), qs.len());
@@ -850,8 +853,8 @@ impl super::PairHiddenMarkovModel {
                 let (before, _, _) = mem.pre.get(i, j);
                 let (after, _, _) = mem.post.get(i, j);
                 let lk = (before * after).max(std::f64::MIN_POSITIVE).ln() + scale;
-                let refr = BASE_TABLE[r as usize] as usize;
-                let query = BASE_TABLE[q as usize] as usize;
+                let refr = BASE_TABLE[r as usize];
+                let query = BASE_TABLE[q as usize];
                 mat_probs[refr][query].push(lk);
             }
         }
@@ -878,8 +881,8 @@ impl super::PairHiddenMarkovModel {
                 let (_, before, _) = mem.pre.get(i, j);
                 let (_, after, _) = mem.post.get(i, j - 1);
                 let lk = (before * after).max(std::f64::MIN_POSITIVE).ln() + scale;
-                let prev = BASE_TABLE[prev as usize] as usize;
-                let output = BASE_TABLE[q as usize] as usize;
+                let prev = BASE_TABLE[prev as usize];
+                let output = BASE_TABLE[q as usize];
                 ins_probs[prev][output].push(lk);
             }
         }
@@ -1096,9 +1099,9 @@ impl super::PairHiddenMarkovModelOnStrands {
             })
             .collect()
     }
-    pub fn fit_guided_par_multiple<'a, T, O>(
+    pub fn fit_guided_par_multiple<T, O>(
         &mut self,
-        training_datapack: &[TrainingDataPack<'a, T, O>],
+        training_datapack: &[TrainingDataPack<'_, T, O>],
         radius: usize,
     ) where
         T: std::borrow::Borrow<[u8]> + Sync + Send,
@@ -1279,7 +1282,7 @@ pub mod tests {
         let (lk, ops) = model.align_guided_bootstrap(b"ATGCCGCACAGTCGAT", b"ATCCGC", 5);
         eprintln!("{:?}\t{:.3}", ops, lk);
         use Op::*;
-        let answer = vec![vec![Match; 2], vec![Del], vec![Match; 4], vec![Del; 9]].concat();
+        let answer = [vec![Match; 2], vec![Del], vec![Match; 4], vec![Del; 9]].concat();
         assert_eq!(ops, answer);
         let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198);
         let template = gen_seq::generate_seq(&mut rng, 300);
@@ -1574,8 +1577,8 @@ pub mod tests {
         let head = gen_seq::generate_seq(&mut rng, 100);
         let repeat = gen_seq::generate_seq(&mut rng, 200);
         let tail = gen_seq::generate_seq(&mut rng, 100);
-        let template = vec![head.clone(), repeat.clone(), tail.clone()].concat();
-        let answer = vec![head, repeat.clone(), repeat, tail].concat();
+        let template = [head.clone(), repeat.clone(), tail.clone()].concat();
+        let answer = [head, repeat.clone(), repeat, tail].concat();
         let profile = gen_seq::PROFILE;
         let seqs: Vec<_> = (0..20)
             .map(|_| gen_seq::introduce_randomness(&answer, &mut rng, &profile))

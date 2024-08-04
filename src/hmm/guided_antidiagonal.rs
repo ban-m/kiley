@@ -267,7 +267,6 @@ impl super::PairHiddenMarkovModel {
             scaling.push(1f64);
         }
         let mut sum = 3f64;
-        let fr = fr;
         for (ad, &(ofs, start, end)) in fr.offsets.iter().enumerate().rev().skip(1) {
             for q_idx in (start..end).rev() {
                 let r_idx = ad - q_idx;
@@ -1026,9 +1025,9 @@ impl PairHiddenMarkovModelOnStrands {
             })
             .collect()
     }
-    pub fn fit_antidiagonal_par_multiple<'a, T, O>(
+    pub fn fit_antidiagonal_par_multiple<T, O>(
         &mut self,
-        training_datapack: &[TrainingDataPack<'a, T, O>],
+        training_datapack: &[TrainingDataPack<'_, T, O>],
         radius: usize,
     ) where
         T: std::borrow::Borrow<[u8]> + Sync + Send,
@@ -1265,7 +1264,7 @@ mod test {
         assert_eq!(ops, vec![Op::Ins; 4]);
         let (_lk, ops) = model.align_antidiagonal_bootstrap(b"ATGCCGCACAGTCGAT", b"ATCCGC", 5);
         use Op::*;
-        let answer = vec![vec![Match; 2], vec![Del], vec![Match; 4], vec![Del; 9]].concat();
+        let answer = [vec![Match; 2], vec![Del], vec![Match; 4], vec![Del; 9]].concat();
         assert_eq!(ops, answer);
         let mut rng: Xoshiro256StarStar = SeedableRng::seed_from_u64(32198);
         let template = gen_seq::generate_seq(&mut rng, 300);
